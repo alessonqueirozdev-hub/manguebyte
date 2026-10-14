@@ -1,0 +1,4 @@
+# Golden images are compared pixel by pixel and dumps byte by byte: keep
+# both exactly as written, whatever the platform's line endings.
+*.png binary
+*.txt text eol=lf

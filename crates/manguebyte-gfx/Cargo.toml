@@ -12,7 +12,18 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-manguebyte-core.workspace = true
+# The rasteriser of the first phase (ADR 0007). It is used only inside
+# `src/raster/skia.rs`; no type of it appears in a public signature. Its
+# features are spelled out so that a build without SIMD (for measuring how
+# far pixels may differ between processors) only has to drop one word.
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd", "png-format"] }
+# Text (ADR 0007): outlines, metrics and variations from `skrifa`, shaping
+# from `harfrust`, both used only inside `src/text/`. They are pinned to the
+# last pair built on `read-fonts` 0.43: `read-fonts` 0.45, which `skrifa`
+# 0.48 and `harfrust` 0.14 need, depends on `yoke`, whose licence
+# (Unicode-3.0) is outside the project's list.
+skrifa = { version = "=0.46.2", default-features = false, features = ["std"] }
+harfrust = { version = "=0.13.3", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

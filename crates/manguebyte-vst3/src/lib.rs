@@ -53,7 +53,10 @@
 //! VST 3 plugin is subject to Steinberg's trademark and logo guidelines.
 
 mod factory;
+mod handler;
+mod run_loop;
 mod text;
+mod view;
 mod wrapper;
 
 pub use factory::plugin_factory;

@@ -1004,6 +1004,100 @@ fn state_survives_a_round_trip_through_host_streams() {
     );
 }
 
+/// The automation points of one block, handed to the plugin by a host
+/// whose main thread stores a value into the level parameter at the moment
+/// the plugin asks how many queues there are: after it has read the
+/// parameters to announce their changes to itself, and before it stores
+/// the host's values.
+struct Meddling {
+    params: Arc<LevelParams>,
+    level: Cell<Option<f32>>,
+}
+
+impl Class for Meddling {
+    type Interfaces = (IParameterChanges,);
+}
+
+impl IParameterChangesTrait for Meddling {
+    unsafe fn getParameterCount(&self) -> i32 {
+        if let Some(level) = self.level.take() {
+            self.params.level.set(level);
+        }
+        0
+    }
+    unsafe fn getParameterData(&self, _index: i32) -> *mut IParamValueQueue {
+        ptr::null_mut()
+    }
+    unsafe fn addParameterData(&self, _id: *const u32, _index: *mut i32) -> *mut IParamValueQueue {
+        ptr::null_mut()
+    }
+}
+
+/// A value the main thread stores while a block is being prepared is not
+/// undone by the value announced a moment earlier, and the plugin hears
+/// about it on the next block.
+#[test]
+fn a_value_stored_while_a_block_is_prepared_is_kept_and_announced() {
+    let (_guard, host) = level_host();
+    // Changed outside the host, as a state load or an editor would.
+    level_params().level.set(0.5);
+    let meddling = ComWrapper::new(Meddling {
+        params: level_params(),
+        level: Cell::new(Some(3.0)),
+    });
+    let mut main = stereo(1.0, 8);
+    let mut channels: Vec<*mut f32> = main.iter_mut().map(|c| c.as_mut_ptr()).collect();
+    let bus = vst::AudioBusBuffers {
+        numChannels: 2,
+        silenceFlags: 0,
+        __field0: vst::AudioBusBuffers__type0 {
+            channelBuffers32: channels.as_mut_ptr(),
+        },
+    };
+    let (mut inputs, mut outputs) = ([bus], [bus]);
+    let mut data = vst::ProcessData {
+        processMode: vst::ProcessModes_::kRealtime as i32,
+        symbolicSampleSize: vst::SymbolicSampleSizes_::kSample32 as i32,
+        numSamples: 8,
+        numInputs: 1,
+        numOutputs: 1,
+        inputs: inputs.as_mut_ptr(),
+        outputs: outputs.as_mut_ptr(),
+        inputParameterChanges: meddling
+            .as_com_ref::<IParameterChanges>()
+            .unwrap()
+            .as_ptr(),
+        outputParameterChanges: ptr::null_mut(),
+        inputEvents: ptr::null_mut(),
+        outputEvents: ptr::null_mut(),
+        processContext: ptr::null_mut(),
+    };
+    assert_eq!(unsafe { host.processor.process(&mut data) }, kResultOk);
+    // The block was announced the value read before the store.
+    assert_eq!(main[0], vec![0.5; 8]);
+    assert_eq!(
+        level_params().level.value(),
+        3.0,
+        "the newer value was undone by the announced one"
+    );
+    // And the next block is told about the newer one.
+    let processed = host.process(&mut stereo(1.0, 8), 8, None, vec![], vec![], None);
+    assert_eq!(processed.output[0], vec![3.0; 8]);
+    assert_eq!(processed.heap_calls, 0);
+}
+
+#[test]
+fn a_plugin_without_an_editor_offers_no_view() {
+    let (_guard, host) = level_host();
+    unsafe {
+        let editor = vst::ViewType::kEditor;
+        assert!(host.controller.createView(editor).is_null());
+        assert!(host.controller.createView(ptr::null()).is_null());
+        // The handler is accepted, and taken away again, all the same.
+        assert_eq!(host.controller.setComponentHandler(ptr::null_mut()), kResultOk);
+    }
+}
+
 #[test]
 fn a_block_with_no_audio_still_delivers_parameter_changes() {
     let (_guard, host) = level_host();

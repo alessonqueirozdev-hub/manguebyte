@@ -1,0 +1,8 @@
+fill rect(0 0 48 32) solid(#1c1f24ff)
+fill rect(2 2 8 6) solid(#e8e8e8ff)
+fill rect(12.25 2.5 7.5 5.75) solid(#ff7a00ff)
+fill rounded_rect(22 2 12 8 radii 3 3 3 3) solid(#3d8bffff)
+fill circle(41 6 4.5) solid(#41d27aff)
+fill arc(7 18 6 0.7853982 3.926991) solid(#ffffffc8)
+fill path(evenodd M 22 14 L 26.114496 26.663118 L 15.342604 18.836882 L 28.657396 18.836882 L 17.8855 26.663116 Z) solid(#ffd23fff)
+fill path(nonzero M 31 30 Q 35 12 39 30 C 41 14 47 34 46 16 Z) solid(#c850ffdc)

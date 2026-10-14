@@ -11,12 +11,38 @@
 //!   while the plugin is not processing.
 //! - `params.flush` is called on the audio thread while the plugin is
 //!   active, in place of `process`, and on the main thread otherwise.
-//! - Everything else is called on the main thread.
+//! - Everything else is called on the main thread, the editor's extensions
+//!   (`gui`, `timer-support`, `posix-fd-support`) and `on_main_thread`
+//!   included.
 //!
 //! So the audio-side state ([`Audio`]) is only ever touched by one thread at
 //! a time, and lives in an `UnsafeCell`. Everything the main thread needs
 //! while audio runs goes through the parameters, which are atomics, or
-//! through the few atomics on [`Instance`].
+//! through the few atomics on [`Instance`]. The editor's state
+//! ([`Gui`](crate::gui::Gui)) is the main thread's alone.
+//!
+//! # Telling the host what changed
+//!
+//! Before each block, and in `flush`, the host is sent what it did not do
+//! itself: for each parameter, the start of a gesture made in the editor,
+//! the parameter's value if it is not the one the host knows, and the end of
+//! the gesture, in that order. Gestures arrive as counts
+//! ([`GestureCounters`]), so the editor never waits and nothing between the
+//! editor and the audio side can fill up.
+//!
+//! The host's output list can: CLAP lets `try_push` refuse an event. What
+//! the host has been sent is recorded only once it took it, so a refused
+//! begin, value or end is sent again on the next block or flush, in the
+//! same order, and the host never sees an end without its begin or a
+//! gesture's value outside it. Until then, gestures on that parameter merge
+//! into one, and only the latest value is sent.
+//!
+//! A value the host set, by automation, `flush` or loading state, is never
+//! sent back to it: what a parameter holds after storing a host's value is
+//! worked out with [`Param::stored_plain`] rather than read back, so an edit
+//! the editor stores at that moment still counts as news; and after the
+//! host was asked to read every value again, the values it was asked to
+//! read count as known, gestures or not.
 
 use std::any::TypeId;
 use std::cell::UnsafeCell;
@@ -24,17 +50,20 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::*;
 use clap_sys::ext::audio_ports::*;
+use clap_sys::ext::gui::CLAP_EXT_GUI;
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_latency};
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
+use clap_sys::ext::posix_fd_support::CLAP_EXT_POSIX_FD_SUPPORT;
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
+use clap_sys::ext::timer_support::CLAP_EXT_TIMER_SUPPORT;
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
 use clap_sys::host::clap_host;
@@ -49,9 +78,10 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
-use manguebyte_plugin::{
-    ParamWatcher, Plugin, PluginKind, apply_param_events, load_state, save_state,
-};
+use manguebyte_plugin::editor::{GestureCounters, GestureReader};
+use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state};
+
+use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
 
 /// Most events delivered to the plugin in one block. Extra events are
 /// dropped rather than allocated for.
@@ -65,7 +95,7 @@ const MAX_STATE_BYTES: usize = 64 << 20;
 ///
 /// A panic must never cross into the host: unwinding through C is not
 /// defined, and aborting would take the user's session with it.
-fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
+pub(crate) fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
     catch_unwind(AssertUnwindSafe(work)).unwrap_or(fallback)
 }
 
@@ -268,31 +298,50 @@ unsafe extern "C" fn factory_create<P: Plugin>(
         if params.validate().is_err() {
             return ptr::null();
         }
+        // Asked once, right after the parameters, as the contract says.
+        let editor = plugin.editor();
         let mut ids = Vec::with_capacity(params.len());
         params.visit(&mut |param| ids.push(param.param_id()));
+
+        // Gestures are counted only for a plugin with an editor; without
+        // one, nothing here differs from a plugin that never had one.
+        let (gui, gestures) = match editor {
+            Some(spec) => {
+                let counters = Arc::new(GestureCounters::new(ids.len()));
+                let gestures = Gestures::new(GestureReader::new(Arc::clone(&counters)));
+                (Some(Gui::new(spec, counters)), Some(gestures))
+            }
+            None => (None, None),
+        };
 
         let instance = Box::into_raw(Box::new(Instance::<P> {
             clap: clap_plugin {
                 desc: descriptor::<P>(),
                 plugin_data: ptr::null_mut(),
-                init: Some(plugin_init),
+                init: Some(plugin_init::<P>),
                 destroy: Some(plugin_destroy::<P>),
                 activate: Some(plugin_activate::<P>),
                 deactivate: Some(plugin_deactivate::<P>),
-                start_processing: Some(plugin_start_processing),
-                stop_processing: Some(plugin_stop_processing),
+                start_processing: Some(plugin_start_processing::<P>),
+                stop_processing: Some(plugin_stop_processing::<P>),
                 reset: Some(plugin_reset::<P>),
                 process: Some(plugin_process::<P>),
                 get_extension: Some(plugin_get_extension::<P>),
-                on_main_thread: Some(plugin_on_main_thread),
+                on_main_thread: Some(plugin_on_main_thread::<P>),
             },
-            host,
+            // SAFETY: checked non-null above; CLAP keeps the host valid
+            // until the plugin is destroyed, and `plugin_destroy` closes the
+            // editor, which drops every copy, before that.
+            host: unsafe { HostRef::new(host) },
             ids,
             latency: AtomicU32::new(0),
-            host_knows_values: AtomicBool::new(true),
+            flags: Arc::new(SharedFlags::new(&*params)),
+            has_editor: gui.is_some(),
+            gui,
             audio: UnsafeCell::new(Audio {
                 watcher: ParamWatcher::new(&*params),
                 known_to_host: current_values(&*params),
+                gestures,
                 plugin,
                 sample_rate: 0.0,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
@@ -313,20 +362,24 @@ unsafe extern "C" fn factory_create<P: Plugin>(
 // --- Instance -----------------------------------------------------------
 
 /// One plugin as the host sees it.
-struct Instance<P: Plugin> {
+pub(crate) struct Instance<P: Plugin> {
     /// What the host holds a pointer to. Its `plugin_data` points back here.
     clap: clap_plugin,
     /// The host that created this plugin. CLAP keeps it valid for as long
     /// as the plugin exists.
-    host: *const clap_host,
+    host: HostRef,
     params: Arc<P::Params>,
     /// The id of each parameter, in the order the host indexes them.
     ids: Vec<ParamId>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
-    /// Cleared when the host itself changed every value at once (by loading
-    /// state), so that the audio thread does not report those changes back.
-    host_knows_values: AtomicBool,
+    /// What the main and audio threads share besides parameters.
+    flags: Arc<SharedFlags>,
+    /// Whether `gui` is there. Set once, when the plugin is created, so that
+    /// `get_extension`, which any thread may call, need not look at `gui`.
+    has_editor: bool,
+    /// The editor, for a plugin that has one. Main thread only.
+    pub(crate) gui: Option<Gui>,
     /// See the module documentation for who may touch this and when.
     audio: UnsafeCell<Audio<P>>,
 }
@@ -342,6 +395,32 @@ struct Audio<P> {
     watcher: ParamWatcher,
     /// Parameter values as the host last knew them, in index order.
     known_to_host: Vec<f64>,
+    /// The editor's gestures on their way to the host, for a plugin with an
+    /// editor.
+    gestures: Option<Gestures>,
+}
+
+/// Turns the editor's gesture counts into events, and remembers what the
+/// host has been sent of them.
+struct Gestures {
+    reader: GestureReader,
+    /// Per parameter: the host has been sent a begin and not yet its end.
+    open: Box<[bool]>,
+    /// Per parameter: a gesture began that the host has not been sent a
+    /// begin for, because its list refused it.
+    owed: Box<[bool]>,
+}
+
+impl Gestures {
+    /// Allocates.
+    fn new(reader: GestureReader) -> Self {
+        let len = reader.counters().len();
+        Self {
+            reader,
+            open: vec![false; len].into_boxed_slice(),
+            owed: vec![false; len].into_boxed_slice(),
+        }
+    }
 }
 
 fn current_values(params: &dyn ParamSet) -> Vec<f64> {
@@ -356,7 +435,9 @@ fn current_values(params: &dyn ParamSet) -> Vec<f64> {
 ///
 /// `plugin` must be null or a pointer returned by `factory_create::<P>` that
 /// has not been destroyed.
-unsafe fn instance<'a, P: Plugin>(plugin: *const clap_plugin) -> Option<&'a Instance<P>> {
+pub(crate) unsafe fn instance<'a, P: Plugin>(
+    plugin: *const clap_plugin,
+) -> Option<&'a Instance<P>> {
     if plugin.is_null() {
         return None;
     }
@@ -376,19 +457,58 @@ impl<P: Plugin> Instance<P> {
     }
 }
 
-unsafe extern "C" fn plugin_init(_plugin: *const clap_plugin) -> bool {
-    true
+unsafe extern "C" fn plugin_init<P: Plugin>(plugin: *const clap_plugin) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return false;
+        };
+        // The host's extensions may be looked up from here on, not before.
+        if let Some(gui) = &instance.gui {
+            let params: Arc<dyn ParamSet> = instance.params.clone();
+            gui.init(
+                instance.host,
+                params,
+                &instance.ids,
+                Arc::clone(&instance.flags),
+            );
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn plugin_destroy<P: Plugin>(plugin: *const clap_plugin) {
     guard((), || {
-        if plugin.is_null() {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
             return;
+        };
+        // The editor goes first, then its link, while the plugin and the
+        // host they point at are still here. A host that never destroyed
+        // its editor gets the same ending as one that did.
+        if let Some(gui) = &instance.gui {
+            if !gui.shutdown() {
+                // Destroyed from inside one of the plugin's own calls, which
+                // frees it when the outermost returns (see `Gui::shutdown`).
+                return;
+            }
         }
-        // SAFETY: the host destroys each plugin once, and `plugin_data` is
-        // the pointer `factory_create` got from `Box::into_raw`.
-        drop(unsafe { Box::from_raw((*plugin).plugin_data.cast::<Instance<P>>()) });
+        // SAFETY: the host destroys each plugin once, and nothing refers to
+        // it any more: no call into it is in progress.
+        unsafe { free::<P>(plugin) };
     });
+}
+
+/// Frees a plugin instance.
+///
+/// # Safety
+///
+/// `plugin` must be a live plugin made by `factory_create::<P>`, and nothing
+/// may use it, or any reference into it, afterwards.
+pub(crate) unsafe fn free<P: Plugin>(plugin: *const clap_plugin) {
+    // SAFETY: per this function's contract; `plugin_data` is the pointer
+    // `factory_create` got from `Box::into_raw`.
+    drop(unsafe { Box::from_raw((*plugin).plugin_data.cast::<Instance<P>>()) });
 }
 
 unsafe extern "C" fn plugin_activate<P: Plugin>(
@@ -435,13 +555,40 @@ unsafe extern "C" fn plugin_deactivate<P: Plugin>(plugin: *const clap_plugin) {
     });
 }
 
-unsafe extern "C" fn plugin_start_processing(_plugin: *const clap_plugin) -> bool {
-    true
+unsafe extern "C" fn plugin_start_processing<P: Plugin>(plugin: *const clap_plugin) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return false;
+        };
+        instance.flags.processing.store(true, Ordering::SeqCst);
+        true
+    })
 }
 
-unsafe extern "C" fn plugin_stop_processing(_plugin: *const clap_plugin) {}
+unsafe extern "C" fn plugin_stop_processing<P: Plugin>(plugin: *const clap_plugin) {
+    guard((), || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return;
+        };
+        let flags = &instance.flags;
+        flags.processing.store(false, Ordering::SeqCst);
+        // An edit made just now may have seen the plugin still processing
+        // and asked for no flush. This is the audio thread, which may not
+        // ask for one, so it asks for a call on the main thread, which
+        // does (see `ClapEditorHost::edited` for the other half).
+        if instance.has_editor && flags.unsent.load(Ordering::SeqCst) {
+            instance.host.request_callback();
+        }
+    });
+}
 
-unsafe extern "C" fn plugin_on_main_thread(_plugin: *const clap_plugin) {}
+unsafe extern "C" fn plugin_on_main_thread<P: Plugin>(plugin: *const clap_plugin) {
+    // SAFETY: the host passes a plugin it created through our factory, on
+    // the main thread. A plugin without an editor has nothing to do here.
+    unsafe { gui::on_main_thread::<P>(plugin) };
+}
 
 unsafe extern "C" fn plugin_reset<P: Plugin>(plugin: *const clap_plugin) {
     guard((), || {
@@ -457,7 +604,7 @@ unsafe extern "C" fn plugin_reset<P: Plugin>(plugin: *const clap_plugin) {
 }
 
 unsafe extern "C" fn plugin_get_extension<P: Plugin>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
     id: *const c_char,
 ) -> *const c_void {
     if id.is_null() {
@@ -465,7 +612,17 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
     }
     // SAFETY: the host passes a valid NUL-terminated string.
     let id = unsafe { CStr::from_ptr(id) };
-    if id == CLAP_EXT_PARAMS {
+    // The editor's extensions are offered only by a plugin that has one.
+    // SAFETY: the host passes a plugin it created through our factory.
+    // `has_editor` never changes, so reading it from any thread is sound.
+    let has_editor = unsafe { instance::<P>(plugin) }.is_some_and(|instance| instance.has_editor);
+    if has_editor && id == CLAP_EXT_GUI {
+        ptr::from_ref(GuiVtables::<P>::GUI).cast()
+    } else if has_editor && id == CLAP_EXT_TIMER_SUPPORT {
+        ptr::from_ref(GuiVtables::<P>::TIMER).cast()
+    } else if has_editor && id == CLAP_EXT_POSIX_FD_SUPPORT {
+        ptr::from_ref(GuiVtables::<P>::FD).cast()
+    } else if id == CLAP_EXT_PARAMS {
         ptr::from_ref(Vtables::<P>::PARAMS).cast()
     } else if id == CLAP_EXT_STATE {
         ptr::from_ref(Vtables::<P>::STATE).cast()
@@ -677,41 +834,81 @@ impl<P: Plugin> Instance<P> {
         let params: &dyn ParamSet = &*self.params;
         audio.events.clear();
 
-        // Changes the plugin has not seen yet go first, on frame 0.
+        // Changes the plugin has not seen yet go first, on frame 0. They
+        // stay first: later events on frame 0 go after them.
         audio.watcher.emit_changes(params, &mut audio.events);
+        let announced = audio.events.len();
 
-        // Changes the host has not seen yet are reported to it, unless the
-        // host made them itself by loading state.
-        if !self.host_knows_values.swap(true, Ordering::Relaxed) {
-            self.remember_for_host(audio);
-        }
-        let mut known = audio.known_to_host.iter_mut();
-        params.visit(&mut |param| {
-            let Some(known) = known.next() else {
-                return;
-            };
-            let plain = param.plain();
-            if plain != *known {
-                *known = plain;
-                // SAFETY: `output` is valid for this call, per our contract.
-                unsafe { send_param_value(output, param.param_id().0, to_clap(param, plain)) };
-            }
-        });
+        // Changes the host has not seen yet are reported to it.
+        // SAFETY: `output` is valid for this call, per our contract.
+        unsafe { self.report_to_host(audio, output) };
 
         // Then what the host sends.
         // SAFETY: `input` is valid for this call, per our contract.
         unsafe { for_each_event(input, |header| self.convert(audio, header)) };
 
-        apply_param_events(params, &audio.events);
-        audio.watcher.remember(params);
+        // Only the host's values are stored. The announced ones were read
+        // from the parameters, and the editor may have stored a newer value
+        // since; writing the old one back would undo the edit, and then
+        // report the old value to the host as a change of its own.
+        let from_host = &audio.events.as_slice()[announced..];
+        audio.watcher.apply_and_remember(params, from_host);
+        // The host knows what the parameters made of its values, rounded as
+        // they hold them, so the rounding does not go back to it as news.
+        // Worked out, not read back: an edit stored since must stay news.
+        for event in from_host {
+            if let EventKind::ParamValue { param, value } = event.kind {
+                if let (Some(index), Some(target)) =
+                    (self.index_of(param.0), self.params.find_param(param))
+                {
+                    if let Some(stored) = target.stored_plain(value) {
+                        audio.known_to_host[index] = stored;
+                    }
+                }
+            }
+        }
     }
 
-    fn remember_for_host(&self, audio: &mut Audio<P>) {
-        let mut known = audio.known_to_host.iter_mut();
+    /// Sends the host what changed without it, parameter by parameter: the
+    /// start of an editor's gesture, the value if the host does not know it,
+    /// and the end of the gesture, in that order. Real-time safe.
+    ///
+    /// What the host's list refuses is sent again next time (see the module
+    /// documentation): for a parameter, nothing after a refused event is
+    /// sent, and nothing is recorded as sent until the host took it.
+    ///
+    /// A value the host set itself is never sent back: automation and
+    /// `flush` values are recorded as known once they are stored, and after
+    /// the host was asked to read every value again (state loaded, or many
+    /// values changed by the editor) the values it was asked to read are
+    /// taken as known, inside a gesture or not. While a state load is under
+    /// way, no value is sent at all.
+    ///
+    /// # Safety
+    ///
+    /// `output` must be a valid output event list for the duration of the
+    /// call, or null; and this must be called where `process` or `flush`
+    /// may run.
+    unsafe fn report_to_host(&self, audio: &mut Audio<P>, output: *const clap_output_events) {
+        let flags = &*self.flags;
+        // A swap and not a load: it pairs with the editor's store, so every
+        // edit made before the flag was set is read below.
+        flags.unsent.swap(false, Ordering::SeqCst);
+        let Audio {
+            known_to_host,
+            gestures,
+            ..
+        } = audio;
+        flags.take_reread(known_to_host);
+        let mut index = 0;
         self.params.visit(&mut |param| {
-            if let Some(known) = known.next() {
-                *known = param.plain();
-            }
+            let at = index;
+            index += 1;
+            let Some(known) = known_to_host.get_mut(at) else {
+                return;
+            };
+            // SAFETY: `output` is valid for this call, per our contract.
+            unsafe { report_param(output, param, at, known, gestures.as_mut(), flags) };
         });
     }
 
@@ -787,16 +984,14 @@ impl<P: Plugin> Instance<P> {
                 if event.note_id >= 0 || event.key >= 0 {
                     return;
                 }
-                let (Some(index), Some(param)) =
-                    (self.index_of(event.param_id), self.param(event.param_id))
-                else {
+                let Some(param) = self.param(event.param_id) else {
                     return;
                 };
-                let value = from_clap(param, event.value);
-                audio.known_to_host[index] = value;
+                // The host knows this value; `gather_events` records it as
+                // known once it is stored.
                 EventKind::ParamValue {
                     param: ParamId(event.param_id),
-                    value,
+                    value: from_clap(param, event.value),
                 }
             }
             CLAP_EVENT_PARAM_MOD => {
@@ -837,6 +1032,70 @@ impl<P: Plugin> Instance<P> {
     }
 }
 
+/// Sends the host what it does not know about one parameter, the one at
+/// index `at`, whose value the host last knew as `known`. See
+/// [`Instance::report_to_host`].
+///
+/// # Safety
+///
+/// `output` must be a valid output event list for the duration of the call,
+/// or null.
+unsafe fn report_param(
+    output: *const clap_output_events,
+    param: &dyn Param,
+    at: usize,
+    known: &mut f64,
+    mut gestures: Option<&mut Gestures>,
+    flags: &SharedFlags,
+) {
+    let (plain, open_now) = match gestures.as_deref_mut() {
+        // The value is read with the counts, so that a value the editor set
+        // inside a gesture is never sent outside it.
+        Some(gestures) => {
+            let (edges, plain) = gestures.reader.read_with(at, || param.plain());
+            if edges.begin && !gestures.open[at] {
+                // A gesture the host has not been told of; if the host still
+                // has one open, because its end was refused, the two merge.
+                gestures.owed[at] = true;
+            }
+            (plain, gestures.reader.is_open(at))
+        }
+        None => (param.plain(), false),
+    };
+    let settled = flags.settled();
+    let id = param.param_id().0;
+
+    if let Some(gestures) = gestures.as_deref_mut() {
+        if !gestures.open[at] && (gestures.owed[at] || open_now) {
+            // SAFETY: `output` is valid for this call, per our contract.
+            if !unsafe { send_gesture(output, id, CLAP_EVENT_PARAM_GESTURE_BEGIN) } {
+                // Refused: nothing more for this parameter until it is sent.
+                gestures.owed[at] = true;
+                return;
+            }
+            gestures.open[at] = true;
+            gestures.owed[at] = false;
+        }
+    }
+    if plain != *known {
+        // Not while state is being restored: the value may be the host's.
+        // And not if refused. Either way it waits for next time, and so
+        // does the end, so that the value still lands inside the gesture.
+        // SAFETY: `output` is valid for this call, per our contract.
+        if !settled || !unsafe { send_param_value(output, id, to_clap(param, plain)) } {
+            return;
+        }
+        *known = plain;
+    }
+    if let Some(gestures) = gestures.filter(|gestures| gestures.open[at] && !open_now) {
+        // SAFETY: `output` is valid for this call, per our contract.
+        let sent = unsafe { send_gesture(output, id, CLAP_EVENT_PARAM_GESTURE_END) };
+        if sent {
+            gestures.open[at] = false;
+        }
+    }
+}
+
 /// Calls `handle` for every event in a host's input list.
 ///
 /// # Safety
@@ -863,17 +1122,63 @@ unsafe fn for_each_event(
     }
 }
 
-/// Tells the host that a parameter changed without it.
+/// Hands `event`, a CLAP event struct whose first field is its header, to a
+/// host's output list, which copies it. Returns whether the host took it:
+/// a full list, or none at all, refuses it.
 ///
 /// # Safety
 ///
 /// `list` must be a valid output event list for the duration of the call,
-/// or null.
-unsafe fn send_param_value(list: *const clap_output_events, param_id: clap_id, value: f64) {
+/// or null, and `T` a CLAP event type whose header's size is that of `T`.
+unsafe fn push_event<T>(list: *const clap_output_events, event: &T) -> bool {
     // SAFETY: guaranteed by this function's contract.
     let Some(push) = (unsafe { list.as_ref() }).and_then(|events| events.try_push) else {
-        return;
+        return false;
     };
+    // The pointer is taken to the whole event and then viewed as its header,
+    // which is its first field. A pointer taken to the header field alone
+    // would only be allowed to reach the header, and the host reads the
+    // rest of the event through it. Miri caught exactly that.
+    let header = ptr::from_ref(event).cast::<clap_event_header>();
+    // SAFETY: the host's own function with the host's own list; the event
+    // is valid for the call and the host copies it. Nothing here waits or
+    // allocates: what the host refuses, the caller sends again later.
+    unsafe { push(list, header) }
+}
+
+/// Tells the host that a gesture on a parameter began or ended. Returns
+/// whether the host took the event.
+///
+/// # Safety
+///
+/// As for [`push_event`].
+unsafe fn send_gesture(
+    list: *const clap_output_events,
+    param_id: clap_id,
+    type_: clap_event_type,
+) -> bool {
+    let event = clap_event_param_gesture {
+        header: clap_event_header {
+            size: size_of::<clap_event_param_gesture>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_,
+            flags: 0,
+        },
+        param_id,
+    };
+    // SAFETY: guaranteed by this function's contract, and the header gives
+    // the event's own size.
+    unsafe { push_event(list, &event) }
+}
+
+/// Tells the host that a parameter changed without it. Returns whether the
+/// host took the event.
+///
+/// # Safety
+///
+/// As for [`push_event`].
+unsafe fn send_param_value(list: *const clap_output_events, param_id: clap_id, value: f64) -> bool {
     let event = clap_event_param_value {
         header: clap_event_header {
             size: size_of::<clap_event_param_value>() as u32,
@@ -890,14 +1195,9 @@ unsafe fn send_param_value(list: *const clap_output_events, param_id: clap_id, v
         key: -1,
         value,
     };
-    // The pointer is taken to the whole event and then viewed as its header,
-    // which is its first field. A pointer taken to the header field alone
-    // would only be allowed to reach the header, and the host reads the
-    // rest of the event through it. Miri caught exactly that.
-    let header = (&raw const event).cast::<clap_event_header>();
-    // SAFETY: the host's own function with the host's own list; the event
-    // is valid for the call and the host copies it.
-    unsafe { push(list, header) };
+    // SAFETY: guaranteed by this function's contract, and the header gives
+    // the event's own size.
+    unsafe { push_event(list, &event) }
 }
 
 // --- Parameters extension -----------------------------------------------
@@ -1037,7 +1337,7 @@ unsafe extern "C" fn params_text_to_value<P: Plugin>(
 unsafe extern "C" fn params_flush<P: Plugin>(
     plugin: *const clap_plugin,
     input: *const clap_input_events,
-    _output: *const clap_output_events,
+    output: *const clap_output_events,
 ) {
     guard((), || {
         // SAFETY: the host passes a plugin it created through our factory.
@@ -1049,7 +1349,14 @@ unsafe extern "C" fn params_flush<P: Plugin>(
         // other thread is using the audio state.
         let audio = unsafe { &mut *instance.audio.get() };
 
-        // Only parameter values matter here. They are stored straight into
+        // First what the host does not know, as `process` does: the
+        // editor's gestures and values, and values changed without the
+        // host. A flush is how they reach a host that is not processing.
+        // SAFETY: `output` is valid for this call, or null, and this runs
+        // where `process` would.
+        unsafe { instance.report_to_host(audio, output) };
+
+        // Then the host's values. They are stored straight into
         // the parameters; the plugin's watcher is left alone, so the next
         // block still tells the plugin about them as events.
         // SAFETY: `input` is valid for this call, or null.
@@ -1069,8 +1376,12 @@ unsafe extern "C" fn params_flush<P: Plugin>(
                 ) else {
                     return;
                 };
-                param.set_plain(from_clap(param, event.value));
-                audio.known_to_host[index] = param.plain();
+                let value = from_clap(param, event.value);
+                param.set_plain(value);
+                // Worked out rather than read back, as in `gather_events`.
+                if let Some(stored) = param.stored_plain(value) {
+                    audio.known_to_host[index] = stored;
+                }
             });
         }
     });
@@ -1137,16 +1448,21 @@ unsafe extern "C" fn state_load<P: Plugin>(
         let Ok(text) = std::str::from_utf8(&bytes) else {
             return false;
         };
-        if load_state::<P>(&instance.params, text).is_err() {
-            return false;
+        let flags = &instance.flags;
+        {
+            // While the values change, the audio side reports none of them.
+            let _loading = flags.loading();
+            if load_state::<P>(&instance.params, text).is_err() {
+                return false;
+            }
+            // Every value may have changed without an event, so the host is
+            // asked to read them all again. It then knows them, and the
+            // audio side must not report them back as if they were news.
+            flags.host_rereads(&*instance.params);
         }
-        // Every value may have changed without an event, so the host is
-        // asked to read them all again. It then knows them, and the audio
-        // thread must not report them back as if they were news.
-        instance.host_knows_values.store(false, Ordering::Relaxed);
         // SAFETY: `load` runs on the main thread, where the host's parameter
         // extension may be called, and the host outlives the plugin.
-        unsafe { rescan_values(instance.host) };
+        unsafe { rescan_values(instance.host.as_ptr()) };
         true
     })
 }

@@ -1,0 +1,7 @@
+fill rect(0 0 48 32) solid(#1c1f24ff)
+image 4x4 fnv1a 94a97702695a3311 rect(2 4 13 13) nearest
+image 4x4 fnv1a 94a97702695a3311 rect(17.5 4 13 13) bilinear
+image 4x4 fnv1a 94a97702695a3311 rect(33 4 13 13) bicubic
+transform matrix(0.9553365 0.29552022 -0.29552022 0.9553365 8.755449 -5.9312344) {
+  image 4x4 fnv1a 94a97702695a3311 rect(20 22 8 8) bilinear
+}

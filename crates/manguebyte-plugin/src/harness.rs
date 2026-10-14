@@ -5,6 +5,7 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_params::{LoadReport, ParamSet};
 
+use crate::editor::EditorSpec;
 use crate::{ParamWatcher, Plugin, StateError, apply_param_events, load_state, save_state};
 
 /// Most events the harness will deliver in a single block.
@@ -25,6 +26,8 @@ const EVENTS_PER_BLOCK: usize = 4_096;
 pub struct Harness<P: Plugin> {
     plugin: P,
     params: Arc<P::Params>,
+    /// Taken from the plugin once, as a wrapper does.
+    editor: Option<Box<dyn EditorSpec>>,
     sample_rate: f64,
     max_block_size: usize,
     /// Block lengths to cycle through.
@@ -63,6 +66,7 @@ impl<P: Plugin> Harness<P> {
         if let Err(error) = params.validate() {
             panic!("plugin {id} has invalid parameters: {error}");
         }
+        let editor = plugin.editor();
         plugin.prepare(&ProcessSpec {
             sample_rate,
             max_block_size,
@@ -80,6 +84,7 @@ impl<P: Plugin> Harness<P> {
             sidechain: AudioBuffer::new(P::LAYOUT.sidechain, max_block_size),
             watcher: ParamWatcher::new(&*params),
             params,
+            editor,
             transport: Transport::playing_at(120.0),
             position: 0,
         }
@@ -113,6 +118,16 @@ impl<P: Plugin> Harness<P> {
     /// The plugin's parameters.
     pub fn params(&self) -> &P::Params {
         &self.params
+    }
+
+    /// How to open the plugin's editor, if it has one.
+    ///
+    /// The harness asks the plugin once, when it creates it, as a wrapper
+    /// does, so a test can open the editor with a
+    /// [`RecordingEditorHost`](crate::editor::testing::RecordingEditorHost)
+    /// while the plugin processes.
+    pub fn editor(&self) -> Option<&dyn EditorSpec> {
+        self.editor.as_deref()
     }
 
     /// The plugin itself.

@@ -1,0 +1,7 @@
+fill rect(0 0 48 32) solid(#1c1f24ff)
+fill circle(16 16 10) radial(13 12, 13, pad [0 #5a6070ff, 1 #23262dff])
+stroke arc(16 16 13 2.3561945 4.712389) width 2 cap round join round solid(#3a3f4aff)
+stroke arc(16 16 13 2.3561945 2.9216812) width 2 cap round join round solid(#ff7a00ff)
+stroke path(nonzero M 18.143309 12.622688 L 20.55453 8.823214) width 1.5 cap round join round solid(#ffffffff)
+fill rounded_rect(32 13 13 6 radii 3 3 3 3) solid(#2e3440ff)
+fill rounded_rect(32 13 8.06 6 radii 3 3 3 3) solid(#ff7a00ff)

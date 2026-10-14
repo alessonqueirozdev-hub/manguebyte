@@ -36,11 +36,24 @@
 //! curve the host is sending, until the next point puts it back.
 //!
 //! So while the host is delivering blocks, `setParamNormalized` only
-//! updates what the controller reports ([`Component::shown`]) and the
+//! updates what the controller reports ([`Controls::shown`]) and the
 //! points in `process` are the one source of the parameter's value. While
 //! it is not delivering blocks there are no points to wait for, and the
 //! value is stored at once so that it is not lost; the plugin hears about
 //! it as an event on the first frame of its next block.
+//!
+//! # Edits made in the plugin's editor
+//!
+//! The same rule holds for the plugin's own editor. Its edits reach the
+//! host through the `IComponentHandler` the host gave in
+//! `setComponentHandler`: `beginEdit`, then `performEdit` with each value
+//! the control set, then `endEdit`, on the main thread (see
+//! [`crate::view`]). The value also becomes what the controller reports.
+//! While blocks run it reaches the processor as the host's own point in
+//! `process`, like any other automation; while they do not, it is stored
+//! at once, as `setParamNormalized` stores it. No edit is ever inferred by
+//! comparing values, which would report the host's automation and restored
+//! state back to it as a person's edits.
 
 // The bindings give enumerations a different integer type on Windows than
 // elsewhere, so a cast that is needed on one platform is redundant on the
@@ -51,6 +64,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -69,7 +83,9 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComRef};
 
+use crate::handler::Handler;
 use crate::text::{copy_wide, param_id, read_wide};
+use crate::view::Editors;
 
 /// Most events delivered to the plugin in one block. Extra events are
 /// dropped rather than allocated for.
@@ -213,9 +229,10 @@ struct Audio<P> {
     watcher: ParamWatcher,
 }
 
-/// One plugin as the host sees it.
-pub(crate) struct Component<P: Plugin> {
-    params: Arc<P::Params>,
+/// The parameters as the controller lists and reports them, shared with the
+/// plugin's open editors, which may outlive the component.
+pub(crate) struct Controls {
+    params: Arc<dyn ParamSet>,
     /// Every parameter's own id and its VST 3 id, in the order the host
     /// indexes them.
     ids: Vec<(ParamId, u32)>,
@@ -225,6 +242,65 @@ pub(crate) struct Component<P: Plugin> {
     /// Whether the host is delivering blocks, so that parameter changes
     /// arrive in `process`.
     running: AtomicBool,
+}
+
+impl Controls {
+    /// Where the plugin parameter with this VST 3 id is in the host's list.
+    pub(crate) fn index_of(&self, id: u32) -> Option<usize> {
+        self.ids.iter().position(|&(_, vst)| vst == id)
+    }
+
+    /// Where the plugin parameter `param` is in the host's list.
+    pub(crate) fn index_of_param(&self, param: ParamId) -> Option<usize> {
+        self.ids.iter().position(|&(own, _)| own == param)
+    }
+
+    /// The VST 3 id of the parameter at `index` in the host's list.
+    pub(crate) fn vst_id(&self, index: usize) -> Option<u32> {
+        self.ids.get(index).map(|&(_, id)| id)
+    }
+
+    /// The plugin parameter with this VST 3 id.
+    fn param(&self, id: u32) -> Option<&dyn Param> {
+        self.params.find_param(self.ids[self.index_of(id)?].0)
+    }
+
+    /// Makes the controller report the parameters' own values again, after
+    /// something other than the host's controller calls changed them.
+    pub(crate) fn show_current_values(&self) {
+        let mut shown = self.shown.iter();
+        self.params.visit(&mut |param| {
+            if let Some(shown) = shown.next() {
+                shown.store(param.normalized(), Ordering::Relaxed);
+            }
+        });
+    }
+
+    /// The controller's value of the parameter at `index` is now
+    /// `normalized`, clamped to `0..=1`: from the host's
+    /// `setParamNormalized`, or from an edit in the plugin's editor.
+    ///
+    /// While blocks run, the same value arrives in `process` as the host's
+    /// point, on its frame, and that is the one the plugin follows; while
+    /// they do not, it is stored into the parameter at once (see the module
+    /// documentation).
+    pub(crate) fn set_normalized(&self, index: usize, normalized: f64) {
+        let (Some(shown), Some(&(own, _))) = (self.shown.get(index), self.ids.get(index)) else {
+            return;
+        };
+        shown.store(normalized.clamp(0.0, 1.0), Ordering::Relaxed);
+        if !self.running.load(Ordering::Relaxed) {
+            if let Some(param) = self.params.find_param(own) {
+                param.set_normalized(normalized);
+            }
+        }
+    }
+}
+
+/// One plugin as the host sees it.
+pub(crate) struct Component<P: Plugin> {
+    params: Arc<P::Params>,
+    controls: Arc<Controls>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
     /// The unit the host last selected. Nothing here depends on it; it is
@@ -232,6 +308,11 @@ pub(crate) struct Component<P: Plugin> {
     selected_unit: AtomicI32,
     /// See the module documentation for who may touch this and when.
     audio: UnsafeCell<Audio<P>>,
+    /// The host's component handler. Main thread only, like everything
+    /// below: the audio thread never touches these.
+    handler: Rc<Handler>,
+    /// How to make views of the plugin's editor, if it has one.
+    editors: Option<Rc<Editors>>,
 }
 
 impl<P: Plugin> Class for Component<P> {
@@ -254,6 +335,8 @@ impl<P: Plugin> Component<P> {
         let plugin = P::new();
         let params = plugin.params();
         params.validate().ok()?;
+        // Once, right after the parameters, as the editor contract says.
+        let spec = plugin.editor();
 
         let mut ids = Vec::with_capacity(params.len());
         params.visit(&mut |param| ids.push((param.param_id(), param_id(param.param_id()))));
@@ -270,10 +353,19 @@ impl<P: Plugin> Component<P> {
         let mut shown = Vec::with_capacity(params.len());
         params.visit(&mut |param| shown.push(AtomicF64::new(param.normalized())));
 
-        Some(Self {
+        let shared: Arc<dyn ParamSet> = params.clone();
+        let controls = Arc::new(Controls {
+            params: shared,
             ids,
             shown,
             running: AtomicBool::new(false),
+        });
+        let handler = Rc::new(Handler::new());
+        let editors =
+            spec.map(|spec| Editors::new(spec, Arc::clone(&controls), Rc::clone(&handler)));
+
+        Some(Self {
+            controls,
             latency: AtomicU32::new(0),
             selected_unit: AtomicI32::new(vst::kRootUnitId),
             audio: UnsafeCell::new(Audio {
@@ -288,28 +380,36 @@ impl<P: Plugin> Component<P> {
                 held: EventBuffer::new(),
             }),
             params,
+            handler,
+            editors,
         })
     }
 
     /// Where the plugin parameter with this VST 3 id is in the host's list.
     fn index_of(&self, id: u32) -> Option<usize> {
-        self.ids.iter().position(|&(_, vst)| vst == id)
+        self.controls.index_of(id)
     }
 
     /// The plugin parameter with this VST 3 id.
     fn param(&self, id: u32) -> Option<&dyn Param> {
-        self.params.find_param(self.ids[self.index_of(id)?].0)
+        self.controls.param(id)
     }
 
     /// Makes the controller report the parameters' own values again, after
     /// something other than the host's controller calls changed them.
     fn show_current_values(&self) {
-        let mut shown = self.shown.iter();
-        self.params.visit(&mut |param| {
-            if let Some(shown) = shown.next() {
-                shown.store(param.normalized(), Ordering::Relaxed);
-            }
-        });
+        self.controls.show_current_values();
+    }
+
+    /// Closes every editor of the plugin and lets go of the host's handler,
+    /// for `terminate` and for when the component goes away. Editors are
+    /// closed first, so that the edits they leave open are ended on the
+    /// handler before it is released.
+    fn shut_down(&self) {
+        if let Some(editors) = &self.editors {
+            editors.shutdown();
+        }
+        self.handler.set(None);
     }
 
     /// How many hidden parameters stand in for MIDI controllers.
@@ -364,6 +464,7 @@ impl<P: Plugin> Component<P> {
 
         let params: &dyn ParamSet = &*self.params;
         audio.events.clear();
+        let mut announced = 0;
         if has_audio {
             // What blocks without audio left behind goes first.
             for &event in &audio.held {
@@ -373,6 +474,7 @@ impl<P: Plugin> Component<P> {
             // Then changes the plugin has not seen yet, on frame 0: a
             // restored state, or a value set while no blocks were running.
             audio.watcher.emit_changes(params, &mut audio.events);
+            announced = audio.events.len();
         }
 
         // SAFETY: the host's object, valid for this call, or null.
@@ -421,11 +523,16 @@ impl<P: Plugin> Component<P> {
             }
         }
 
-        apply_param_events(params, &audio.events);
         if has_audio {
-            audio.watcher.remember(params);
+            // Only the host's values are stored. The announced ones were
+            // read from the parameters, and the main thread may have stored
+            // a newer value since (a state load, or an editor's edit while
+            // no blocks ran); writing the old one back would undo it.
+            let from_host = &audio.events.as_slice()[announced..];
+            audio.watcher.apply_and_remember(params, from_host);
             return;
         }
+        apply_param_events(params, &audio.events);
         // The values are stored, and the watcher has not been told, so it
         // announces them on the next block with audio. A controller move
         // or a note has no stored value to be found again, so it is kept.
@@ -616,11 +723,18 @@ unsafe fn write_bus(
 
 impl<P: Plugin> IPluginBaseTrait for Component<P> {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+        if let Some(editors) = &self.editors {
+            // Views may be made again after a `terminate`.
+            editors.reopen();
+        }
         kResultOk
     }
 
     unsafe fn terminate(&self) -> tresult {
-        kResultOk
+        guard(kResultFalse, || {
+            self.shut_down();
+            kResultOk
+        })
     }
 }
 
@@ -747,7 +861,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                 let latency = u32::try_from(audio.plugin.latency_samples()).unwrap_or(u32::MAX);
                 self.latency.store(latency, Ordering::Relaxed);
             } else {
-                self.running.store(false, Ordering::Relaxed);
+                self.controls.running.store(false, Ordering::Relaxed);
                 if audio.prepared {
                     audio.plugin.reset();
                     audio.held.clear();
@@ -900,7 +1014,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
     }
 
     unsafe fn setProcessing(&self, state: TBool) -> tresult {
-        self.running.store(state != 0, Ordering::Relaxed);
+        self.controls.running.store(state != 0, Ordering::Relaxed);
         kResultOk
     }
 
@@ -922,7 +1036,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             }
 
             // Not every host announces processing with `setProcessing`.
-            self.running.store(true, Ordering::Relaxed);
+            self.controls.running.store(true, Ordering::Relaxed);
 
             let frames = data.numSamples.max(0) as usize;
             if frames > audio.buffer.capacity() {
@@ -1001,7 +1115,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
     }
 
     unsafe fn getParameterCount(&self) -> i32 {
-        (self.ids.len() as u32 + Self::midi_param_count()) as i32
+        (self.controls.ids.len() as u32 + Self::midi_param_count()) as i32
     }
 
     unsafe fn getParameterInfo(&self, index: i32, info: *mut vst::ParameterInfo) -> tresult {
@@ -1011,7 +1125,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
             return kInvalidArgument;
         };
 
-        if let Some(&(own, id)) = self.ids.get(index) {
+        if let Some(&(own, id)) = self.controls.ids.get(index) {
             let Some(param) = self.params.find_param(own) else {
                 return kInvalidArgument;
             };
@@ -1040,7 +1154,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
         }
 
         // The hidden parameters that carry MIDI controllers.
-        let midi = (index - self.ids.len()) as u32;
+        let midi = (index - self.controls.ids.len()) as u32;
         if midi >= Self::midi_param_count() {
             return kInvalidArgument;
         }
@@ -1110,7 +1224,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
 
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
         match self.index_of(id) {
-            Some(index) => self.shown[index].load(Ordering::Relaxed),
+            Some(index) => self.controls.shown[index].load(Ordering::Relaxed),
             // A controller parameter has no stored value. Pitch bend rests
             // in the middle; everything else rests at zero.
             None => {
@@ -1129,7 +1243,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
         if value.is_nan() {
             return kInvalidArgument;
         }
-        let (Some(index), Some(param)) = (self.index_of(id), self.param(id)) else {
+        let Some(index) = self.index_of(id) else {
             // Controller moves reach the plugin through `process`.
             return if Self::midi_from_param(id, value).is_some() {
                 kResultOk
@@ -1137,24 +1251,41 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
                 kInvalidArgument
             };
         };
-        self.shown[index].store(value.clamp(0.0, 1.0), Ordering::Relaxed);
         // See the module documentation: while blocks are running the same
         // change arrives in `process`, on its frame, and that is the one
         // the plugin follows.
-        if !self.running.load(Ordering::Relaxed) {
-            param.set_normalized(value);
-        }
+        self.controls.set_normalized(index, value);
         kResultOk
     }
 
-    unsafe fn setComponentHandler(&self, _handler: *mut vst::IComponentHandler) -> tresult {
-        // The handler is how a plugin's own editor tells the host about an
-        // edit. There is no editor yet, so there is nothing to keep it for.
-        kResultOk
+    unsafe fn setComponentHandler(&self, handler: *mut vst::IComponentHandler) -> tresult {
+        guard(kResultFalse, || {
+            // SAFETY: the host's object, valid for this call, or null. The
+            // copy takes a reference of its own, which `Handler` releases
+            // when the host replaces or takes away the handler, at
+            // `terminate`, or when the component goes away.
+            let handler = unsafe { ComRef::from_raw(handler) }.map(|handler| handler.to_com_ptr());
+            self.handler.set(handler);
+            kResultOk
+        })
     }
 
-    unsafe fn createView(&self, _name: sb::FIDString) -> *mut sb::IPlugView {
-        std::ptr::null_mut()
+    unsafe fn createView(&self, name: sb::FIDString) -> *mut sb::IPlugView {
+        guard(std::ptr::null_mut(), || match &self.editors {
+            // SAFETY: the host passes a NUL-terminated string, or null.
+            Some(editors) => unsafe { editors.create_view(name) },
+            // A plugin without an editor has no view to give.
+            None => std::ptr::null_mut(),
+        })
+    }
+}
+
+impl<P: Plugin> Drop for Component<P> {
+    fn drop(&mut self) {
+        // A host that released the component without `terminate`, or with
+        // a view of it still open: the editors are closed, and the host's
+        // handler released, while the host can still be called.
+        guard((), || self.shut_down());
     }
 }
 

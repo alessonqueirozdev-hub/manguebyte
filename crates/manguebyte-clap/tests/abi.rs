@@ -882,6 +882,26 @@ fn automation_lands_on_its_frame_when_processing_in_place() {
     assert_eq!(tempo.load(Ordering::Relaxed), 97.0);
 }
 
+/// Host automation is never reported back to the host, also at values that
+/// binary floating point cannot hold exactly: what the parameter holds
+/// after storing the host's value is what the host knows.
+#[test]
+fn automation_at_inexact_values_is_not_reported_back() {
+    let (_guard, host) = level_host();
+    // 0.3 of the way up 0..4 is 1.2, which an `f32` cannot hold exactly.
+    let processed = host.process(&mut stereo(1.0, 16), None, vec![value(4, LEVEL, 0.3)], None);
+    assert!(processed.reported.is_empty());
+    for _ in 0..3 {
+        let processed = host.process(&mut stereo(1.0, 16), None, vec![], None);
+        assert!(
+            processed.reported.is_empty(),
+            "sent back {:?}",
+            processed.reported
+        );
+    }
+    assert_eq!(level_params().level.value(), 1.2_f32);
+}
+
 #[test]
 fn a_change_from_outside_reaches_the_plugin_and_is_reported_to_the_host_once() {
     let (_guard, host) = level_host();

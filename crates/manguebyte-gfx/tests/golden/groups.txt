@@ -1,0 +1,12 @@
+fill rect(0 0 48 32) solid(#1c1f24ff)
+clip rounded_rect(3 3 26 26 radii 6 6 6 6) {
+  fill rect(0 0 48 32) solid(#2e3440ff)
+  layer opacity 0.6 {
+    fill circle(12 13 8) solid(#ff7a00ff)
+    fill circle(20 19 8) solid(#3d8bffff)
+  }
+}
+transform matrix(0.70710677 0.70710677 -0.70710677 0.70710677 22.44365 -22.183765) {
+  fill rect(32 10 12 12) solid(#41d27aff)
+  stroke rect(32 10 12 12) width 1 cap butt join miter 4 solid(#ffffffff)
+}

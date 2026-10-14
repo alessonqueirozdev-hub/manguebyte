@@ -50,7 +50,13 @@
 //! let output = harness.process(&input);
 //! assert_eq!(output.channel(0), &[0.5; 100]);
 //! ```
+//!
+//! A plugin can also offer an editor, through [`Plugin::editor`] and the
+//! contract in the [`editor`] module.
 
+#![forbid(unsafe_code)]
+
+pub mod editor;
 mod harness;
 mod state;
 
@@ -61,6 +67,7 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_params::ParamSet;
 
+use editor::EditorSpec;
 pub use harness::Harness;
 pub use state::{StateError, load_state, save_state};
 
@@ -139,11 +146,14 @@ impl AudioLayout {
 /// Everything another thread needs goes through the parameters, which are
 /// shared in an [`Arc`] and are safe to read and write from anywhere. A host
 /// saving or restoring state, a user interface moving a control and the
-/// audio thread reading a value never need to coordinate.
+/// audio thread reading a value never need to coordinate. An editor gets
+/// what it shares with the plugin once, from [`editor`], and never sees the
+/// plugin itself.
 ///
 /// [`process`]: Self::process
 /// [`reset`]: Self::reset
 /// [`prepare`]: Self::prepare
+/// [`editor`]: Self::editor
 pub trait Plugin: Send + 'static {
     /// The fixed facts about the plugin.
     const INFO: PluginInfo;
@@ -192,6 +202,22 @@ pub trait Plugin: Send + 'static {
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {
         0
+    }
+
+    /// How to open the plugin's editor, if it has one. `None` unless
+    /// overridden, so a plugin without an editor writes nothing.
+    ///
+    /// Whatever runs the plugin calls this once, on the thread that creates
+    /// the plugin, right after [`params`](Self::params) and before any audio
+    /// runs, as the [`Harness`] does. It keeps what it gets for the life of
+    /// the plugin instance and opens editors from it on the host's main
+    /// thread, while the plugin itself runs on the audio thread. That is
+    /// why the spec is `Send + Sync + 'static`: it can hold `Arc`s of what
+    /// it shares with the plugin, such as the parameters and meter
+    /// readings, and the compiler refuses anything that points at the
+    /// plugin. See the [`editor`] module for an example.
+    fn editor(&self) -> Option<Box<dyn EditorSpec>> {
+        None
     }
 }
 
@@ -257,6 +283,87 @@ impl ParamWatcher {
             }
         });
     }
+
+    /// Stores the parameter values among `events` into `params`, and
+    /// records each as seen. Real-time safe.
+    ///
+    /// This takes the place of [`apply_param_events`] followed by
+    /// [`remember`](Self::remember) where another thread may write the
+    /// parameters while a block is being prepared, as an editor does when
+    /// it stores its edits straight into them. Pass only the events that
+    /// did not come from [`emit_changes`](Self::emit_changes), such as the
+    /// host's: the announced values were read from the parameters, so
+    /// storing them again could undo an edit made in the meantime, and
+    /// `emit_changes` has recorded them already.
+    ///
+    /// No parameter is read back. What is recorded as seen is what the
+    /// parameter holds after storing the event's value, as
+    /// [`Param::stored_plain`](manguebyte_params::Param::stored_plain)
+    /// works it out, so a value another thread stores at any moment after
+    /// `emit_changes`, even right after this stores the host's, is not
+    /// taken as seen, and the next block announces it.
+    ///
+    /// ```
+    /// use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
+    /// use manguebyte_params::{FloatParam, FloatRange, Param, param_set};
+    /// use manguebyte_plugin::ParamWatcher;
+    ///
+    /// struct Params { level: FloatParam, pan: FloatParam }
+    /// param_set!(Params { level, pan });
+    /// let params = Params {
+    ///     level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 4.0), 1.0),
+    ///     pan: FloatParam::new("pan", "Pan", FloatRange::linear(-1.0, 1.0), 0.0),
+    /// };
+    /// let mut watcher = ParamWatcher::new(&params);
+    /// let mut events = EventBuffer::with_capacity(8);
+    ///
+    /// // An editor sets the level; the block announces it.
+    /// params.level.set(2.0);
+    /// watcher.emit_changes(&params, &mut events);
+    /// let announced = events.len();
+    /// // The editor sets it again while the block is being prepared, and the
+    /// // host moves the pan on frame 10.
+    /// params.level.set(3.0);
+    /// let pan = params.pan.param_id();
+    /// events.push(Event { offset: 10, kind: EventKind::ParamValue { param: pan, value: 0.5 } }).unwrap();
+    ///
+    /// watcher.apply_and_remember(&params, &events.as_slice()[announced..]);
+    /// assert_eq!(params.pan.value(), 0.5);
+    /// // The newer edit is kept, and the next block announces it.
+    /// assert_eq!(params.level.value(), 3.0);
+    /// events.clear();
+    /// watcher.emit_changes(&params, &mut events);
+    /// assert_eq!(events.as_slice(), [Event {
+    ///     offset: 0,
+    ///     kind: EventKind::ParamValue { param: params.level.param_id(), value: 3.0 },
+    /// }]);
+    /// ```
+    pub fn apply_and_remember(&mut self, params: &dyn ParamSet, events: &[Event]) {
+        for event in events {
+            let EventKind::ParamValue { param, value } = event.kind else {
+                continue;
+            };
+            let mut index = 0;
+            let mut found = None;
+            params.visit(&mut |candidate| {
+                if found.is_none() && candidate.param_id() == param {
+                    found = Some((index, candidate));
+                }
+                index += 1;
+            });
+            if let Some((index, target)) = found {
+                target.set_plain(value);
+                // Not read back: another thread may have stored a newer
+                // value already. The parameter may round or clamp what it
+                // is given; `stored_plain` says what it made of it.
+                if let (Some(seen), Some(stored)) =
+                    (self.seen.get_mut(index), target.stored_plain(value))
+                {
+                    *seen = stored;
+                }
+            }
+        }
+    }
 }
 
 /// Stores every parameter value found in `events` into `params`.
@@ -272,5 +379,120 @@ pub fn apply_param_events(params: &dyn ParamSet, events: &EventBuffer) {
                 target.set_plain(value);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
+    use manguebyte_params::{FloatParam, FloatRange, Param, ParamInfo, param_set};
+
+    use super::ParamWatcher;
+
+    type After = Box<dyn FnOnce(&FloatParam) + Send>;
+
+    /// A float parameter that runs `after` once, right after the next value
+    /// is stored: the moment another thread could store one of its own.
+    struct Hooked {
+        param: FloatParam,
+        after: Mutex<Option<After>>,
+    }
+
+    impl Hooked {
+        fn then(&self, after: impl FnOnce(&FloatParam) + Send + 'static) {
+            *self.after.lock().unwrap() = Some(Box::new(after));
+        }
+    }
+
+    impl Param for Hooked {
+        fn info(&self) -> &ParamInfo {
+            self.param.info()
+        }
+        fn plain(&self) -> f64 {
+            self.param.plain()
+        }
+        fn set_plain(&self, value: f64) {
+            self.param.set_plain(value);
+            let after = self.after.lock().unwrap().take();
+            if let Some(after) = after {
+                after(&self.param);
+            }
+        }
+        fn stored_plain(&self, value: f64) -> Option<f64> {
+            self.param.stored_plain(value)
+        }
+        fn default_plain(&self) -> f64 {
+            self.param.default_plain()
+        }
+        fn normalized_to_plain(&self, normalized: f64) -> f64 {
+            self.param.normalized_to_plain(normalized)
+        }
+        fn plain_to_normalized(&self, plain: f64) -> f64 {
+            self.param.plain_to_normalized(plain)
+        }
+        fn step_count(&self) -> Option<u32> {
+            self.param.step_count()
+        }
+        fn plain_to_text(&self, plain: f64) -> String {
+            self.param.plain_to_text(plain)
+        }
+        fn text_to_plain(&self, text: &str) -> Option<f64> {
+            self.param.text_to_plain(text)
+        }
+    }
+
+    struct Params {
+        cutoff: Hooked,
+    }
+    param_set!(Params { cutoff });
+
+    /// An edit stored right after the host's value, before anything could
+    /// read the parameter back, is announced on the next block, and the
+    /// host's value, rounded as the parameter stores it, is not.
+    #[test]
+    fn an_edit_stored_right_after_the_hosts_value_is_announced() {
+        let params = Params {
+            cutoff: Hooked {
+                param: FloatParam::new("cutoff", "Cutoff", FloatRange::linear(0.0, 4.0), 1.0),
+                after: Mutex::new(None),
+            },
+        };
+        let cutoff = params.cutoff.param_id();
+        let mut watcher = ParamWatcher::new(&params);
+        let mut events = EventBuffer::with_capacity(8);
+
+        // The host sets 1.2, which an `f32` cannot hold exactly; the person's
+        // edit to 3 lands right after.
+        params.cutoff.then(|param| param.set(3.0));
+        let kind = EventKind::ParamValue {
+            param: cutoff,
+            value: 1.2,
+        };
+        watcher.apply_and_remember(&params, &[Event { offset: 0, kind }]);
+        assert_eq!(params.cutoff.param.value(), 3.0);
+
+        watcher.emit_changes(&params, &mut events);
+        assert_eq!(
+            events.as_slice(),
+            [Event {
+                offset: 0,
+                kind: EventKind::ParamValue {
+                    param: cutoff,
+                    value: 3.0
+                }
+            }]
+        );
+
+        // With no edit in between, the rounded host value is not announced.
+        let kind = EventKind::ParamValue {
+            param: cutoff,
+            value: 1.2,
+        };
+        watcher.apply_and_remember(&params, &[Event { offset: 0, kind }]);
+        events.clear();
+        watcher.emit_changes(&params, &mut events);
+        assert!(events.is_empty(), "announced {:?}", events.as_slice());
     }
 }

@@ -130,6 +130,42 @@ pub trait Param: Send + Sync {
     /// Reads a value from text a person typed. Allocates.
     fn text_to_plain(&self, text: &str) -> Option<f64>;
 
+    /// The value [`plain`](Self::plain) returns after
+    /// [`set_plain`](Self::set_plain)`(value)`, worked out without storing
+    /// anything; `None` if `set_plain` would ignore `value`, as it ignores a
+    /// value that is not a number. Real-time safe.
+    ///
+    /// A wrapper uses it to record what a parameter holds once it has
+    /// stored a host's value, without reading the parameter back: another
+    /// thread, such as an editor's, may have stored a newer value in
+    /// between, and that value must still be reported as new.
+    ///
+    /// Unless overridden it returns `value` itself, which is right for a
+    /// parameter that holds exactly what it is given, and for any value
+    /// [`normalized_to_plain`](Self::normalized_to_plain) returns if
+    /// `set_plain` keeps those as they are. The parameter types of this
+    /// crate override it to clamp, snap and round exactly as they store.
+    ///
+    /// ```
+    /// use manguebyte_params::{BoolParam, FloatParam, FloatRange, IntParam, Param};
+    ///
+    /// let level = FloatParam::new("level", "Level", FloatRange::linear(0.0, 4.0), 1.0);
+    /// // Clamped to the range, and held as an `f32`.
+    /// assert_eq!(level.stored_plain(9.0), Some(4.0));
+    /// assert_eq!(level.stored_plain(1.2), Some(f64::from(1.2_f32)));
+    /// assert_eq!(level.stored_plain(f64::NAN), None);
+    /// // Nothing was stored.
+    /// assert_eq!(level.value(), 1.0);
+    ///
+    /// let voices = IntParam::new("voices", "Voices", 1, 16, 8);
+    /// assert_eq!(voices.stored_plain(3.4), Some(3.0));
+    /// let bypass = BoolParam::new("bypass", "Bypass", false);
+    /// assert_eq!(bypass.stored_plain(0.7), Some(1.0));
+    /// ```
+    fn stored_plain(&self, value: f64) -> Option<f64> {
+        (!value.is_nan()).then_some(value)
+    }
+
     /// The identifier saved in state and sessions.
     fn id(&self) -> &str {
         self.info().id()
@@ -378,6 +414,11 @@ impl Param for FloatParam {
         };
         (!value.is_nan()).then(|| f64::from(self.snap(value)))
     }
+    fn stored_plain(&self, value: f64) -> Option<f64> {
+        // What `set_plain` does: `set(value as f32)`, which snaps.
+        let value = value as f32;
+        (!value.is_nan()).then(|| f64::from(self.snap(value)))
+    }
 }
 
 /// A whole-number parameter.
@@ -483,6 +524,9 @@ impl Param for IntParam {
     fn text_to_plain(&self, text: &str) -> Option<f64> {
         parse_number(text, self.info.unit()).map(|value| self.snap(value))
     }
+    fn stored_plain(&self, value: f64) -> Option<f64> {
+        (!value.is_nan()).then(|| f64::from((self.snap(value) as i32).clamp(self.min, self.max)))
+    }
 }
 
 /// An on/off parameter.
@@ -585,6 +629,9 @@ impl Param for BoolParam {
             _ => None,
         }
     }
+    fn stored_plain(&self, value: f64) -> Option<f64> {
+        (!value.is_nan()).then(|| f64::from(u8::from(value >= 0.5)))
+    }
 }
 
 /// A parameter that picks one of a list of named options.
@@ -685,6 +732,9 @@ impl Param for ChoiceParam {
     }
     fn text_to_plain(&self, text: &str) -> Option<f64> {
         position_ignoring_case(&self.choices, text.trim()).map(|index| index as f64)
+    }
+    fn stored_plain(&self, value: f64) -> Option<f64> {
+        (!value.is_nan()).then(|| (self.snap(value) as usize).min(self.choices.len() - 1) as f64)
     }
 }
 
@@ -889,6 +939,132 @@ mod tests {
         assert_eq!(shape.index(), 2);
         assert_eq!(shape.text_to_plain("sine"), Some(0.0));
         assert_eq!(shape.text_to_plain("noise"), None);
+    }
+
+    /// For every parameter type, `stored_plain` gives exactly what the
+    /// parameter holds after `set_plain`, bit for bit, or `None` exactly
+    /// when `set_plain` leaves the value alone, for hostile values too.
+    #[test]
+    fn stored_plain_is_what_set_plain_stores() {
+        let params: [Box<dyn Param>; 6] = [
+            Box::new(gain()),
+            Box::new(FloatParam::new("x", "X", FloatRange::linear(0.1, 1.0), 0.33).with_step(0.3)),
+            Box::new(FloatParam::new(
+                "f",
+                "Cutoff",
+                FloatRange::logarithmic(20.0, 20_000.0),
+                1_000.0,
+            )),
+            Box::new(IntParam::new("voices", "Voices", -3, 16, 8)),
+            Box::new(BoolParam::new("bypass", "Bypass", false)),
+            Box::new(ChoiceParam::new("shape", "Shape", &["A", "B", "C"], 1)),
+        ];
+        let mut values = vec![
+            f64::NAN,
+            -f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            0.5,
+            0.49999999999999994,
+            1.2,
+            2.5,
+            -2.5,
+            1e40,
+            -1e40,
+            f64::from(i32::MAX) + 10.0,
+        ];
+        let mut random = 0x0DDB_A11C_AFE5_EED5_u64;
+        for _ in 0..2_000 {
+            random ^= random >> 12;
+            random ^= random << 25;
+            random ^= random >> 27;
+            let bits = random.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            // Any bit pattern, and numbers around the ranges above.
+            values.push(f64::from_bits(bits));
+            values.push((bits % 50_000) as f64 / 100.0 - 100.0);
+        }
+        for param in &params {
+            for &value in &values {
+                param.reset();
+                let before = param.plain().to_bits();
+                let predicted = param.stored_plain(value);
+                param.set_plain(value);
+                let after = param.plain();
+                match predicted {
+                    Some(stored) => assert_eq!(
+                        stored.to_bits(),
+                        after.to_bits(),
+                        "{}: {value:e} gave {after:e}, predicted {stored:e}",
+                        param.id()
+                    ),
+                    None => assert_eq!(after.to_bits(), before, "{}: {value:e}", param.id()),
+                }
+            }
+        }
+    }
+
+    /// Someone else's parameter that keeps the default `stored_plain`: it
+    /// holds exactly what it is given, as the bits of an `f64`.
+    struct Exact {
+        info: ParamInfo,
+        bits: std::sync::atomic::AtomicU64,
+    }
+
+    impl Param for Exact {
+        fn info(&self) -> &ParamInfo {
+            &self.info
+        }
+        fn plain(&self) -> f64 {
+            f64::from_bits(self.bits.load(Ordering::Relaxed))
+        }
+        fn set_plain(&self, value: f64) {
+            if !value.is_nan() {
+                self.bits.store(value.to_bits(), Ordering::Relaxed);
+            }
+        }
+        fn default_plain(&self) -> f64 {
+            0.0
+        }
+        fn normalized_to_plain(&self, normalized: f64) -> f64 {
+            normalized
+        }
+        fn plain_to_normalized(&self, plain: f64) -> f64 {
+            plain
+        }
+        fn step_count(&self) -> Option<u32> {
+            None
+        }
+        fn plain_to_text(&self, plain: f64) -> String {
+            plain.to_string()
+        }
+        fn text_to_plain(&self, text: &str) -> Option<f64> {
+            text.parse().ok()
+        }
+    }
+
+    /// The default `stored_plain` is the value itself, or `None` for a
+    /// value that is not a number, which is right for such a parameter.
+    #[test]
+    fn the_default_stored_plain_is_the_value_itself() {
+        let param = Exact {
+            info: ParamInfo::new("exact", "Exact"),
+            bits: std::sync::atomic::AtomicU64::new(0),
+        };
+        for value in [0.25, -7.0, 1e300, f64::INFINITY, -0.0, f64::NAN] {
+            let predicted = param.stored_plain(value);
+            param.set_plain(value);
+            match predicted {
+                Some(stored) => assert_eq!(stored.to_bits(), param.plain().to_bits()),
+                None => assert!(value.is_nan()),
+            }
+        }
+        assert_eq!(param.stored_plain(0.25), Some(0.25));
+        assert_eq!(param.stored_plain(f64::NAN), None);
     }
 
     #[test]

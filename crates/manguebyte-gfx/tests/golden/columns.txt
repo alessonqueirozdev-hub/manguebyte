@@ -1,0 +1,4 @@
+fill rect(0 0 48 32) solid(#1c1f24ff)
+columns rect(2 2 6 28) low [0 0] high [0.83 0.61] linear(0 30, 0 2, pad [0 #41d27aff, 0.7 #ffd23fff, 1 #ff3b30ff])
+columns rect(10 2 36 13) 200 entries fnv1a cb206bfb0b45339a solid(#3d8bffff)
+columns rect(10 17 36 13) 1000 entries fnv1a d9c8385bec191ccf solid(#ff7a00ff)
