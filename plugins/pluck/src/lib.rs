@@ -11,7 +11,9 @@
 //!   of the filter;
 //! - sample-accurate automation;
 //! - one line each to export it as a CLAP plugin and as a VST 3 plugin,
-//!   from the same library.
+//!   from the same library;
+//! - the smallest editor: a title and a knob for the output level (see
+//!   [`Pluck::editor_spec`]). Mangue Duck has the fuller example.
 //!
 //! Run `scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"` to get a `.clap`
 //! file a host can load, and `scripts/bundle-vst3.sh mangue-pluck
@@ -19,7 +21,13 @@
 
 use std::sync::Arc;
 
+use manguebyte::plugin::editor::{EditorSpec, HostSize};
 use manguebyte::prelude::*;
+use manguebyte_gui::Editor;
+use manguebyte_ui::{IntoView, ParamHandle, column, knob, label};
+
+/// The editor's size at scale 1, in logical pixels.
+pub const EDITOR_SIZE: HostSize = HostSize::new(180, 150);
 
 /// The plugin's parameters.
 pub struct PluckParams {
@@ -226,6 +234,35 @@ pub struct Pluck {
     gain: Gain<f32>,
 }
 
+impl Pluck {
+    /// The plugin's editor: the plugin's name and a knob for the output
+    /// level, fixed at [`EDITOR_SIZE`] logical pixels. [`Plugin::editor`]
+    /// returns the same, boxed.
+    ///
+    /// ```
+    /// use mangue_pluck::{EDITOR_SIZE, Pluck};
+    /// use manguebyte::plugin::Plugin;
+    /// use manguebyte::plugin::editor::{EditorSpec, HostSize};
+    ///
+    /// let spec = Pluck::new().editor_spec();
+    /// assert_eq!(spec.size(1.0), EDITOR_SIZE);
+    /// assert_eq!(spec.size(2.0), HostSize::new(360, 300));
+    /// ```
+    pub fn editor_spec(&self) -> Editor {
+        let params = Arc::clone(&self.params);
+        Editor::new(EDITOR_SIZE, move || {
+            column((
+                label("Mangue Pluck").title(),
+                knob(ParamHandle::new(Arc::clone(&params), |p: &PluckParams| {
+                    &p.level
+                })),
+            ))
+            .spacing(8.0)
+            .padding(12.0)
+        })
+    }
+}
+
 impl Plugin for Pluck {
     const INFO: PluginInfo = PluginInfo {
         id: "org.manguebyte.pluck",
@@ -275,6 +312,10 @@ impl Plugin for Pluck {
         self.synth.reset();
         self.reverb.reset();
         self.gain.reset();
+    }
+
+    fn editor(&self) -> Option<Box<dyn EditorSpec>> {
+        Some(Box::new(self.editor_spec()))
     }
 }
 

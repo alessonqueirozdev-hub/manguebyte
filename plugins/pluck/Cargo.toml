@@ -22,6 +22,15 @@ required-features = ["standalone"]
 
 [dependencies]
 manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
+# The smallest editor, so that a test can open two plugin binaries'
+# editors in one process (ADR 0007, decision 7).
+manguebyte-gui.workspace = true
+manguebyte-ui.workspace = true
+
+[dev-dependencies]
+# The editor's test opens it headless, through the glue's test hook.
+manguebyte-gui = { workspace = true, features = ["headless"] }
+manguebyte-gfx.workspace = true
 
 [package.metadata.manguebyte]
 name = "Mangue Pluck"

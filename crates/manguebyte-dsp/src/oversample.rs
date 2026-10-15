@@ -136,7 +136,10 @@ impl<S: Sample> Stage<S> {
 /// ```
 ///
 /// Events are not passed to the inner processor, because their positions
-/// would need rescaling. Wrap the part that distorts, not a whole
+/// would need rescaling, and neither is a sidechain, which runs at the outer
+/// rate: the inner processor is called through
+/// [`process`](Processor::process), so a [`Compressor`](crate::Compressor)
+/// inside keys on its own input. Wrap the part that distorts, not a whole
 /// instrument.
 #[derive(Debug, Clone)]
 pub struct Oversampled<P, S: Sample = f32> {

@@ -9,10 +9,13 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
+use manguebyte_dsp::fir;
 use manguebyte_dsp::iir::{Band, Design};
 use manguebyte_dsp::{
     Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, Filter,
@@ -27,6 +30,10 @@ use manguebyte_dsp::{
 use manguebyte_dsp::{
     Chorus, DelayInterpolation, DelayLine, DryWet, EnvelopeFollower, LevelDetector, MixLaw,
     PanMode, Panner, Phaser,
+};
+use manguebyte_dsp::{
+    Convolution, ConvolutionEngine, ConvolutionRouting, ConvolutionSettings, Expander, FirFilter,
+    FirMode, KeySource, Wavetable, WavetableOscillator, split_at_events_with,
 };
 
 thread_local! {
@@ -666,4 +673,217 @@ fn filters_can_be_redesigned_and_modulated_while_running_without_using_the_heap(
         }
     });
     assert!(all_finite(&buffer));
+}
+
+/// A decaying, repeatable impulse response.
+fn room(len: usize, seed: u32) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+    (0..len)
+        .map(|n| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let unit = state as f32 / u32::MAX as f32 * 2.0 - 1.0;
+            0.1 * unit * (-4.0 * n as f32 / len as f32).exp()
+        })
+        .collect()
+}
+
+fn convolution_engine(
+    len: usize,
+    routing: ConvolutionRouting,
+    zero_latency: bool,
+) -> ConvolutionEngine<f32> {
+    let count = match routing {
+        ConvolutionRouting::Parallel => 2,
+        ConvolutionRouting::TrueStereo => 4,
+    };
+    let responses: Vec<Vec<f32>> = (0..count).map(|seed| room(len, seed)).collect();
+    let settings = ConvolutionSettings::new()
+        .with_partition_size(64)
+        .with_zero_latency(zero_latency);
+    ConvolutionEngine::new(&responses, 2, routing, settings).unwrap()
+}
+
+#[test]
+fn convolution_fir_filters_the_expander_and_the_wavetable_do_not_use_the_heap() {
+    check(
+        "ConvolutionEngine",
+        convolution_engine(5_000, ConvolutionRouting::Parallel, true),
+    );
+    check(
+        "ConvolutionEngine, true stereo with latency",
+        convolution_engine(3_000, ConvolutionRouting::TrueStereo, false),
+    );
+    check("Convolution", {
+        let (convolution, mut loader) = Convolution::<f32>::new();
+        // Taken on the first block, inside the watched region.
+        loader
+            .load(convolution_engine(
+                2_000,
+                ConvolutionRouting::TrueStereo,
+                true,
+            ))
+            .unwrap();
+        convolution
+    });
+    check(
+        "FirFilter, direct",
+        FirFilter::<f32>::with_mode(&[0.05; 20], FirMode::Direct).unwrap(),
+    );
+    check(
+        "FirFilter, FFT",
+        FirFilter::<f32>::new(&fir::lowpass(1_001, 0.1, 80.0)).unwrap(),
+    );
+    check(
+        "Expander",
+        Expander::<f32>::new()
+            .with_threshold_db(-6.0)
+            .with_knee_db(6.0),
+    );
+    check("WavetableOscillator", {
+        let saw: Vec<f32> = (0..2_048).map(|n| n as f32 / 1_024.0 - 1.0).collect();
+        let square: Vec<f32> = (0..2_048)
+            .map(|n| if n < 1_024 { 1.0 } else { -1.0 })
+            .collect();
+        let table = Arc::new(Wavetable::new(&[saw, square]).unwrap());
+        let mut oscillator = WavetableOscillator::new(table, 110.0);
+        oscillator.set_phase_modulation(0.5);
+        oscillator.set_position_glide_ms(5.0);
+        oscillator.set_position(0.7);
+        oscillator
+    });
+}
+
+#[test]
+fn a_wavetable_can_be_retuned_morphed_and_swapped_while_running_without_using_the_heap() {
+    let saw: Vec<f32> = (0..600).map(|n| n as f32 / 300.0 - 1.0).collect();
+    let sine: Vec<f32> = (0..600)
+        .map(|n| (std::f32::consts::TAU * n as f32 / 600.0).sin())
+        .collect();
+    let first = Arc::new(Wavetable::new(&[saw.clone(), sine.clone()]).unwrap());
+    let second = Arc::new(Wavetable::new(&[sine, saw]).unwrap());
+    let mut oscillator = WavetableOscillator::new(Arc::clone(&first), 55.0);
+    Processor::<f32>::prepare(&mut oscillator, &SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let mut spare = Some(Arc::clone(&second));
+    assert_no_heap_use("WavetableOscillator, while playing", || {
+        for step in 0..32u8 {
+            oscillator.set_frequency(55.0 * 2f64.powf(f64::from(step) / 4.0));
+            oscillator.set_position(f64::from(step % 3) / 2.0);
+            oscillator.set_phase_modulation(f64::from(step) / 32.0);
+            if let Some(table) = spare.take() {
+                // The old table comes back instead of being dropped here.
+                spare = Some(oscillator.set_table(table));
+            }
+            oscillator.process(&mut buffer);
+        }
+    });
+    assert!(all_finite(&buffer));
+}
+
+#[test]
+fn sidechained_dynamics_do_not_use_the_heap() {
+    let mut events = EventBuffer::with_capacity(4);
+    for offset in [3, 50, 50] {
+        events
+            .push(Event {
+                offset,
+                kind: EventKind::NoteOn {
+                    note: NoteRef::new(0, 60),
+                    velocity: 1.0,
+                },
+            })
+            .unwrap();
+    }
+    let transport = Transport::STOPPED;
+    let mut key = AudioBuffer::<f32>::new(1, 256);
+    key.channel_mut(0).fill(0.9);
+    let context = ProcessContext::new(&events, &transport).with_sidechain(&key);
+    let mut chain = (
+        Compressor::<f32>::new().with_key_source(KeySource::Sidechain),
+        NoiseGate::<f32>::new().with_key_source(KeySource::Sidechain),
+        Expander::<f32>::new().with_key_source(KeySource::Sidechain),
+    );
+    chain.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("sidechained dynamics", || {
+        for frames in [256, 1, 100] {
+            buffer.set_num_frames(frames);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            chain.process_with(&mut buffer, &context);
+            // Split at the events, each piece keyed on its own frames.
+            split_at_events_with(
+                &mut chain,
+                &mut buffer,
+                &context,
+                |_, _| {},
+                |chain, piece, piece_context| chain.process_with(piece, piece_context),
+            );
+        }
+    });
+    assert!(all_finite(&buffer));
+}
+
+#[test]
+fn swapping_impulse_responses_while_playing_does_not_use_the_heap() {
+    const LOADS: usize = 24;
+    let (mut convolution, mut loader) = Convolution::<f32>::with_capacity(2);
+    convolution.prepare(&SPEC);
+    // Lets the builder give up if engines never come back, so that a broken
+    // processor fails the test instead of hanging it.
+    let stop = Arc::new(AtomicBool::new(false));
+    let give_up = Arc::clone(&stop);
+
+    // Engines are built, sent and dropped on another thread, as an editor
+    // would. Only this thread is watched.
+    let builder = std::thread::spawn(move || {
+        for index in 0..LOADS {
+            let routing = if index % 2 == 0 {
+                ConvolutionRouting::Parallel
+            } else {
+                ConvolutionRouting::TrueStereo
+            };
+            let mut engine = convolution_engine(500 + 300 * index, routing, index % 3 != 0);
+            loop {
+                if give_up.load(Ordering::Relaxed) {
+                    return (index, loader.in_flight());
+                }
+                match loader.load_with_crossfade(engine, 64 * (index % 4)) {
+                    Ok(()) => break,
+                    Err(refused) => {
+                        engine = *refused;
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
+        // Wait until the audio thread has taken the last one.
+        while loader.in_flight() > 1 && !give_up.load(Ordering::Relaxed) {
+            loader.collect();
+            std::thread::yield_now();
+        }
+        (LOADS, loader.in_flight())
+    });
+
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let mut blocks = 0usize;
+    assert_no_heap_use("Convolution, while engines are swapped", || {
+        while !builder.is_finished() && blocks < 100_000 {
+            buffer.set_num_frames([256, 64, 1, 200][blocks % 4]);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            convolution.process(&mut buffer);
+            blocks += 1;
+        }
+    });
+    stop.store(true, Ordering::Relaxed);
+    let (loaded, in_flight) = builder.join().unwrap();
+    assert_eq!(loaded, LOADS, "the audio thread stopped taking engines");
+    assert_eq!(in_flight, 1, "engines were lost");
+    assert!(all_finite(&buffer));
+    assert!(convolution.engine().is_some());
 }

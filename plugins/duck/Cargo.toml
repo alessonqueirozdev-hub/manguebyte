@@ -14,6 +14,29 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
+# The editor (ADR 0007, phase 1, item 9): the glue that opens it in the
+# host's window, and the widgets it is made of. Neither reaches the audio
+# thread: the processor only stores the meter's level into an atomic.
+manguebyte-gui.workspace = true
+manguebyte-ui.workspace = true
+
+[dev-dependencies]
+# The tests open the editor headless, through the glue's test hook.
+manguebyte-gui = { workspace = true, features = ["headless"] }
+manguebyte-gfx.workspace = true
+# Real windows for the test with two plugin binaries in one process.
+manguebyte-window = { workspace = true, features = ["testing"] }
+# The second plugin binary of that test. Depending on it makes cargo build
+# its shared library next to the test executable, as it does this one's.
+mangue-pluck = { path = "../pluck" }
+
+# Loading and unloading the two plugin binaries in that test. 0.61.2
+# declares Rust 1.71 and is the version `manguebyte-window` uses.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
 
 [package.metadata.manguebyte]
 name = "Mangue Duck"

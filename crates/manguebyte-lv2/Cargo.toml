@@ -1,0 +1,22 @@
+[package]
+name = "manguebyte-lv2"
+description = "Builds LV2 plugins from the Manguebyte plugin API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-midi.workspace = true
+manguebyte-params.workspace = true
+manguebyte-plugin.workspace = true
+
+[lints]
+workspace = true

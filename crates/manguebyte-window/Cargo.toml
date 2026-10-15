@@ -1,0 +1,43 @@
+[package]
+name = "manguebyte-window"
+description = "Platform windows for the Manguebyte user interface: a child window seam, a headless backend for tests and a Win32 backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# Pixmaps and integer rectangles: what a window presents and what it damages.
+manguebyte-gfx.workspace = true
+# The editor contract: the host's parent window, keys and modifiers.
+manguebyte-plugin.workspace = true
+
+# The Win32 declarations (ADR 0007, decision 4). 0.61.2 declares Rust 1.71
+# and is already in Cargo.lock. Only the modules named here are compiled.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+# Real top-level windows, pixel read-back, input injection and message
+# loops for tests and probes (`win32::testing`). Never for a plugin.
+testing = []
+
+[dev-dependencies]
+# The crate's own tests and the probe use the testing helpers.
+manguebyte-window = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

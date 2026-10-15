@@ -10,16 +10,25 @@
 //! - a main input processed in place, and a sidechain input;
 //! - a bypass switch the host knows about, that does not click;
 //! - automation applied on its exact frame while audio runs through;
-//! - a test that feeds both inputs, with no host.
+//! - a test that feeds both inputs, with no host;
+//! - an editor ([`editor()`]) with a knob for each parameter, the bypass
+//!   switch and a gain-reduction meter the audio thread feeds through an
+//!   atomic.
 //!
 //! Run `scripts/bundle-clap.sh mangue-duck "Mangue Duck"` or
 //! `scripts/bundle-vst3.sh mangue-duck "Mangue Duck"` to get a plugin a
 //! host can load.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use manguebyte::decibels::{db_to_gain, gain_to_db};
+use manguebyte::plugin::editor::EditorSpec;
 use manguebyte::prelude::*;
+
+mod editor;
+
+pub use editor::{EDITOR_SIZE, METER_TOP_DB, editor};
 
 /// The plugin's parameters.
 pub struct DuckParams {
@@ -113,12 +122,53 @@ pub struct Duck {
     cursor: usize,
     /// The gain applied on the last frame rendered, for a meter.
     last_gain: f64,
+    /// The gain applied on the last frame rendered, after the bypass fade:
+    /// what the input was actually multiplied by.
+    last_applied: f32,
+    /// How far the input was turned down at the end of the last block, in
+    /// decibels, for the editor's meter. Stored once per block.
+    reduction: Arc<AtomicF32>,
 }
 
 impl Duck {
     /// How far the input is being turned down right now, in decibels.
     pub fn reduction_db(&self) -> f64 {
         -gain_to_db(self.last_gain)
+    }
+
+    /// What the editor's meter reads: how far the input was turned down on
+    /// the last frame of the last block, after the bypass fade, in
+    /// decibels (0 when bypassed or not ducking). `process` stores it once
+    /// per block with a relaxed atomic store, which does not wait, lock or
+    /// allocate.
+    pub fn reduction_meter(&self) -> Arc<AtomicF32> {
+        Arc::clone(&self.reduction)
+    }
+
+    /// The plugin's editor, as [`editor()`] makes it for this instance's
+    /// parameters and meter. [`Plugin::editor`] returns the same, boxed.
+    ///
+    /// ```
+    /// use mangue_duck::{Duck, EDITOR_SIZE};
+    /// use manguebyte::plugin::Plugin;
+    /// use manguebyte::plugin::editor::{EditorSpec, WindowApi};
+    ///
+    /// let duck = Duck::new();
+    /// let spec = duck.editor_spec();
+    /// assert_eq!(spec.logical_size(), EDITOR_SIZE);
+    /// assert_eq!(spec.supports(WindowApi::Win32), cfg!(windows));
+    /// assert!(duck.editor().is_some());
+    /// ```
+    pub fn editor_spec(&self) -> manguebyte_gui::Editor {
+        editor(Arc::clone(&self.params), Arc::clone(&self.reduction))
+    }
+
+    /// Publishes the reduction applied on the last frame for the meter.
+    fn publish_reduction(&self) {
+        let db = -gain_to_db(f64::from(self.last_applied)) as f32;
+        // No "-0": unity gain is no reduction.
+        let db = if db > 0.0 { db } else { 0.0 };
+        self.reduction.store(db, Ordering::Relaxed);
     }
 
     /// The share of the remaining distance a follower with this time
@@ -198,6 +248,7 @@ impl Duck {
             self.last_gain = gain;
             // Bypass fades the effect out instead of switching it off.
             let applied = 1.0 + self.effect.next_value() * (gain as f32 - 1.0);
+            self.last_applied = applied;
             for channel in piece.iter_channels_mut() {
                 channel[frame] *= applied;
             }
@@ -235,6 +286,8 @@ impl Plugin for Duck {
             effect: Smoothed::new(1.0),
             cursor: 0,
             last_gain: 1.0,
+            last_applied: 1.0,
+            reduction: Arc::new(AtomicF32::new(0.0)),
             params,
         };
         duck.take_params();
@@ -260,12 +313,19 @@ impl Plugin for Duck {
         split_at_events(self, buffer, context.events, Self::handle, |duck, piece| {
             duck.render(piece, sidechain)
         });
+        self.publish_reduction();
     }
 
     fn reset(&mut self) {
         self.envelope = 0.0;
         self.last_gain = 1.0;
+        self.last_applied = 1.0;
         self.effect.set_immediate(self.effect.target());
+        self.publish_reduction();
+    }
+
+    fn editor(&self) -> Option<Box<dyn EditorSpec>> {
+        Some(Box::new(self.editor_spec()))
     }
 }
 
