@@ -7,6 +7,11 @@
 //! - [`ParamSet`] groups parameters, finds them by identifier, and saves and
 //!   restores them as [`ParamState`].
 //! - [`ParamSmoother`] gives the audio thread a click-free view of a value.
+//! - [`ParamDescription`] is what an editor needs to draw a control for a
+//!   parameter, as data: [`Param::describe`] makes one,
+//!   [`ParamSet::descriptions_json`] writes a whole set as JSON, and
+//!   [`ParamSet::value_to_text`] and [`ParamSet::text_to_value`] convert
+//!   values in the parameter's own words.
 //!
 //! # Threads
 //!
@@ -20,15 +25,18 @@
 //! and a timer on the interface side.
 //!
 //! Reading and writing values is real-time safe. Converting to and from
-//! text, and saving and loading state, allocate and belong elsewhere.
+//! text, describing parameters, and saving and loading state, allocate and
+//! belong elsewhere.
 
 #![forbid(unsafe_code)]
 
+mod describe;
 mod param;
 mod range;
 mod set;
 mod smoother;
 
+pub use describe::{Curve, ParamDescription, ParamScale};
 pub use manguebyte_core::ParamId;
 pub use param::{BoolParam, ChoiceParam, FloatParam, IntParam, Param, ParamFlags, ParamInfo};
 pub use range::FloatRange;

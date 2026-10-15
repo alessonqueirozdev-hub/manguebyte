@@ -21,8 +21,8 @@
 //! | Event bus | For instruments and note effects |
 //! | Automation | Every point of a parameter's queue is delivered on its frame, so automation is sample-accurate |
 //! | Notes | Note on and off with their ids, note tuning, polyphonic pressure, and the volume, pan, tuning, vibrato and brightness note expressions |
-//! | MIDI controllers | Controllers, channel pressure and pitch bend, which VST 3 delivers only as parameters, arrive as MIDI events again |
-//! | Parameters | Listing, values, text both ways. The hidden parameters that carry MIDI controllers are filed in a unit of their own |
+//! | MIDI controllers | Controllers, channel pressure and pitch bend, which VST 3 delivers only as parameters, arrive as MIDI events again, on their frames. Only the ones in [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS) are exposed: one hidden parameter each, which `IMidiMapping` gives for every channel and whose moves arrive on all 16 channels, or, for a plugin that asked for channels, one per controller and channel, whose moves arrive on their own channel. See [MIDI controllers](#midi-controllers) |
+//! | Parameters | Listing, values, text both ways. The hidden parameters that carry MIDI controllers come after the plugin's own and are filed in a unit of their own |
 //! | State | Saved and restored as text; another plugin's state is refused |
 //! | Latency | Reported from the plugin each time it is activated |
 //! | Blocks with no audio | Parameter changes are stored and announced on the next block that has audio; controller moves are kept for it |
@@ -37,6 +37,41 @@
 //! Not there yet: a window for the editor, 64-bit processing, changing the
 //! bus layout, program lists, and telling the host about a change the
 //! plugin made to its own parameter outside an editor's gesture.
+//!
+//! # MIDI controllers
+//!
+//! VST 3 has no MIDI controller events. A host that receives a controller,
+//! channel pressure or pitch bend asks the plugin's `IMidiMapping` which
+//! parameter stands for it on that channel and moves that parameter, and
+//! the wrapper turns the move back into the MIDI message on its frame.
+//!
+//! What a plugin declares in
+//! [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS)
+//! decides which parameters exist. With the default,
+//! [`MidiControllers::MUSICAL`](manguebyte_plugin::MidiControllers::MUSICAL),
+//! an instrument gets 13 hidden parameters, titled `MIDI Pitch Bend`,
+//! `MIDI Pressure` and `MIDI CC 64` and so on, after its own. Every channel
+//! maps to the same parameter, so the channel a move came from is lost;
+//! the wrapper delivers each move as 16 messages, one on each channel in
+//! channel order, on the move's frame. A plugin that keeps controllers per
+//! channel, such as one built on `manguebyte_dsp::Synth`, then bends,
+//! holds and silences notes on every channel, at the price of one
+//! channel's controllers reaching the notes of the others. A plugin that
+//! asked for channels gets one parameter per controller and channel,
+//! titled `MIDI 1 CC 64` to `MIDI 16 CC 64`, and each move arrives once,
+//! on its own channel. A block carries at most 4,096 events, so 256 moves
+//! of shared controllers fill it. A controller outside the set is mapped
+//! to nothing and never arrives. An effect has no event bus and no
+//! controller parameters.
+//!
+//! The parameters have the `kIsHidden` flag, but some hosts, REAPER among
+//! them, list hidden parameters in their generic view anyway; with the
+//! default set that is 13 entries, not the 2,080 that every controller on
+//! every channel would make. Their ids are fixed: the controller with
+//! index `c` (as [`MidiController::index`](manguebyte_plugin::MidiController::index)
+//! numbers it) on channel `ch` is `0x7F00_0000 + ch * 130 + c`, and a
+//! plugin's own parameters may not use that range. They are not part of
+//! the plugin's state.
 //!
 //! # Editors
 //!

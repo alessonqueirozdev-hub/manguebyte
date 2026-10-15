@@ -1,0 +1,32 @@
+[package]
+name = "manguebyte-sampler"
+description = "An SFZ sampler for the Manguebyte audio framework: parses SFZ instruments, loads their samples from files or memory and plays them sample-accurately."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-formats.workspace = true
+manguebyte-midi.workspace = true
+
+[[example]]
+# Checks the sampler in WebAssembly: built as a library, it exports a
+# function a JavaScript engine can call.
+name = "wasm_smoke"
+crate-type = ["cdylib"]
+
+[[example]]
+# The cases of the `bench` example, built for a JavaScript engine to time.
+name = "wasm_bench"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

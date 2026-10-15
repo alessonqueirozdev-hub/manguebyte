@@ -19,6 +19,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_void};
+use std::marker::PhantomData;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,8 +27,11 @@ use std::sync::{Arc, Mutex};
 use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
+use manguebyte_midi::MidiMessage;
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
-use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind};
+use manguebyte_plugin::{
+    AudioLayout, MidiController, MidiControllers, Plugin, PluginInfo, PluginKind,
+};
 use manguebyte_vst3::vst3::Steinberg::Vst::{
     self as vst, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentTrait,
     IEditController, IEditControllerTrait, IEventList, IEventListTrait, IMidiMapping,
@@ -1220,8 +1224,10 @@ fn an_instrument_takes_notes_expressions_controllers_and_a_sidechain() {
         assert_eq!(arrangement, vst::SpeakerArr::kMono);
     }
 
-    // MIDI controllers arrive as parameters: one hidden parameter for each
-    // of 130 controllers on each of 16 channels, after the plugin's own.
+    // MIDI controllers arrive as parameters. `Keys` declares nothing, so it
+    // has the musical default: one hidden parameter for each of its 13
+    // controllers, shared by every channel, after the plugin's own.
+    assert_eq!(Keys::MIDI_CONTROLLERS, MidiControllers::MUSICAL);
     let mapping: ComPtr<IMidiMapping> = host.component.cast().unwrap();
     let controller_id = |channel: i16, controller: u32| unsafe {
         let mut id = 0u32;
@@ -1231,28 +1237,32 @@ fn an_instrument_takes_notes_expressions_controllers_and_a_sidechain() {
     let bend = controller_id(0, vst::ControllerNumbers_::kPitchBend as u32).unwrap();
     let sustain = controller_id(0, 64).unwrap();
     assert_ne!(bend, sustain);
-    assert_ne!(bend, controller_id(1, 129).unwrap());
+    assert_eq!(controller_id(1, 129), Some(bend));
+    assert_eq!(controller_id(15, 64), Some(sustain));
     assert!(controller_id(16, 64).is_none());
     assert!(controller_id(0, 130).is_none());
+    // Not in the musical set.
+    assert!(controller_id(0, 74).is_none());
     unsafe {
-        assert_eq!(host.controller.getParameterCount(), 1 + 130 * 16);
+        assert_eq!(host.controller.getParameterCount(), 1 + 13);
         // Pitch bend rests in the middle.
         assert_eq!(host.controller.getParamNormalized(bend), 0.5);
     }
-    let hidden = host.param_info(1 + 64).unwrap();
+    // In the order of the controllers: 1, 2, 7, 10, 11, then 64.
+    let hidden = host.param_info(1 + 5).unwrap();
     assert_eq!(hidden.id, sustain);
-    assert_eq!(wide(&hidden.title), "MIDI 1 CC 64");
+    assert_eq!(wide(&hidden.title), "MIDI CC 64");
     assert_ne!(
         hidden.flags & vst::ParameterInfo_::ParameterFlags_::kIsHidden as i32,
         0
     );
     assert_eq!(
-        wide(&host.param_info(1 + 129).unwrap().title),
-        "MIDI 1 Pitch Bend"
+        wide(&host.param_info(1 + 12).unwrap().title),
+        "MIDI Pitch Bend"
     );
     assert_eq!(
-        wide(&host.param_info(1 + 130 + 128).unwrap().title),
-        "MIDI 2 Pressure"
+        wide(&host.param_info(1 + 11).unwrap().title),
+        "MIDI Pressure"
     );
 
     // Halving the volume of the note with id 5: a quarter of the range is
@@ -1427,4 +1437,1095 @@ fn note_expressions_are_announced_for_instruments_only() {
     let effect = Host::new::<Level>(plugin_factory::<Level>());
     let expressions: ComPtr<INoteExpressionController> = effect.component.cast().unwrap();
     unsafe { assert_eq!(expressions.getNoteExpressionCount(0, 0), 0) };
+}
+
+// --- Declared MIDI controllers ---------------------------------------------
+
+/// The first id of the range reserved for controller parameters, as the
+/// crate documents it.
+const MIDI_BASE: u32 = 0x7F00_0000;
+
+/// Miri interprets every call, so under it the exhaustive sweeps below
+/// take every `SPARSE`th case and the random runs are shorter.
+const SPARSE: usize = if cfg!(miri) { 37 } else { 1 };
+const ROUNDS: usize = if cfg!(miri) { 12 } else { 300 };
+
+/// What a `Probe` declares, and where it writes down what it hears.
+trait Declaration: 'static {
+    const ID: &'static str;
+    const CONTROLLERS: MidiControllers;
+    const KIND: PluginKind = PluginKind::Instrument;
+    fn heard() -> &'static Mutex<Vec<(u32, MidiMessage)>>;
+}
+
+struct ProbeParams {
+    gain: FloatParam,
+}
+param_set!(ProbeParams { gain });
+
+/// Writes down every MIDI message it is given, with its frame.
+struct Probe<D> {
+    params: Arc<ProbeParams>,
+    declaration: PhantomData<fn() -> D>,
+}
+
+impl<D: Declaration> Plugin for Probe<D> {
+    const INFO: PluginInfo = PluginInfo {
+        id: D::ID,
+        name: "Probe",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Writes down the MIDI it hears",
+        kind: D::KIND,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::MONO_EFFECT;
+    const MIDI_CONTROLLERS: MidiControllers = D::CONTROLLERS;
+    type Params = ProbeParams;
+
+    fn new() -> Self {
+        Self {
+            params: Arc::new(ProbeParams {
+                gain: FloatParam::new("gain", "Gain", FloatRange::linear(0.0, 1.0), 0.5),
+            }),
+            declaration: PhantomData,
+        }
+    }
+    fn params(&self) -> Arc<ProbeParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, _: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        // A lock that is never contended, and room made before the block:
+        // neither touches the heap.
+        let mut heard = D::heard().lock().unwrap();
+        for event in context.events {
+            if let EventKind::Midi(message) = event.kind {
+                if heard.len() < heard.capacity() {
+                    heard.push((event.offset, message));
+                }
+            }
+        }
+    }
+}
+
+macro_rules! declaration {
+    ($name:ident, $id:literal, $controllers:expr $(, $kind:expr)?) => {
+        struct $name;
+        impl Declaration for $name {
+            const ID: &'static str = $id;
+            const CONTROLLERS: MidiControllers = $controllers;
+            $(const KIND: PluginKind = $kind;)?
+            fn heard() -> &'static Mutex<Vec<(u32, MidiMessage)>> {
+                static HEARD: Mutex<Vec<(u32, MidiMessage)>> = Mutex::new(Vec::new());
+                &HEARD
+            }
+        }
+    };
+}
+
+declaration!(
+    Musical,
+    "org.manguebyte.test.musical",
+    MidiControllers::MUSICAL
+);
+declaration!(
+    Nothing,
+    "org.manguebyte.test.nothing",
+    MidiControllers::NONE
+);
+declaration!(
+    Listed,
+    "org.manguebyte.test.listed",
+    MidiControllers::list(&[
+        MidiController::control(74).unwrap(),
+        MidiController::PITCH_BEND,
+        MidiController::control(0).unwrap(),
+    ])
+);
+declaration!(
+    Channels,
+    "org.manguebyte.test.channels",
+    MidiControllers::MUSICAL.per_channel()
+);
+declaration!(Shared, "org.manguebyte.test.shared", MidiControllers::ALL);
+declaration!(
+    Everything,
+    "org.manguebyte.test.everything",
+    MidiControllers::ALL.per_channel()
+);
+declaration!(
+    EffectWithAll,
+    "org.manguebyte.test.effect",
+    MidiControllers::ALL.per_channel(),
+    PluginKind::Effect
+);
+
+/// The probes share their notebooks, so their tests take turns.
+static PROBES: Mutex<()> = Mutex::new(());
+
+/// The controllers a probe of declaration `D` should expose: none for an
+/// effect, which has no event bus.
+fn declared<D: Declaration>() -> MidiControllers {
+    if D::KIND == PluginKind::Effect {
+        MidiControllers::NONE
+    } else {
+        D::CONTROLLERS
+    }
+}
+
+/// The hidden parameters a declaration should give, in the host's order,
+/// with the channel each one is for (`None` when shared by all).
+fn expected_hidden(set: MidiControllers) -> Vec<(u32, Option<u32>, MidiController)> {
+    let channels = if set.is_per_channel() { 16 } else { 1 };
+    let mut hidden = Vec::new();
+    for channel in 0..channels {
+        for controller in set.iter() {
+            let id = MIDI_BASE + channel * 130 + controller.index() as u32;
+            hidden.push((id, set.is_per_channel().then_some(channel), controller));
+        }
+    }
+    hidden
+}
+
+/// The parameter IMidiMapping should give for `controller` on `channel` of
+/// bus `bus`, if any.
+fn expected_mapping(set: MidiControllers, bus: i32, channel: i16, controller: i16) -> Option<u32> {
+    let channel = u32::try_from(channel)
+        .ok()
+        .filter(|&channel| channel < 16)?;
+    let controller = MidiController::from_index(usize::try_from(controller).ok()?)?;
+    if bus != 0 || !set.contains(controller) {
+        return None;
+    }
+    let own = if set.is_per_channel() { channel } else { 0 };
+    Some(MIDI_BASE + own * 130 + controller.index() as u32)
+}
+
+/// `controller` on `channel` at `value`, which is 0 to 127, or -8,192 to
+/// 8,191 for pitch bend.
+fn message(channel: u8, controller: MidiController, value: i32) -> MidiMessage {
+    match controller.control_number() {
+        Some(number) => MidiMessage::ControlChange {
+            channel,
+            controller: number,
+            value: u8::try_from(value).unwrap(),
+        },
+        None if controller == MidiController::PITCH_BEND => MidiMessage::PitchBend {
+            channel,
+            value: i16::try_from(value).unwrap(),
+        },
+        None => MidiMessage::ChannelPressure {
+            channel,
+            pressure: u8::try_from(value).unwrap(),
+        },
+    }
+}
+
+/// What the plugin should hear when the hidden parameter `id` moves to a
+/// position whose MIDI value is `value`: nothing for an id it does not
+/// have, one message on the parameter's channel for a plugin that asked
+/// for channels, and otherwise the same message on each of the 16
+/// channels, in channel order.
+fn expected_messages(set: MidiControllers, id: u32, value: i32) -> Vec<MidiMessage> {
+    let Some((_, channel, controller)) = expected_hidden(set)
+        .into_iter()
+        .find(|&(hidden, ..)| hidden == id)
+    else {
+        return Vec::new();
+    };
+    match channel {
+        Some(channel) => vec![message(channel as u8, controller, value)],
+        None => (0..16)
+            .map(|channel| message(channel, controller, value))
+            .collect(),
+    }
+}
+
+/// `message` on frame `offset` on each of the 16 channels, in channel
+/// order, as a controller shared by every channel is heard.
+fn everywhere(offset: u32, message: MidiMessage) -> Vec<(u32, MidiMessage)> {
+    let controller = MidiController::of(&message).unwrap().1;
+    let value = match message {
+        MidiMessage::ControlChange { value, .. } => i32::from(value),
+        MidiMessage::ChannelPressure { pressure, .. } => i32::from(pressure),
+        MidiMessage::PitchBend { value, .. } => i32::from(value),
+        other => panic!("not a controller: {other:?}"),
+    };
+    (0..16)
+        .map(|channel| (offset, self::message(channel, controller, value)))
+        .collect()
+}
+
+fn expected_title(channel: Option<u32>, controller: MidiController) -> String {
+    let name = match controller.control_number() {
+        Some(number) => format!("CC {number}"),
+        None if controller == MidiController::PITCH_BEND => "Pitch Bend".to_owned(),
+        None => "Pressure".to_owned(),
+    };
+    match channel {
+        Some(channel) => format!("MIDI {} {name}", channel + 1),
+        None => format!("MIDI {name}"),
+    }
+}
+
+/// A probe of declaration `D`, created through the factory and activated
+/// for blocks of up to 32 frames, with an empty notebook that has room.
+fn probe<D: Declaration>() -> Host {
+    let host = Host::new::<Probe<D>>(plugin_factory::<Probe<D>>());
+    host.activate(48_000.0, 32);
+    let mut heard = D::heard().lock().unwrap();
+    heard.clear();
+    heard.reserve(4_096);
+    host
+}
+
+/// What the probe has heard since it was last asked.
+fn heard<D: Declaration>() -> Vec<(u32, MidiMessage)> {
+    let mut heard = D::heard().lock().unwrap();
+    let copy = heard.clone();
+    // Cleared, not taken: the room stays for the next block.
+    heard.clear();
+    copy
+}
+
+fn mapping_of(host: &Host, bus: i32, channel: i16, controller: i16) -> Option<u32> {
+    let mapping: ComPtr<IMidiMapping> = host.component.cast().unwrap();
+    let mut id = 0xDEAD_BEEF;
+    let result = unsafe { mapping.getMidiControllerAssignment(bus, channel, controller, &mut id) };
+    if result == kResultOk {
+        return Some(id);
+    }
+    assert_eq!(result, kResultFalse);
+    assert_eq!(id, 0xDEAD_BEEF, "a refused query wrote its answer");
+    None
+}
+
+/// Checks the parameter list, units and resting values of a probe of
+/// declaration `D`; returns how many hidden parameters it has.
+fn check_listing<D: Declaration>() -> usize {
+    let host = probe::<D>();
+    let set = declared::<D>();
+    let hidden = expected_hidden(set);
+    let units: ComPtr<IUnitInfo> = host.component.cast().unwrap();
+    unsafe {
+        assert_eq!(
+            host.controller.getParameterCount() as usize,
+            1 + hidden.len(),
+            "{}",
+            D::ID
+        );
+        assert_eq!(units.getUnitCount(), 1 + i32::from(!hidden.is_empty()));
+    }
+    let own = host.param_info(0).unwrap();
+    assert_eq!(wide(&own.title), "Gain");
+    assert_eq!(own.unitId, vst::kRootUnitId);
+
+    for (position, &(id, channel, controller)) in hidden.iter().enumerate() {
+        let info = host.param_info(1 + position as i32).unwrap();
+        assert_eq!(info.id, id, "{} at {position}", D::ID);
+        assert_eq!(wide(&info.title), expected_title(channel, controller));
+        assert_eq!(wide(&info.shortTitle), expected_title(channel, controller));
+        assert_eq!(wide(&info.units), "");
+        assert_eq!(info.stepCount, 0);
+        assert_eq!(
+            info.flags,
+            vst::ParameterInfo_::ParameterFlags_::kIsHidden as i32
+        );
+        assert_eq!(info.unitId, 1);
+        let rest = if controller == MidiController::PITCH_BEND {
+            0.5
+        } else {
+            0.0
+        };
+        assert_eq!(info.defaultNormalizedValue, rest);
+        unsafe {
+            assert_eq!(host.controller.getParamNormalized(id), rest);
+            // The host may set one; the move reaches the plugin through
+            // `process`, so nothing is stored.
+            assert_eq!(host.controller.setParamNormalized(id, 0.3), kResultOk);
+            assert_eq!(host.controller.getParamNormalized(id), rest);
+            assert_eq!(
+                host.controller.setParamNormalized(id, f64::NAN),
+                kInvalidArgument
+            );
+        }
+    }
+    let count = 1 + hidden.len() as i32;
+    for index in [count, count + 1, count + 2_080, i32::MAX, -1, i32::MIN] {
+        assert!(host.param_info(index).is_none(), "{} index {index}", D::ID);
+    }
+
+    // Every other id of the reserved range is no parameter at all.
+    for offset in (0..130 * 16).step_by(SPARSE) {
+        let id = MIDI_BASE + offset;
+        if hidden.iter().any(|&(listed, ..)| listed == id) {
+            continue;
+        }
+        unsafe {
+            assert_eq!(host.controller.getParamNormalized(id), 0.0, "{id:#x}");
+            assert_eq!(
+                host.controller.setParamNormalized(id, 0.5),
+                kInvalidArgument,
+                "{} accepted {id:#x}",
+                D::ID
+            );
+        }
+    }
+    hidden.len()
+}
+
+#[test]
+fn the_parameter_count_is_the_number_of_declared_controllers() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    assert_eq!(check_listing::<Musical>(), 13);
+    assert_eq!(check_listing::<Nothing>(), 0);
+    assert_eq!(check_listing::<Listed>(), 3);
+    assert_eq!(check_listing::<Channels>(), 13 * 16);
+    assert_eq!(check_listing::<Shared>(), 130);
+    assert_eq!(check_listing::<Everything>(), 2_080);
+    assert_eq!(check_listing::<EffectWithAll>(), 0);
+}
+
+/// Asks for every controller on every channel of several buses, and
+/// checks each answer. Returns how many questions were asked.
+fn check_mapping<D: Declaration>() -> usize {
+    let host = probe::<D>();
+    let set = declared::<D>();
+    let listed: Vec<u32> = expected_hidden(set).iter().map(|&(id, ..)| id).collect();
+    let mut reached = vec![false; listed.len()];
+    let channels = (-1..=17).chain([i16::MIN, i16::MAX]);
+    let controllers: Vec<i16> = if cfg!(miri) {
+        vec![-1, 0, 1, 64, 127, 128, 129, 130, i16::MAX]
+    } else {
+        (-1..=140).chain([i16::MIN, i16::MAX]).collect()
+    };
+    let mut asked = 0;
+    for bus in [0, 1, -1, i32::MAX, i32::MIN] {
+        for channel in channels.clone() {
+            for &controller in &controllers {
+                asked += 1;
+                let answer = mapping_of(&host, bus, channel, controller);
+                assert_eq!(
+                    answer,
+                    expected_mapping(set, bus, channel, controller),
+                    "{} bus {bus} channel {channel} controller {controller}",
+                    D::ID
+                );
+                if let Some(id) = answer {
+                    let at = listed.iter().position(|&listed| listed == id);
+                    let at = at.expect("mapped to a parameter that is not listed");
+                    reached[at] = true;
+                }
+            }
+        }
+    }
+    if !cfg!(miri) {
+        assert!(reached.iter().all(|&reached| reached), "{}", D::ID);
+    }
+
+    // No answer without somewhere to put it.
+    let mapping: ComPtr<IMidiMapping> = host.component.cast().unwrap();
+    for controller in [0, 64, 128, 129] {
+        let result =
+            unsafe { mapping.getMidiControllerAssignment(0, 0, controller, ptr::null_mut()) };
+        assert_eq!(result, kResultFalse);
+    }
+    asked
+}
+
+#[test]
+fn every_channel_and_controller_is_mapped_as_declared() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut asked = 0;
+    asked += check_mapping::<Musical>();
+    asked += check_mapping::<Nothing>();
+    asked += check_mapping::<Listed>();
+    asked += check_mapping::<Channels>();
+    asked += check_mapping::<Shared>();
+    asked += check_mapping::<Everything>();
+    asked += check_mapping::<EffectWithAll>();
+    if !cfg!(miri) {
+        assert_eq!(asked, 7 * 5 * 21 * 144);
+    }
+
+    // Shared: one parameter, the same for all sixteen channels.
+    let host = probe::<Musical>();
+    let ids: Vec<_> = (0..16)
+        .map(|channel| mapping_of(&host, 0, channel, 64))
+        .collect();
+    assert_eq!(ids, vec![Some(MIDI_BASE + 64); 16]);
+    drop(host);
+    // Per channel: sixteen.
+    let host = probe::<Channels>();
+    let ids: Vec<_> = (0..16)
+        .map(|channel| mapping_of(&host, 0, channel, 64))
+        .collect();
+    let apart: Vec<_> = (0..16)
+        .map(|channel| Some(MIDI_BASE + channel * 130 + 64))
+        .collect();
+    assert_eq!(ids, apart);
+}
+
+#[test]
+fn controller_moves_arrive_as_midi_on_their_frames() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    let host = probe::<Musical>();
+    // The host asks on whatever channel the message came in on.
+    let bend = mapping_of(&host, 0, 5, 129).unwrap();
+    let pedal = mapping_of(&host, 0, 0, 64).unwrap();
+    let volume = mapping_of(&host, 0, 15, 7).unwrap();
+    let pressure = mapping_of(&host, 0, 3, 128).unwrap();
+    let reset = mapping_of(&host, 0, 9, 121).unwrap();
+    let changes = vec![
+        (bend, vec![(3, 1.0), (10, 0.5), (30, 0.0)]),
+        // A value that is not a number is dropped; out of range is clamped.
+        (pedal, vec![(0, 2.0), (8, f64::NAN), (31, -1.0)]),
+        (volume, vec![(7, 0.5)]),
+        (pressure, vec![(12, 0.25)]),
+        (reset, vec![(20, 0.0)]),
+        // Not declared: CC 74, and the pedal's id for channel 2, which a
+        // probe that shares its controllers does not have.
+        (MIDI_BASE + 74, vec![(5, 1.0)]),
+        (MIDI_BASE + 130 + 64, vec![(6, 1.0)]),
+    ];
+    let processed = host.process(&mut [vec![0.0f32; 32]], 32, None, changes, vec![], None);
+    assert_eq!(processed.status, kResultOk);
+    assert_eq!(processed.heap_calls, 0, "controller moves used the heap");
+    let cc = |controller, value| MidiMessage::ControlChange {
+        channel: 0,
+        controller,
+        value,
+    };
+    // The probe shares its controllers: the host's channel is lost, so
+    // each move is heard on every channel, channel by channel, on its
+    // frame.
+    let moves = [
+        (0, cc(64, 127)),
+        (
+            3,
+            MidiMessage::PitchBend {
+                channel: 0,
+                value: 8_191,
+            },
+        ),
+        (7, cc(7, 64)),
+        (
+            10,
+            MidiMessage::PitchBend {
+                channel: 0,
+                value: 0,
+            },
+        ),
+        (
+            12,
+            MidiMessage::ChannelPressure {
+                channel: 0,
+                pressure: 32,
+            },
+        ),
+        (20, cc(121, 0)),
+        (
+            30,
+            MidiMessage::PitchBend {
+                channel: 0,
+                value: -8_192,
+            },
+        ),
+        (31, cc(64, 0)),
+    ];
+    let got = heard::<Musical>();
+    assert_eq!(got.len(), 8 * 16);
+    assert_eq!(
+        got,
+        moves
+            .iter()
+            .flat_map(|&(offset, message)| everywhere(offset, message))
+            .collect::<Vec<_>>()
+    );
+    // Spelled out for one of them: the volume, on the tenth channel.
+    assert_eq!(
+        got[2 * 16 + 9],
+        (
+            7,
+            MidiMessage::ControlChange {
+                channel: 9,
+                controller: 7,
+                value: 64
+            }
+        )
+    );
+    drop(host);
+
+    // Per channel: each keeps its own.
+    let host = probe::<Channels>();
+    let pedal_9 = mapping_of(&host, 0, 9, 64).unwrap();
+    let bend_2 = mapping_of(&host, 0, 2, 129).unwrap();
+    let bend_15 = mapping_of(&host, 0, 15, 129).unwrap();
+    let changes = vec![
+        (pedal_9, vec![(4, 1.0)]),
+        (bend_2, vec![(1, 0.75)]),
+        (bend_15, vec![(1, 0.25)]),
+        // Channel 2's CC 74 is not declared.
+        (MIDI_BASE + 2 * 130 + 74, vec![(2, 1.0)]),
+    ];
+    let processed = host.process(&mut [vec![0.0f32; 8]], 8, None, changes, vec![], None);
+    assert_eq!(processed.heap_calls, 0);
+    assert_eq!(
+        heard::<Channels>(),
+        vec![
+            (
+                1,
+                MidiMessage::PitchBend {
+                    channel: 2,
+                    value: 4_095
+                }
+            ),
+            (
+                1,
+                MidiMessage::PitchBend {
+                    channel: 15,
+                    value: -4_096
+                }
+            ),
+            (
+                4,
+                MidiMessage::ControlChange {
+                    channel: 9,
+                    controller: 64,
+                    value: 127
+                }
+            ),
+        ]
+    );
+    drop(host);
+
+    // A plugin that declares nothing hears nothing, whatever the host
+    // sends.
+    let host = probe::<Nothing>();
+    let changes = (0..130 * 16)
+        .step_by(7)
+        .map(|offset| (MIDI_BASE + offset, vec![(0, 1.0)]))
+        .collect();
+    let processed = host.process(&mut [vec![0.0f32; 8]], 8, None, changes, vec![], None);
+    assert_eq!(processed.status, kResultOk);
+    assert_eq!(processed.heap_calls, 0);
+    assert_eq!(heard::<Nothing>(), vec![]);
+}
+
+#[test]
+fn controller_positions_become_exact_midi_values() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Per channel, so each move is heard once, on channel 3.
+    let host = probe::<Channels>();
+    let modulation = mapping_of(&host, 0, 3, 1).unwrap();
+    let pressure = mapping_of(&host, 0, 3, 128).unwrap();
+    let bend = mapping_of(&host, 0, 3, 129).unwrap();
+
+    // Each table is the position the host sends and the MIDI value that
+    // must arrive, worked out by hand: the nearest step, a half step going
+    // up, and the ends for anything past them.
+    let seven_bits: [(f64, Option<i32>); 16] = [
+        (0.0, Some(0)),
+        (0.003, Some(0)),
+        (0.004, Some(1)),
+        (1.0 / 127.0, Some(1)),
+        (0.25, Some(32)),
+        (0.4999, Some(63)),
+        (0.5, Some(64)),
+        (64.0 / 127.0, Some(64)),
+        (0.996, Some(126)),
+        (0.997, Some(127)),
+        (1.0, Some(127)),
+        (1.5, Some(127)),
+        (-0.25, Some(0)),
+        (f64::INFINITY, Some(127)),
+        (f64::NEG_INFINITY, Some(0)),
+        (f64::NAN, None),
+    ];
+    let fourteen_bits: [(f64, Option<i32>); 13] = [
+        (0.0, Some(-8_192)),
+        (0.000_03, Some(-8_192)),
+        (0.000_04, Some(-8_191)),
+        (1.0 / 16_383.0, Some(-8_191)),
+        (0.25, Some(-4_096)),
+        (8_191.0 / 16_383.0, Some(-1)),
+        (0.5, Some(0)),
+        (8_192.0 / 16_383.0, Some(0)),
+        (0.75, Some(4_095)),
+        (1.0, Some(8_191)),
+        (2.0, Some(8_191)),
+        (-1.0, Some(-8_192)),
+        (f64::NAN, None),
+    ];
+    /// A parameter, its table, and the message a MIDI value makes.
+    type Case<'a> = (u32, &'a [(f64, Option<i32>)], fn(i32) -> MidiMessage);
+    let cases: [Case<'_>; 3] = [
+        (modulation, &seven_bits, |value| {
+            MidiMessage::ControlChange {
+                channel: 3,
+                controller: 1,
+                value: value as u8,
+            }
+        }),
+        (pressure, &seven_bits, |value| {
+            MidiMessage::ChannelPressure {
+                channel: 3,
+                pressure: value as u8,
+            }
+        }),
+        (bend, &fourteen_bits, |value| MidiMessage::PitchBend {
+            channel: 3,
+            value: value as i16,
+        }),
+    ];
+    for (id, table, expected) in cases {
+        let points: Vec<(i32, f64)> = table
+            .iter()
+            .enumerate()
+            .map(|(frame, &(position, _))| (frame as i32, position))
+            .collect();
+        let processed = host.process(
+            &mut [vec![0.0f32; 32]],
+            32,
+            None,
+            vec![(id, points)],
+            vec![],
+            None,
+        );
+        assert_eq!(processed.status, kResultOk);
+        assert_eq!(processed.heap_calls, 0);
+        let wanted: Vec<(u32, MidiMessage)> = table
+            .iter()
+            .enumerate()
+            .filter_map(|(frame, &(_, midi))| Some((frame as u32, expected(midi?))))
+            .collect();
+        assert_eq!(heard::<Channels>(), wanted, "{id:#x}");
+    }
+}
+
+// --- A `Synth` instrument on every MIDI channel ------------------------------
+
+/// A `Synth` instrument, as `plugins/pluck` is, with the controllers of
+/// declaration `D`. Its voices play their key number, moved by the wheel.
+struct Ensemble<D> {
+    synth: Synth<KeyVoice>,
+    params: Arc<ProbeParams>,
+    declaration: PhantomData<fn() -> D>,
+}
+
+impl<D: Declaration> Plugin for Ensemble<D> {
+    const INFO: PluginInfo = PluginInfo {
+        id: D::ID,
+        name: "Ensemble",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Plays key numbers on every channel",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout {
+        inputs: 0,
+        outputs: 1,
+        sidechain: 0,
+    };
+    const MIDI_CONTROLLERS: MidiControllers = D::CONTROLLERS;
+    type Params = ProbeParams;
+
+    fn new() -> Self {
+        Self {
+            synth: Synth::with_voices(4, KeyVoice::default),
+            params: Arc::new(ProbeParams {
+                gain: FloatParam::new("gain", "Gain", FloatRange::linear(0.0, 1.0), 0.5),
+            }),
+            declaration: PhantomData,
+        }
+    }
+    fn params(&self) -> Arc<ProbeParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.synth.prepare(spec);
+    }
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.synth.process_with(buffer, context);
+    }
+}
+
+fn ensemble<D: Declaration>() -> Host {
+    let host = Host::new::<Ensemble<D>>(plugin_factory::<Ensemble<D>>());
+    host.activate(48_000.0, 32);
+    host
+}
+
+/// A note on or off on `channel`.
+fn note_on_channel(offset: i32, on: bool, channel: i16, pitch: i16) -> vst::Event {
+    use vst::Event_::EventTypes_ as types;
+    if on {
+        let mut event = event(offset, types::kNoteOnEvent as u32);
+        event.__field0.noteOn = vst::NoteOnEvent {
+            channel,
+            pitch,
+            tuning: 0.0,
+            velocity: 1.0,
+            length: 0,
+            noteId: -1,
+        };
+        event
+    } else {
+        let mut event = event(offset, types::kNoteOffEvent as u32);
+        event.__field0.noteOff = vst::NoteOffEvent {
+            channel,
+            pitch,
+            velocity: 0.0,
+            noteId: -1,
+            tuning: 0.0,
+        };
+        event
+    }
+}
+
+/// Plays one block of eight frames and returns it, checking that the
+/// plugin kept off the heap.
+fn play(host: &Host, changes: Vec<(u32, Vec<(i32, f64)>)>, events: Vec<vst::Event>) -> Vec<f32> {
+    let processed = host.process(&mut [vec![0.0f32; 8]], 8, None, changes, events, None);
+    assert_eq!(processed.status, kResultOk);
+    assert_eq!(processed.heap_calls, 0, "the block used the heap");
+    processed.output[0].clone()
+}
+
+/// Asserts that every sample of `out` is within a thousandth of `want`,
+/// which pitch bend needs: all the way up is two semitones less the one
+/// step in 8,192 that MIDI cannot reach.
+fn assert_near(out: &[f32], want: &[f32], what: &str) {
+    assert_eq!(out.len(), want.len());
+    for (&sample, &wanted) in out.iter().zip(want) {
+        assert!((sample - wanted).abs() < 0.001, "{what}: {out:?}");
+    }
+}
+
+const WHEEL: i16 = 129;
+const PEDAL: i16 = 64;
+const RESET_ALL_CONTROLLERS: i16 = 121;
+const ALL_NOTES_OFF: i16 = 123;
+
+/// A keyboard set to `channel` plays a note and uses the wheel, the pedal,
+/// "reset all controllers" and "all notes off", as the host's MIDI
+/// mapping routes them, and the note on that channel follows each.
+fn one_channel_is_played_with_its_controllers<D: Declaration>(channel: i16) {
+    let host = ensemble::<D>();
+    let what = format!("{} channel {channel}", D::ID);
+    let wheel = mapping_of(&host, 0, channel, WHEEL).unwrap();
+    let pedal = mapping_of(&host, 0, channel, PEDAL).unwrap();
+    let reset = mapping_of(&host, 0, channel, RESET_ALL_CONTROLLERS).unwrap();
+    let off = mapping_of(&host, 0, channel, ALL_NOTES_OFF).unwrap();
+
+    // The wheel all the way up bends the note two semitones.
+    let out = play(
+        &host,
+        vec![(wheel, vec![(4, 1.0)])],
+        vec![note_on_channel(0, true, channel, 60)],
+    );
+    assert_near(
+        &out,
+        &[60.0, 60.0, 60.0, 60.0, 62.0, 62.0, 62.0, 62.0],
+        &what,
+    );
+    // "Reset all controllers" puts the wheel back.
+    let out = play(&host, vec![(reset, vec![(2, 0.0)])], vec![]);
+    assert_near(
+        &out,
+        &[62.0, 62.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0],
+        &what,
+    );
+    // The pedal holds the note after its key is let go...
+    let out = play(
+        &host,
+        vec![(pedal, vec![(2, 1.0)])],
+        vec![note_on_channel(4, false, channel, 60)],
+    );
+    assert_eq!(out, [60.0; 8], "{what}: the pedal did not hold the note");
+    // ...until it is lifted.
+    let out = play(&host, vec![(pedal, vec![(4, 0.0)])], vec![]);
+    assert_eq!(out, [60.0, 60.0, 60.0, 60.0, 0.0, 0.0, 0.0, 0.0], "{what}");
+    // "All notes off" releases a note whose key is still down.
+    let out = play(
+        &host,
+        vec![(off, vec![(4, 0.0)])],
+        vec![note_on_channel(0, true, channel, 64)],
+    );
+    assert_eq!(
+        out,
+        [64.0, 64.0, 64.0, 64.0, 0.0, 0.0, 0.0, 0.0],
+        "{what}: all notes off left the note sounding"
+    );
+}
+
+#[test]
+fn a_synth_on_any_channel_follows_that_channels_controllers() {
+    // Shared, the default every existing instrument gets, and per channel.
+    // Miri interprets every frame, so it plays the first and the last.
+    let channels: &[i16] = if cfg!(miri) {
+        &[0, 15]
+    } else {
+        &[0, 1, 4, 9, 15]
+    };
+    for &channel in channels {
+        one_channel_is_played_with_its_controllers::<Musical>(channel);
+        one_channel_is_played_with_its_controllers::<Channels>(channel);
+    }
+}
+
+#[test]
+fn a_synth_with_shared_controllers_applies_each_to_every_channel() {
+    // Notes on channels 3 and 8, and the wheel of channel 8, as the host
+    // maps it: shared, it bends both notes. This is the price of sharing,
+    // and what the documentation says.
+    let host = ensemble::<Musical>();
+    let wheel = mapping_of(&host, 0, 7, WHEEL).unwrap();
+    let out = play(
+        &host,
+        vec![(wheel, vec![(4, 1.0)])],
+        vec![
+            note_on_channel(0, true, 2, 60),
+            note_on_channel(0, true, 7, 64),
+        ],
+    );
+    assert_near(
+        &out,
+        &[124.0, 124.0, 124.0, 124.0, 128.0, 128.0, 128.0, 128.0],
+        "shared wheel",
+    );
+    drop(host);
+
+    // The pedal of channel 10 holds a note on channel 1.
+    let host = ensemble::<Musical>();
+    let pedal = mapping_of(&host, 0, 9, PEDAL).unwrap();
+    let out = play(
+        &host,
+        vec![(pedal, vec![(2, 1.0)])],
+        vec![
+            note_on_channel(0, true, 0, 60),
+            note_on_channel(4, false, 0, 60),
+        ],
+    );
+    assert_eq!(out, [60.0; 8], "shared pedal");
+    drop(host);
+
+    // Per channel, the same moves reach their own channel alone.
+    let host = ensemble::<Channels>();
+    let wheel = mapping_of(&host, 0, 7, WHEEL).unwrap();
+    let out = play(
+        &host,
+        vec![(wheel, vec![(4, 1.0)])],
+        vec![
+            note_on_channel(0, true, 2, 60),
+            note_on_channel(0, true, 7, 64),
+        ],
+    );
+    assert_near(
+        &out,
+        &[124.0, 124.0, 124.0, 124.0, 126.0, 126.0, 126.0, 126.0],
+        "own wheel",
+    );
+    drop(host);
+
+    let host = ensemble::<Channels>();
+    let pedal = mapping_of(&host, 0, 9, PEDAL).unwrap();
+    let out = play(
+        &host,
+        vec![(pedal, vec![(2, 1.0)])],
+        vec![
+            note_on_channel(0, true, 0, 60),
+            note_on_channel(4, false, 0, 60),
+        ],
+    );
+    assert_eq!(
+        out,
+        [60.0, 60.0, 60.0, 60.0, 0.0, 0.0, 0.0, 0.0],
+        "own pedal"
+    );
+}
+
+#[test]
+fn a_shared_controller_moved_while_stopped_reaches_every_channel() {
+    let host = ensemble::<Musical>();
+    let wheel = mapping_of(&host, 0, 12, WHEEL).unwrap();
+    // The wheel all the way down while the host is stopped.
+    let processed = host.process(
+        &mut [vec![0.0f32; 8]],
+        0,
+        None,
+        vec![(wheel, vec![(0, 0.0)])],
+        vec![],
+        None,
+    );
+    assert_eq!(processed.status, kResultOk);
+    assert_eq!(processed.heap_calls, 0);
+    // Then notes on two channels, both bent down two semitones.
+    let out = play(
+        &host,
+        vec![],
+        vec![
+            note_on_channel(0, true, 12, 60),
+            note_on_channel(0, true, 5, 70),
+        ],
+    );
+    assert_eq!(out, [126.0; 8]);
+}
+
+#[test]
+fn controllers_leave_the_state_alone() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    let host = probe::<Everything>();
+    let before = host.save().unwrap();
+    // Every controller on every channel, moved by the host on both the
+    // controller and the processor.
+    let changes: Vec<_> = expected_hidden(MidiControllers::ALL.per_channel())
+        .iter()
+        .map(|&(id, ..)| (id, vec![(0, 0.75)]))
+        .collect();
+    for &(id, _) in &changes {
+        unsafe { assert_eq!(host.controller.setParamNormalized(id, 0.75), kResultOk) };
+    }
+    let processed = host.process(&mut [vec![0.0f32; 4]], 4, None, changes, vec![], None);
+    assert_eq!(processed.heap_calls, 0);
+    assert_eq!(heard::<Everything>().len(), 2_080);
+
+    let after = host.save().unwrap();
+    assert_eq!(after, before, "a controller move changed the state");
+    let text = String::from_utf8(after).unwrap();
+    assert!(!text.contains("MIDI"), "{text}");
+    unsafe {
+        assert_eq!(
+            host.controller
+                .getParamNormalized(param_id(ParamId::from_name("gain"))),
+            0.5
+        );
+    }
+    // And the state loads back.
+    assert_eq!(host.load(text.as_bytes()), kResultOk);
+}
+
+/// A small, fixed sequence of pseudo-random numbers.
+struct Dice(u64);
+
+impl Dice {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, limit: u64) -> u64 {
+        self.next() % limit
+    }
+}
+
+/// Plays a probe of declaration `D` a long run of random blocks and host
+/// calls, and checks every block against what the declaration says it
+/// should hear. Returns how many points were sent.
+fn fuzz<D: Declaration>(seed: u64) -> usize {
+    let host = probe::<D>();
+    let set = declared::<D>();
+    let hidden = expected_hidden(set);
+    let mut dice = Dice(seed);
+    // Moves from blocks with no audio, waiting for one that has some.
+    let mut waiting: Vec<MidiMessage> = Vec::new();
+    let mut sent = 0;
+    for round in 0..ROUNDS {
+        // A few calls on the main thread in between.
+        for _ in 0..dice.below(4) {
+            let channel = dice.below(20) as i16 - 2;
+            let controller = dice.below(140) as i16 - 2;
+            let bus = dice.below(3) as i32 - 1;
+            assert_eq!(
+                mapping_of(&host, bus, channel, controller),
+                expected_mapping(set, bus, channel, controller)
+            );
+            let id = MIDI_BASE + dice.below(2_100) as u32;
+            let listed = hidden.iter().any(|&(listed, ..)| listed == id);
+            let result = unsafe { host.controller.setParamNormalized(id, 0.5) };
+            assert_eq!(result == kResultOk, listed, "{id:#x}");
+        }
+
+        let frames = if dice.below(5) == 0 {
+            0
+        } else {
+            1 + dice.below(32) as usize
+        };
+        let mut changes = Vec::new();
+        let mut expected: Vec<(u32, MidiMessage)> = Vec::new();
+        for _ in 0..dice.below(6) {
+            let id = match dice.below(4) {
+                0 if !hidden.is_empty() => hidden[dice.below(hidden.len() as u64) as usize].0,
+                1 => MIDI_BASE + dice.below(2_080) as u32,
+                2 => dice.next() as u32,
+                _ => MIDI_BASE + dice.below(130) as u32,
+            };
+            // The MIDI values this id's controller moves through. Pitch
+            // bend has 14 bits; everything else, and an id that is no
+            // controller at all, 7.
+            let is_bend = id.checked_sub(MIDI_BASE).is_some_and(|at| at % 130 == 129);
+            let (lowest, steps) = if is_bend { (-8_192, 16_383) } else { (0, 127) };
+            let mut points = Vec::new();
+            for _ in 0..1 + dice.below(3) {
+                let offset = dice.below(36) as i32 - 2;
+                // Positions on the controller's own steps, whose MIDI value
+                // is known without working anything out, and positions
+                // past either end, which stop there. The rounding between
+                // steps is pinned by
+                // `controller_positions_become_exact_midi_values`.
+                let (value, midi) = match dice.below(10) {
+                    0 => (f64::NAN, None),
+                    1 => (f64::INFINITY, Some(lowest + steps)),
+                    2 => (f64::NEG_INFINITY, Some(lowest)),
+                    3 => (1.0 + dice.below(1_000) as f64 / 100.0, Some(lowest + steps)),
+                    4 => (-((1 + dice.below(1_000)) as f64) / 100.0, Some(lowest)),
+                    _ => {
+                        let step = dice.below(steps as u64 + 1) as i32;
+                        (f64::from(step) / f64::from(steps), Some(lowest + step))
+                    }
+                };
+                points.push((offset, value));
+                if let Some(midi) = midi {
+                    for message in expected_messages(set, id, midi) {
+                        expected.push((offset.max(0) as u32, message));
+                    }
+                }
+            }
+            sent += points.len();
+            changes.push((id, points));
+        }
+        let processed = host.process(&mut [vec![0.0f32; 32]], frames, None, changes, vec![], None);
+        assert_eq!(processed.status, kResultOk);
+        assert_eq!(processed.heap_calls, 0, "{} round {round}", D::ID);
+        // Points of the same frame keep the order they were sent in.
+        expected.sort_by_key(|&(offset, _)| offset);
+        if frames == 0 {
+            // Held for the next block with audio, on its first frame.
+            waiting.extend(expected.into_iter().map(|(_, message)| message));
+            assert_eq!(heard::<D>(), vec![], "{} round {round}", D::ID);
+            continue;
+        }
+        let mut whole: Vec<(u32, MidiMessage)> =
+            waiting.drain(..).map(|message| (0, message)).collect();
+        whole.extend(expected);
+        // Points of the same frame keep the order they were sent in.
+        whole.sort_by_key(|&(offset, _)| offset);
+        assert_eq!(heard::<D>(), whole, "{} round {round}", D::ID);
+    }
+    sent
+}
+
+#[test]
+fn random_host_traffic_is_heard_exactly_as_declared() {
+    let _turn = PROBES.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut sent = 0;
+    sent += fuzz::<Musical>(0x9E37_79B9_7F4A_7C15);
+    sent += fuzz::<Nothing>(0xD1B5_4A32_D192_ED03);
+    sent += fuzz::<Listed>(0x8CB9_2BA7_2F3D_8DD7);
+    sent += fuzz::<Channels>(0xABC9_8388_FB8F_AC03);
+    sent += fuzz::<Shared>(0x2545_F491_4F6C_DD1D);
+    sent += fuzz::<Everything>(0x94D0_49BB_1331_11EB);
+    sent += fuzz::<EffectWithAll>(0xBF58_476D_1CE4_E5B9);
+    assert!(sent > 7 * ROUNDS, "only {sent} points were sent");
 }

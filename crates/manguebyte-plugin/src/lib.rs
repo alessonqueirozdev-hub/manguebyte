@@ -53,9 +53,21 @@
 //!
 //! A plugin can also offer an editor, through [`Plugin::editor`] and the
 //! contract in the [`editor`] module.
+//!
+//! # MIDI controllers
+//!
+//! An instrument or a note effect states which MIDI controllers it listens
+//! to in [`Plugin::MIDI_CONTROLLERS`]. Most need do nothing: the default,
+//! [`MidiControllers::MUSICAL`], covers the pitch wheel, channel pressure,
+//! the usual performance controllers and pedals, and the channel mode
+//! messages. The declaration matters to VST 3, which cannot pass MIDI
+//! controllers through and gives the plugin one hidden parameter for each
+//! one declared; formats that carry MIDI as it is ignore it. See
+//! [`Plugin::MIDI_CONTROLLERS`] for the details.
 
 #![forbid(unsafe_code)]
 
+mod controllers;
 pub mod editor;
 mod harness;
 mod state;
@@ -67,6 +79,7 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_params::ParamSet;
 
+pub use controllers::{MidiController, MidiControllers};
 use editor::EditorSpec;
 pub use harness::Harness;
 pub use state::{StateError, load_state, save_state};
@@ -198,6 +211,97 @@ pub trait Plugin: Send + 'static {
     /// Clears internal state such as filter memory and tails, without
     /// touching parameters.
     fn reset(&mut self) {}
+
+    /// The MIDI controllers the plugin listens to, and whether their
+    /// channel matters. [`MidiControllers::MUSICAL`] unless overridden.
+    /// Only instruments and note effects receive MIDI; for other kinds this
+    /// is not used.
+    ///
+    /// # What each format does with it
+    ///
+    /// - **VST 3** delivers controllers only as parameters, which the
+    ///   plugin has to declare. The wrapper declares one hidden parameter
+    ///   for each controller in the set and maps every channel's controller
+    ///   to it through `IMidiMapping`, so the channel a move came from is
+    ///   lost. It turns each move back into MIDI on its frame **on all 16
+    ///   channels**, one message per channel in channel order, so that a
+    ///   plugin which keeps controllers per channel, as
+    ///   `manguebyte_dsp::Synth` does, applies the wheel, the pedals and
+    ///   "all notes off" to notes on every channel. The cost is that the
+    ///   controllers of one channel reach the notes of the others: the
+    ///   sustain pedal of channel 10 also holds a note on channel 1. With
+    ///   [`per_channel`](MidiControllers::per_channel) it declares one
+    ///   parameter per controller and channel instead, and each message
+    ///   arrives once, on its own channel. A controller outside the set
+    ///   never reaches the plugin. Some hosts, REAPER among them, list
+    ///   hidden parameters next to the plugin's own, so a small set keeps
+    ///   the plugin's list short: [`MidiControllers::ALL`] with channels is
+    ///   2,080 entries.
+    /// - **CLAP**, and anything else that carries MIDI as it is, such as
+    ///   the [`Harness`], deliver every message unchanged, once, on its own
+    ///   channel, whatever the set. A plugin that must behave the same
+    ///   everywhere can drop the others with [`MidiControllers::wants`].
+    ///
+    /// So a plugin that plays notes on several channels and needs each
+    /// channel's controllers kept to that channel, such as an MPE
+    /// instrument or a multitimbral one, asks for channels. Any other
+    /// plugin can leave them shared and treat a controller as applying to
+    /// every channel.
+    ///
+    /// The VST 3 wrapper passes at most 4,096 events to one block; each
+    /// move of a shared controller takes 16 of them.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_dsp::{ProcessContext, ProcessSpec};
+    /// use manguebyte_params::{FloatParam, FloatRange, param_set};
+    /// use manguebyte_plugin::{
+    ///     AudioLayout, MidiController, MidiControllers, Plugin, PluginInfo, PluginKind,
+    /// };
+    ///
+    /// struct OrganParams { level: FloatParam }
+    /// param_set!(OrganParams { level });
+    /// struct Organ { params: Arc<OrganParams> }
+    ///
+    /// impl Plugin for Organ {
+    ///     const INFO: PluginInfo = PluginInfo {
+    ///         id: "org.example.organ",
+    ///         name: "Organ",
+    ///         vendor: "Example",
+    ///         version: "1.0.0",
+    ///         description: "Drawbars and a swell pedal",
+    ///         kind: PluginKind::Instrument,
+    ///     };
+    ///     const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    ///     // An organ has no pitch wheel, but a swell pedal and a sustain
+    ///     // pedal, and it must stop when told to.
+    ///     const MIDI_CONTROLLERS: MidiControllers = MidiControllers::list(&[
+    ///         MidiController::control(11).unwrap(),
+    ///         MidiController::control(64).unwrap(),
+    ///         MidiController::control(120).unwrap(),
+    ///         MidiController::control(123).unwrap(),
+    ///     ]);
+    ///     type Params = OrganParams;
+    ///
+    ///     fn new() -> Self {
+    ///         let level = FloatParam::new("level", "Level", FloatRange::linear(0.0, 1.0), 0.5);
+    ///         Self { params: Arc::new(OrganParams { level }) }
+    ///     }
+    ///     fn params(&self) -> Arc<OrganParams> { Arc::clone(&self.params) }
+    ///     fn prepare(&mut self, _: &ProcessSpec) {}
+    ///     fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+    /// }
+    ///
+    /// assert_eq!(Organ::MIDI_CONTROLLERS.len(), 4);
+    /// // In VST 3 the organ has four hidden parameters and never hears the
+    /// // wheel. In CLAP it hears whatever the host sends, and can drop the
+    /// // same messages itself:
+    /// use manguebyte_midi::MidiMessage;
+    /// let wheel = MidiMessage::PitchBend { channel: 0, value: 100 };
+    /// assert!(!Organ::MIDI_CONTROLLERS.wants(&wheel));
+    /// ```
+    const MIDI_CONTROLLERS: MidiControllers = MidiControllers::MUSICAL;
 
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {

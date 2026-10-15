@@ -1,0 +1,25 @@
+[package]
+name = "manguebyte-web"
+description = "A Manguebyte engine for the browser: parts with a synth or a drum kit and a small effect chain, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+# `cdylib` is what `cargo build --target wasm32-unknown-unknown` turns into
+# a `.wasm` module; `rlib` is what native code and the tests link against.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-params.workspace = true
+
+[lints]
+workspace = true

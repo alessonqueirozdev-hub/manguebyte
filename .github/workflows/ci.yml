@@ -50,6 +50,7 @@ jobs:
           path: |
             target/tmp/golden-failures
             target/tmp/ui-golden-failures
+            target/tmp/gui-golden-failures
           if-no-files-found: ignore
 
   features:
@@ -91,7 +92,19 @@ jobs:
       - run: cargo miri test -p manguebyte-vst3
         env:
           RUSTFLAGS: ""
+      # The LV2 wrapper meets its host through C, like the other two. Its
+      # tests act as a host through the real descriptor; the one that needs
+      # a variadic C function in the test host runs only outside Miri.
+      - run: cargo miri test -p manguebyte-lv2
+        env:
+          RUSTFLAGS: ""
       - run: cargo miri test -p manguebyte-analysis --lib triple_buffer --test triple_buffer
+        env:
+          RUSTFLAGS: ""
+      # The window crate's platform-independent parts: damage, pixel
+      # conversion, pointer state, dispatch and the headless backend. The
+      # Win32 backend calls the system, which Miri cannot run.
+      - run: cargo miri test -p manguebyte-window --lib --test headless
         env:
           RUSTFLAGS: ""
 
@@ -225,6 +238,45 @@ jobs:
       # Generates a plugin of each kind against this checkout, builds it and
       # bundles it, which on macOS includes the ad-hoc signature.
       - run: cargo test -p cargo-mangue -- --ignored
+
+  window-probe:
+    name: Window probe (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Opens a child window inside a top-level window, presents a known
+      # pattern and reads the pixels back from the screen (ADR 0007,
+      # decision 8). It exits 0 on PASS, 1 on FAIL and 2 on CANNOT, when the
+      # session cannot read windows back at all. Any of those but PASS fails
+      # the job, so a runner that stops showing windows is noticed. No job
+      # sets MANGUEBYTE_WINDOW_SKIP_READ_BACK: without read-back, the Win32
+      # pixel tests must fail rather than pass.
+      - run: cargo run -p manguebyte-window --example probe
+
+  layering:
+    name: Layering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # No crate that processes audio may depend on an interface crate
+      # (gfx, ui, window, gui), with every feature and target resolved
+      # (ADR 0001, ADR 0007). Only resolves dependencies; builds nothing.
+      - run: bash scripts/check-layering.sh
+
+  licences:
+    name: Licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Every dependency's licence against the list in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
 
   msrv:
     name: Minimum supported Rust version

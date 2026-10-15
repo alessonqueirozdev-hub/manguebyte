@@ -74,7 +74,8 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::{
-    ParamWatcher, Plugin, PluginKind, apply_param_events, load_state, save_state,
+    MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind, apply_param_events,
+    load_state, save_state,
 };
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};
 use vst3::Steinberg::{
@@ -100,17 +101,30 @@ const HELD_EVENTS: usize = 256;
 const MAX_STATE_BYTES: usize = 64 << 20;
 
 /// VST 3 does not deliver MIDI controllers as events. A plugin that wants
-/// them declares one hidden parameter per controller and channel, and the
-/// host moves those parameters. These are their ids: 130 controllers (the
-/// 128 of MIDI, channel pressure and pitch bend) for each of 16 channels.
+/// them declares a hidden parameter for each, and the host moves those
+/// parameters. Their ids are reserved for 130 controllers (the 128 of MIDI,
+/// channel pressure and pitch bend, numbered as [`MidiController::index`]
+/// numbers them) on each of 16 channels: the controller with index `c` on
+/// channel `ch` is `MIDI_PARAM_BASE + ch * 130 + c`. Only the controllers
+/// the plugin declares in [`Plugin::MIDI_CONTROLLERS`] are listed; a plugin
+/// that did not ask for channels gets the channel 0 ids alone, every
+/// channel is mapped to them, and each of their moves is delivered on all
+/// 16 channels.
 const MIDI_PARAM_BASE: u32 = 0x7F00_0000;
 const MIDI_CONTROLLERS: u32 = vst::ControllerNumbers_::kCountCtrlNumber as u32;
 const MIDI_CHANNELS: u32 = 16;
-const MIDI_PARAM_COUNT: u32 = MIDI_CONTROLLERS * MIDI_CHANNELS;
+const MIDI_PARAM_SPAN: u32 = MIDI_CONTROLLERS * MIDI_CHANNELS;
+
+// The plugin API numbers controllers as VST 3 does.
+const _: () = {
+    assert!(MIDI_CONTROLLERS as usize == MidiController::COUNT);
+    assert!(vst::ControllerNumbers_::kAfterTouch as u32 == 128);
+    assert!(vst::ControllerNumbers_::kPitchBend as u32 == 129);
+};
 
 /// The unit the hidden controller parameters are filed under, so that a
-/// host which lists parameters by unit keeps two thousand of them apart
-/// from the plugin's own.
+/// host which lists parameters by unit keeps them apart from the plugin's
+/// own.
 const MIDI_UNIT: vst::UnitID = 1;
 
 /// Runs `work`, turning a panic into `fallback`.
@@ -176,10 +190,12 @@ fn expression_to_vst(type_id: u32, plain: f64) -> Option<f64> {
 
 /// Whether the plugin has an event bus and the controllers that go with it.
 fn takes_notes<P: Plugin>() -> bool {
-    matches!(
-        P::INFO.kind,
-        PluginKind::Instrument | PluginKind::NoteEffect
-    )
+    takes_notes_const(P::INFO.kind)
+}
+
+/// Whether a plugin of this kind has an event bus.
+const fn takes_notes_const(kind: PluginKind) -> bool {
+    matches!(kind, PluginKind::Instrument | PluginKind::NoteEffect)
 }
 
 /// The speaker arrangement for a bus of `channels` channels.
@@ -345,7 +361,7 @@ impl<P: Plugin> Component<P> {
         let clash = seen.windows(2).any(|pair| pair[0] == pair[1]);
         let in_midi_range = seen
             .iter()
-            .any(|&id| (MIDI_PARAM_BASE..MIDI_PARAM_BASE + MIDI_PARAM_COUNT).contains(&id));
+            .any(|&id| (MIDI_PARAM_BASE..MIDI_PARAM_BASE + MIDI_PARAM_SPAN).contains(&id));
         if clash || in_midi_range {
             return None;
         }
@@ -412,39 +428,103 @@ impl<P: Plugin> Component<P> {
         self.handler.set(None);
     }
 
+    /// The controllers the plugin listens to; none if it has no event bus.
+    const MIDI: MidiControllers = if takes_notes_const(P::INFO.kind) {
+        P::MIDI_CONTROLLERS
+    } else {
+        MidiControllers::NONE
+    };
+
+    /// How many channels have hidden parameters of their own: 16 for a
+    /// plugin that asked for channels, otherwise one, shared by all.
+    const MIDI_PARAM_CHANNELS: u32 = if Self::MIDI.is_per_channel() {
+        MIDI_CHANNELS
+    } else {
+        1
+    };
+
     /// How many hidden parameters stand in for MIDI controllers.
     fn midi_param_count() -> u32 {
-        if takes_notes::<P>() {
-            MIDI_PARAM_COUNT
-        } else {
-            0
-        }
+        Self::MIDI.len() as u32 * Self::MIDI_PARAM_CHANNELS
     }
 
-    /// The MIDI message a move of a hidden controller parameter stands for.
-    fn midi_from_param(id: u32, value: f64) -> Option<MidiMessage> {
+    /// The id of the hidden parameter for `controller` on `channel`, which
+    /// must be below [`Self::MIDI_PARAM_CHANNELS`].
+    fn midi_param_id(channel: u32, controller: MidiController) -> u32 {
+        MIDI_PARAM_BASE + channel * MIDI_CONTROLLERS + controller.index() as u32
+    }
+
+    /// The channel and controller of the hidden parameter `id`, if the
+    /// plugin has one with that id.
+    fn midi_param(id: u32) -> Option<(u8, MidiController)> {
         let index = id.checked_sub(MIDI_PARAM_BASE)?;
-        if index >= Self::midi_param_count() {
+        if index >= MIDI_PARAM_SPAN {
             return None;
         }
-        let channel = (index / MIDI_CONTROLLERS) as u8;
-        let controller = index % MIDI_CONTROLLERS;
+        let channel = index / MIDI_CONTROLLERS;
+        let controller = MidiController::from_index((index % MIDI_CONTROLLERS) as usize)?;
+        (channel < Self::MIDI_PARAM_CHANNELS && Self::MIDI.contains(controller))
+            .then_some((channel as u8, controller))
+    }
+
+    /// The channel and controller of the hidden parameter at `position`
+    /// among the hidden ones: channel by channel, and within a channel in
+    /// the order of the controllers' indices.
+    fn midi_param_at(position: u32) -> Option<(u32, MidiController)> {
+        let per_channel = Self::MIDI.len() as u32;
+        if per_channel == 0 {
+            return None;
+        }
+        let channel = position / per_channel;
+        if channel >= Self::MIDI_PARAM_CHANNELS {
+            return None;
+        }
+        let controller = Self::MIDI.get((position % per_channel) as usize)?;
+        Some((channel, controller))
+    }
+
+    /// The MIDI message a move of a hidden controller parameter stands for,
+    /// on the parameter's channel (0 for one shared by every channel). A
+    /// value that is not a number stands for nothing.
+    fn midi_from_param(id: u32, value: f64) -> Option<MidiMessage> {
+        let (channel, controller) = Self::midi_param(id)?;
+        if value.is_nan() {
+            return None;
+        }
         let value = value.clamp(0.0, 1.0);
-        Some(match controller {
-            c if c == vst::ControllerNumbers_::kPitchBend as u32 => MidiMessage::PitchBend {
+        let seven_bits = (value * 127.0).round() as u8;
+        Some(match controller.control_number() {
+            Some(number) => MidiMessage::ControlChange {
+                channel,
+                controller: number,
+                value: seven_bits,
+            },
+            None if controller == MidiController::PITCH_BEND => MidiMessage::PitchBend {
                 channel,
                 value: ((value * 16_383.0).round() as i32 - 8_192) as i16,
             },
-            c if c == vst::ControllerNumbers_::kAfterTouch as u32 => MidiMessage::ChannelPressure {
+            None => MidiMessage::ChannelPressure {
                 channel,
-                pressure: (value * 127.0).round() as u8,
-            },
-            c => MidiMessage::ControlChange {
-                channel,
-                controller: c as u8,
-                value: (value * 127.0).round() as u8,
+                pressure: seven_bits,
             },
         })
+    }
+
+    /// Queues the message of a controller move on `offset`: once, or, for a
+    /// plugin whose controllers are shared by every channel, once on each
+    /// of the 16 channels in channel order. The host has said which
+    /// channel the move came from only to `IMidiMapping`, which gave the
+    /// same parameter for all of them, so a plugin that keeps controllers
+    /// per channel (as `Synth` does) has to hear it on every channel to
+    /// apply it to every note. A full buffer drops what does not fit.
+    fn push_controller(events: &mut EventBuffer, offset: u32, message: MidiMessage) {
+        if Self::MIDI.is_per_channel() {
+            let _ = events.push(Event::from_midi(offset, message));
+            return;
+        }
+        for channel in 0..MIDI_CHANNELS as u8 {
+            let _ = events.push(Event::from_midi(offset, on_channel(message, channel)));
+        }
     }
 
     /// Fills `audio.events` for the coming block from what the host sent.
@@ -466,9 +546,18 @@ impl<P: Plugin> Component<P> {
         audio.events.clear();
         let mut announced = 0;
         if has_audio {
-            // What blocks without audio left behind goes first.
+            // What blocks without audio left behind goes first. Controller
+            // moves were held once each, and are spread over the channels
+            // now.
             for &event in &audio.held {
-                let _ = audio.events.push(event);
+                match event.kind {
+                    EventKind::Midi(message) if MidiController::of(&message).is_some() => {
+                        Self::push_controller(&mut audio.events, event.offset, message);
+                    }
+                    _ => {
+                        let _ = audio.events.push(event);
+                    }
+                }
             }
             audio.held.clear();
             // Then changes the plugin has not seen yet, on frame 0: a
@@ -499,6 +588,12 @@ impl<P: Plugin> Component<P> {
                                 value: param.normalized_to_plain(value),
                             }
                         } else if let Some(message) = Self::midi_from_param(id, value) {
+                            if has_audio {
+                                Self::push_controller(&mut audio.events, offset, message);
+                                continue;
+                            }
+                            // Held once, and spread over the channels when
+                            // it is delivered.
                             Event::from_midi(offset, message).kind
                         } else {
                             continue;
@@ -543,6 +638,25 @@ impl<P: Plugin> Component<P> {
             }
         }
         audio.events.clear();
+    }
+}
+
+/// `message`, a controller move, on `channel` instead of its own. Other
+/// messages are returned unchanged.
+fn on_channel(message: MidiMessage, channel: u8) -> MidiMessage {
+    match message {
+        MidiMessage::ControlChange {
+            controller, value, ..
+        } => MidiMessage::ControlChange {
+            channel,
+            controller,
+            value,
+        },
+        MidiMessage::PitchBend { value, .. } => MidiMessage::PitchBend { channel, value },
+        MidiMessage::ChannelPressure { pressure, .. } => {
+            MidiMessage::ChannelPressure { channel, pressure }
+        }
+        other => other,
     }
 }
 
@@ -1154,15 +1268,18 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
         }
 
         // The hidden parameters that carry MIDI controllers.
-        let midi = (index - self.controls.ids.len()) as u32;
-        if midi >= Self::midi_param_count() {
+        let Some((channel, controller)) = u32::try_from(index - self.controls.ids.len())
+            .ok()
+            .and_then(Self::midi_param_at)
+        else {
             return kInvalidArgument;
-        }
-        let (channel, controller) = (midi / MIDI_CONTROLLERS, midi % MIDI_CONTROLLERS);
-        let is_bend = controller == vst::ControllerNumbers_::kPitchBend as u32;
-        info.id = MIDI_PARAM_BASE + midi;
-        // Built without allocating: a host asks for thousands of these.
-        let title = midi_title(channel + 1, controller);
+        };
+        let id = Self::midi_param_id(channel, controller);
+        let is_bend = controller == MidiController::PITCH_BEND;
+        info.id = id;
+        // Built without allocating: a host may ask for many of these.
+        let shown_channel = Self::MIDI.is_per_channel().then_some(channel + 1);
+        let title = midi_title(shown_channel, controller);
         copy_wide(title.as_str(), &mut info.title);
         copy_wide(title.as_str(), &mut info.shortTitle);
         copy_wide("", &mut info.units);
@@ -1227,15 +1344,10 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
             Some(index) => self.controls.shown[index].load(Ordering::Relaxed),
             // A controller parameter has no stored value. Pitch bend rests
             // in the middle; everything else rests at zero.
-            None => {
-                let controller = id.wrapping_sub(MIDI_PARAM_BASE) % MIDI_CONTROLLERS;
-                let is_midi = Self::midi_from_param(id, 0.0).is_some();
-                if is_midi && controller == vst::ControllerNumbers_::kPitchBend as u32 {
-                    0.5
-                } else {
-                    0.0
-                }
-            }
+            None => match Self::midi_param(id) {
+                Some((_, MidiController::PITCH_BEND)) => 0.5,
+                _ => 0.0,
+            },
         }
     }
 
@@ -1245,7 +1357,7 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
         }
         let Some(index) = self.index_of(id) else {
             // Controller moves reach the plugin through `process`.
-            return if Self::midi_from_param(id, value).is_some() {
+            return if Self::midi_param(id).is_some() {
                 kResultOk
             } else {
                 kInvalidArgument
@@ -1312,19 +1424,22 @@ impl std::fmt::Write for FixedText {
     }
 }
 
-/// A title such as `"MIDI 3 CC 74"` for a hidden controller parameter.
-fn midi_title(channel: u32, controller: u32) -> FixedText {
+/// A title for a hidden controller parameter: `"MIDI 3 CC 74"` for one
+/// channel's, numbered from 1, or `"MIDI CC 74"` for one shared by all.
+fn midi_title(channel: Option<u32>, controller: MidiController) -> FixedText {
     let mut text = FixedText {
         bytes: [0; 24],
         len: 0,
     };
     // The longest title is 18 bytes, so writing cannot fail.
-    let _ = if controller == vst::ControllerNumbers_::kPitchBend as u32 {
-        write!(text, "MIDI {channel} Pitch Bend")
-    } else if controller == vst::ControllerNumbers_::kAfterTouch as u32 {
-        write!(text, "MIDI {channel} Pressure")
-    } else {
-        write!(text, "MIDI {channel} CC {controller}")
+    let _ = text.write_str("MIDI ");
+    if let Some(channel) = channel {
+        let _ = write!(text, "{channel} ");
+    }
+    let _ = match controller.control_number() {
+        Some(number) => write!(text, "CC {number}"),
+        None if controller == MidiController::PITCH_BEND => text.write_str("Pitch Bend"),
+        None => text.write_str("Pressure"),
     };
     text
 }
@@ -1337,20 +1452,27 @@ impl<P: Plugin> vst::IMidiMappingTrait for Component<P> {
         controller: vst::CtrlNumber,
         id: *mut vst::ParamID,
     ) -> tresult {
-        let (Ok(channel), Ok(controller)) = (u32::try_from(channel), u32::try_from(controller))
+        let (Ok(channel), Ok(controller)) = (u32::try_from(channel), usize::try_from(controller))
         else {
             return kResultFalse;
         };
-        if bus != 0
-            || id.is_null()
-            || Self::midi_param_count() == 0
-            || channel >= MIDI_CHANNELS
-            || controller >= MIDI_CONTROLLERS
+        let Some(controller) = MidiController::from_index(controller) else {
+            return kResultFalse;
+        };
+        if bus != 0 || id.is_null() || channel >= MIDI_CHANNELS || !Self::MIDI.contains(controller)
         {
             return kResultFalse;
         }
+        // Every channel shares channel 0's parameter unless the plugin
+        // asked for channels; `push_controller` then delivers its moves on
+        // every channel.
+        let own = if Self::MIDI.is_per_channel() {
+            channel
+        } else {
+            0
+        };
         // SAFETY: a non-null pointer to a value the host owns.
-        unsafe { *id = MIDI_PARAM_BASE + channel * MIDI_CONTROLLERS + controller };
+        unsafe { *id = Self::midi_param_id(own, controller) };
         kResultOk
     }
 }

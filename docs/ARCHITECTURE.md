@@ -45,7 +45,7 @@ nothing beside or above it.
 | `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log | nothing |
 | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state | core |
-| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
+| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT | core, midi |
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
@@ -55,22 +55,31 @@ nothing beside or above it.
 | `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte-vst3` | Turns a `Plugin` into a VST 3 plugin | core, midi, dsp, params, plugin, `vst3` |
+| `manguebyte-lv2` | Turns a `Plugin` into an LV2 plugin, and generates its Turtle files | core, midi, dsp, params, plugin |
 | `manguebyte-host` | Loads CLAP and VST 3 plugins and runs them as processors | core, midi, dsp, `clap-sys`, `vst3`, `libloading` |
 | `manguebyte-gfx` | Scenes, a CPU rasteriser behind a private seam, text with an embedded typeface | `tiny-skia`, `skrifa`, `harfrust` |
 | `manguebyte-ui` | Retained widget tree, layout, theme, accessibility model, widgets, a test harness | core, gfx, params, plugin (for the editor contract) |
+| `manguebyte-window` | Platform windows: a child of a host's window (Win32 so far) and a headless backend for tests | gfx, plugin (for the editor contract), `windows-sys` on Windows |
+| `manguebyte-gui` | Glue between the plugin wrappers and the interface: an `EditorSpec` that opens a widget tree in a child window | gfx, plugin, ui, window |
 | `cargo-mangue` | The command-line tool: new, bundle, install, validate | `serde_json` |
-| `manguebyte` | Everything under one name | all of the above except `cargo-mangue` |
+| `manguebyte` | Everything under one name | all of the above except `manguebyte-lv2`, the interface crates and `cargo-mangue` |
 
 Planned crates slot into the same picture: each further plugin format
-gets a crate beside `manguebyte-clap` and `manguebyte-vst3`, on top of
-`manguebyte-plugin`; the interface crates of [ADR 0007](adr/0007-user-interface-layer.md)
-sit beside them and are never a dependency of anything that processes audio.
+gets a crate beside `manguebyte-clap`, `manguebyte-vst3` and
+`manguebyte-lv2`, on top of `manguebyte-plugin`. The interface crates of
+[ADR 0007](adr/0007-user-interface-layer.md), `manguebyte-gfx`,
+`manguebyte-ui`, `manguebyte-window` and `manguebyte-gui`, sit beside them,
+and no crate that processes audio may depend on any of them, directly or
+through another crate; `scripts/check-layering.sh` checks this in CI with
+every feature and every target resolved.
 
 The editor contract is the one piece of the interface below that line. It
 lives in `manguebyte-plugin` as `manguebyte_plugin::editor`, with no
 dependency and no `unsafe`, and the only part of it the audio thread touches
-is `GestureReader`, which reads two atomics per parameter. `manguebyte-gfx`
-and `manguebyte-ui` depend on the plugin API, never the other way round.
+is `GestureReader`, which reads two atomics per parameter. The interface
+crates depend on the plugin API, never the other way round: a plugin
+returns a `manguebyte_gui::Editor` as its `EditorSpec`, and the wrappers
+open it without knowing which toolkit it uses.
 
 Rules that keep this healthy:
 
@@ -144,17 +153,21 @@ formatted. Another thread drains the queue and receives the messages in the
 order they were posted, with a count of any that found no free slot.
 
 The only `unsafe` code in the framework is in these places: the wait-free
-queue; the triple buffer; the boundaries where the CLAP and VST 3 wrappers
-meet a host; the boundaries where the host meets a plugin (loading a library,
-the CLAP and VST 3 interfaces, and on macOS three CoreFoundation calls); and
-the two instructions that tell the processor to treat subnormal numbers as
-zero ([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). All but the
-last run under Miri in CI, except where a test has to load a real shared
-library, which Miri cannot do; the last is checked by what the processor then
-does. Every crate outside that list forbids `unsafe` code outright
-(`#![forbid(unsafe_code)]`), so the list cannot grow without someone deciding
-it should. The example plugins are the exception: the macros that export them
-expand to the `extern "C"` entry points a host looks for.
+queue; the triple buffer; the boundaries where the CLAP, VST 3 and LV2
+wrappers meet a host; the boundaries where the host meets a plugin (loading
+a library, the CLAP and VST 3 interfaces, and on macOS three CoreFoundation
+calls); the Win32 backend of `manguebyte-window`, which calls the system;
+and the two instructions that tell the processor to treat subnormal numbers
+as zero ([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). All but the
+last two run under Miri in CI, except where a test has to load a real
+shared library, which Miri cannot do. The Win32 backend cannot run under
+Miri either, so it is tested against real windows on Windows; the last is
+checked by what the processor then does. Every crate outside that list
+forbids `unsafe` code outright (`#![forbid(unsafe_code)]`), so the list
+cannot grow without someone deciding it should; `manguebyte-window` denies
+it everywhere but its Win32 module. The example plugins are the exception:
+the macros that export them expand to the `extern "C"` entry points a host
+looks for.
 
 ### State
 
@@ -195,6 +208,9 @@ back to be dropped.
   transport and an optional sidechain. `split_at_events` cuts the block at
   each event without copying, so every change lands on its exact frame and
   the output does not depend on how the host sized its blocks.
+  `split_at_events_with` also hands each piece a context whose `offset`
+  says where the piece begins, so a processor keyed by the sidechain reads
+  it at the piece's own frames.
 - **`Synth`** allocates voices from those events. Per-note expression and
   modulation reach one voice; parameters reach all of them.
 

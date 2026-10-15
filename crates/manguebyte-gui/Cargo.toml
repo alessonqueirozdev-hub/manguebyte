@@ -1,0 +1,44 @@
+[package]
+name = "manguebyte-gui"
+description = "The glue between Manguebyte's plugin wrappers and its user interface: an editor spec that opens a widget tree in a child window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+# Geometry and pixmaps: what the interface draws and the window presents.
+manguebyte-gfx.workspace = true
+# The editor contract this crate implements (`manguebyte_plugin::editor`).
+manguebyte-plugin.workspace = true
+# The widget tree, its frames and its input.
+manguebyte-ui.workspace = true
+# The child window inside the host's window, and the headless backend.
+manguebyte-window.workspace = true
+
+[features]
+# Adds `Editor::on_headless_open` and `HeadlessEditor`: an editor given a
+# hook opens in the headless window backend whatever the parent is, so
+# that tests can drive it through a real plugin wrapper on every system.
+# Only adds API: editors without a hook are unchanged.
+headless = []
+
+[dev-dependencies]
+# The crate's own tests use the headless mode.
+manguebyte-gui = { workspace = true, features = ["headless"] }
+# Real windows for the Win32 tests of the glue.
+manguebyte-window = { workspace = true, features = ["testing"] }
+# The test plugins and the wrappers they are driven through.
+manguebyte-clap.workspace = true
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-params.workspace = true
+manguebyte-vst3.workspace = true
+
+[lints]
+workspace = true

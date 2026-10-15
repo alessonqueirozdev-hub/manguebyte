@@ -28,6 +28,7 @@ mod biquad;
 mod cascade;
 mod chorus;
 mod context;
+pub mod convolution;
 mod crossover;
 mod cutoff;
 mod delay;
@@ -37,6 +38,7 @@ mod envelope;
 pub mod event;
 pub mod fft;
 pub mod fir;
+mod fir_filter;
 mod follower;
 mod gain;
 pub mod iir;
@@ -57,16 +59,22 @@ mod svf;
 mod synth;
 #[cfg(test)]
 mod testing;
+pub mod wavetable;
 pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
 pub use cascade::{BiquadCascade, IirFilter};
 pub use chorus::Chorus;
-pub use context::{ProcessContext, Transport, split_at_events};
+pub use context::{ProcessContext, Transport, split_at_events, split_at_events_with};
+pub use convolution::{
+    Convolution, ConvolutionEngine, ConvolutionError, ConvolutionLoader, ConvolutionRouting,
+    ConvolutionSettings,
+};
 pub use crossover::{Crossover, CrossoverSlope};
 pub use delay::{Delay, DelayInterpolation, DelayLine};
-pub use dynamics::{Compressor, NoiseGate};
+pub use dynamics::{Compressor, Expander, KeySource, NoiseGate};
 pub use envelope::{Adsr, AdsrParams};
+pub use fir_filter::{FirFilter, FirMode};
 pub use follower::{EnvelopeFollower, LevelDetector};
 pub use gain::Gain;
 pub use ladder::{LadderFilter, LadderMode};
@@ -83,6 +91,7 @@ pub use reverb::Reverb;
 pub use shaper::{DcBlocker, ShaperCurve, Waveshaper};
 pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
+pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};
 
 use manguebyte_core::{AudioBuffer, Sample};
 

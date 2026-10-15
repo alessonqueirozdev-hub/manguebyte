@@ -22,7 +22,7 @@ Each item is scored from 1 to 5 on three axes:
 | 2 | File parsers are tested with systematic truncation and byte corruption, which found nothing, but not with a coverage-guided fuzzer | Test | 2 | 3 | 2 | 20 |
 | 3 | The allocation guard covers `dsp` only, not the device block adapters or `ParamSmoother` | Test | 2 | 4 | 2 | 24 |
 | 4 | No benchmarks, so a performance regression is invisible | Test | 3 | 3 | 2 | 24 |
-| 5 | No dependency audit (`cargo deny`) in CI for licences and advisories | Infrastructure | 2 | 4 | 1 | 30 |
+| 5 | `cargo deny` checks licences in CI (`deny.toml`), but not security advisories | Infrastructure | 2 | 3 | 1 | 25 |
 | 6 | `Sample` has almost no maths (`sin`, `exp`, `tanh`, `min`, `max`), so generic code round-trips through `f64`; the newer processors keep their state in `f64` outright, which halves SIMD width for `f32` buffers | Code | 3 | 2 | 2 | 20 |
 | 8 | Duplex streams correct clock drift by dropping or padding, which is audible on long runs with two devices. `Resampler` now exists; what is missing is varying its ratio from the queue fill | Code | 2 | 3 | 3 | 15 |
 | 9 | `core` needs `std` (`Arc`, `Vec`), which blocks embedded targets | Architecture | 2 | 2 | 2 | 16 |
@@ -58,6 +58,16 @@ Each item is scored from 1 to 5 on three axes:
 | 42 | Found in REAPER 7.82: two offline renders of the same project with the same plugin state differ by one unit in the last place of float32 (about 134 dB below the signal) once many voices of `plugins/pluck` overlap, and the point where they start to differ changes between renders. Something in the example plugin's chain (voices, filters or reverb) is not bit-exact under the host's varying block sizes, which the framework promises; reproduce with `manguebyte-host` and a block-pattern test | Test | 2 | 3 | 2 | 20 |
 | 43 | `plugins/pluck` reaches +27 dBFS with every parameter at its maximum (16 voices summed, level up to +6 dB, full reverb) and its Karplus-Strong tuning is about 3 cents flat at middle C; the example should keep its sum in range and tune its delay exactly | Code | 1 | 1 | 1 | 10 |
 | 15 | The duplex error handler is behind a `Mutex`. It is never taken on the audio path, but it is the one lock in the crate | Code | 1 | 2 | 2 | 12 |
+| 44 | The LV2 wrapper's Turtle files are checked only against text written by hand: no RDF parser (`serd`, `sord`) has read them, `lv2lint` has not checked them, and no LV2 host (jalv, Ardour, Carla, REAPER) has loaded a plugin made with it, on any system. `lv2lint` may object to the `urn:manguebyte:` URI scheme, which is not http(s), and to the missing `doap:license`, which `PluginInfo` cannot give | Test | 3 | 4 | 2 | 28 |
+| 45 | No `.lv2` bundle can be built yet, so CI cannot run `lv2lint` or load one in a host: `cargo mangue bundle` does not write a `<Name>.lv2` folder from `manguebyte_lv2::bundle_files`, the facade has no `lv2` feature, and the example plugins do not call `export_lv2!`. Since `cargo mangue` does not know the plugin's type, it needs a generated helper binary or an extra exported symbol that returns the Turtle text | Infrastructure | 3 | 2 | 2 | 20 |
+| 46 | LV2: changes made outside the host (a restored state, `ParamWatcher`) reach the plugin but not the host, which shows the old value until it moves the control port again; the `notify` output is always empty, with no `patch:Set`. A state restored before the first `run` loses to a host port value that differs from it. A two-option `ChoiceParam` is described as `lv2:toggled`, so its option names are lost | Architecture | 2 | 3 | 3 | 15 |
+| 47 | The VST 3 wrapper never calls `OpenEditor::set_visible`, because VST 3 has no call that shows a view, so a `manguebyte-gui` editor is visible and runs frames from the moment it opens, under CLAP too, before the host calls `show`. The fix is to call `set_visible(true)` after a successful `attached` and `set_visible(false)` at the start of `removed`, then open hidden; `manguebyte-gui`'s `before_show_the_editor_is_not_shown_and_runs_no_frames` waits, ignored, for it | Code | 2 | 2 | 1 | 20 |
+| 48 | A `Convolution` whose new engine has another latency (zero-latency mode against partition mode, or partition mode with another partition size) changes the plugin's latency after a swap, and nothing tells the host: `ConvolutionLoader::latency` reports it, but `Plugin` has no way to say its latency changed (item 22), and a crossfade between the two mixes signals out of step | Architecture | 2 | 3 | 2 | 20 |
+| 49 | Convolution is uniformly partitioned only. A two-second true-stereo response at partition 64 took about half of one core in a rough measurement on a loaded machine, and the transforms at each partition boundary still land in one block. A non-uniformly partitioned scheme, and spectra stored as separate real and imaginary arrays for SIMD, would cut both cost and worst block | Code | 3 | 1 | 4 | 8 |
+| 50 | No test changes a monitor's scale while a window is open. `WM_DPICHANGED_AFTERPARENT` is handled and re-reading the scale is tested with the message sent by hand, at one fixed scale (120 DPI), and `manguebyte-gui` is tested following the system's scale only through the headless backend | Test | 2 | 3 | 3 | 15 |
+| 51 | The Win32 backend refuses a parent window that belongs to another process, because a child of such a window shares its input queue and a hang on either side hangs both. A host that embeds plugin editors across processes cannot show them; allowing it needs a decision and tests with a second process | Architecture | 1 | 2 | 4 | 6 |
+| 52 | On wasm32, which the framework does not build yet, `wasm-bindgen-shared` would bring `unicode-ident` (Unicode-3.0) in at run time through the web backends of `cpal` and `midir`; ADR 0007 allows that licence only at build time. `deny.toml` lets it through by crate name, since `cargo deny` cannot tell dependency kinds apart | Architecture | 1 | 2 | 2 | 12 |
+| 53 | The LV2 wrapper gives the plugin every parameter's value again in the block after a panic, since that block's changes may not have reached it; whether the CLAP wrapper does the same has not been checked. A plugin that only follows events could keep an old value there | Test | 1 | 3 | 1 | 20 |
 
 ## Paid back in this audit
 
@@ -89,7 +99,7 @@ order below is for the ones that need their own change.
 
 1. Output events in `ProcessContext`, for processors that emit notes, and
    non-parameter plugin state (samples, wavetables) through the swap pattern.
-2. Item 5: `cargo deny` in CI.
+2. Item 5: security advisories in the `cargo deny` job.
 3. Item 12: a first release to crates.io, which needs the owner's account.
 4. Item 3: extend the allocation guard to `devices` and `params`.
 

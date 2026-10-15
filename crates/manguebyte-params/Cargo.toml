@@ -16,3 +16,8 @@ manguebyte-core.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Only to check the JSON this crate writes by hand. 1.0.154 declares
+# rust-version 1.71; `float_roundtrip` makes it read numbers exactly.
+serde_json = { version = "1", features = ["float_roundtrip"] }

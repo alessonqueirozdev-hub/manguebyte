@@ -25,6 +25,7 @@
 //! | Audio ports | Main input and output from the plugin's layout, plus a sidechain input if it has one. In-place processing is allowed when input and output match |
 //! | Note port | For instruments and note effects, in the CLAP and MIDI dialects |
 //! | Events in | Note on, off and choke; note expression; parameter value and modulation; MIDI. All keep their frame |
+//! | MIDI controllers | Arrive as the MIDI messages the host sends, once, on their own channel (in VST 3 a controller shared by every channel arrives on all 16). [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS) is not used: CLAP needs no parameters for controllers, and nothing is filtered. A plugin that wants to hear only its declared controllers everywhere checks [`MidiControllers::wants`](manguebyte_plugin::MidiControllers::wants) |
 //! | Parameters | Listing, values, text conversion and flush. Continuous parameters are exposed as positions in `0..=1`, stepped ones as whole steps |
 //! | Events out | From `process` and from `flush`: an editor's gestures as gesture begin, value and gesture end, and a parameter changed by anything other than the host as a value. The host's own values, restored state included, are never sent back. An event the host's list refuses is sent again on the next block or flush |
 //! | State | Saved and restored as text; another plugin's state is refused |

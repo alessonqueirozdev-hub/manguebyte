@@ -94,13 +94,14 @@ small part of the road ahead and the API will change before 1.0. See
 |---|---|
 | [`manguebyte`](crates/manguebyte) | The whole framework under one name, plus a prelude |
 | [`manguebyte-core`](crates/manguebyte-core) | `AudioBuffer`, the `Sample` trait, `Smoothed` values, atomic floats, a wait-free SPSC queue, a log the audio thread can write to, decibel maths, a guard against subnormal numbers |
-| [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, sample-accurate events and transport, a polyphonic `Synth` with per-note expression, band-limited oscillator, biquad filters (8 shapes), high-order IIR design (Butterworth, Chebyshev, elliptic), state-variable, one-pole and ladder filters, Linkwitz-Riley crossovers, ADSR envelope, interpolated delay lines and echo, chorus and flanger, phaser, compressor, noise gate, look-ahead limiter, reverb, waveshaper, dry/wet mixing, panner, envelope follower, oversampling, resampling at any ratio, noise, LFO, smoothed gain, FFT of any length, window functions, FIR design |
+| [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, sample-accurate events and transport, a polyphonic `Synth` with per-note expression, band-limited oscillator, biquad filters (8 shapes), high-order IIR design (Butterworth, Chebyshev, elliptic), state-variable, one-pole and ladder filters, Linkwitz-Riley crossovers, ADSR envelope, interpolated delay lines and echo, chorus and flanger, phaser, compressor, noise gate, look-ahead limiter, reverb, waveshaper, dry/wet mixing, panner, envelope follower, oversampling, resampling at any ratio, noise, LFO, smoothed gain, FFT of any length, window functions, FIR design and a FIR filter, convolution with zero latency, true stereo and responses swapped while playing, an expander, sidechain keying for the dynamics, a band-limited wavetable oscillator |
 | [`manguebyte-analysis`](crates/manguebyte-analysis) | Loudness to BS.1770 and EBU R 128, checked against the EBU's test signals; true peak, peak, RMS, VU and PPM meters; stereo correlation; a spectrum analyser with octave bands and weighting; pitch detection. All real-time safe, readable from any thread |
 | [`manguebyte-graph`](crates/manguebyte-graph) | A processing graph that is rewired while it plays: edits reach the audio thread through a wait-free queue, nodes keep their state, removed nodes are freed off the audio thread, and paths of different latency are lined up automatically |
 | [`manguebyte-params`](crates/manguebyte-params) | Lock-free float, integer, switch and choice parameters; linear, skewed and logarithmic ranges; text conversion; smoothing; saved state that survives version changes |
 | [`manguebyte-plugin`](crates/manguebyte-plugin) | The `Plugin` trait every format wraps, plugin state, and a `Harness` that plays notes, automation and a sidechain into a plugin inside a unit test |
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
 | [`manguebyte-vst3`](crates/manguebyte-vst3) | Exports the same `Plugin` as a VST 3 plugin with one line. Every automation point lands on its frame; notes carry ids, tuning and per-note expression; MIDI controllers arrive as MIDI again. Passes Steinberg's validator on Windows, Linux and macOS |
+| [`manguebyte-lv2`](crates/manguebyte-lv2) | Exports the same `Plugin` as an LV2 plugin with one line, and generates its Turtle files. Tested through its C interface in process; not yet checked by `lv2lint` or loaded in a host |
 | [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP and VST 3 plugins made by anyone and runs them as processors, through one interface for both formats, with every event on its frame and nothing allocated while processing |
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg; wait-free bridges to play and record from an audio callback |
@@ -108,15 +109,21 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
 | [`manguebyte-gfx`](crates/manguebyte-gfx) | 2D drawing on the CPU: paths, gradients, images, clips and layers recorded as a scene with an exact text dump; repaint limited to what changed, identical to a full repaint; text shaped and laid out with an embedded Inter subset |
 | [`manguebyte-ui`](crates/manguebyte-ui) | Widgets for plugin editors: a retained tree, row and column layout, theme tokens, label, knob, slider, toggle, meter and canvas, parameter edits as gestures, an accessibility description required of every widget, and a harness that drives it all in a unit test |
+| [`manguebyte-window`](crates/manguebyte-window) | Windows for plugin editors: a child of the host's window on Win32, presenting only what changed, and a headless backend that lets a test drive a window on any system |
+| [`manguebyte-gui`](crates/manguebyte-gui) | The `Editor` a plugin returns for the CLAP and VST 3 wrappers to open: a widget tree in a child of the host's window, on Win32 so far, tested through both formats' real interfaces |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 | [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3` |
 
-Not there yet: windows, so no editor opens inside a real host yet. The
-editor interfaces of both formats, the renderer and the widget set exist and
-are tested without a display ([ADR 0007](docs/adr/0007-user-interface-layer.md));
-the Windows window layer comes next. Also missing: the Audio Unit, LV2 and
-AAX formats; lossy formats (MP3, Ogg Vorbis, Opus);
-convolution; plugin scanning and the editors of hosted plugins.
+Not there yet: an editor opened inside a real host. The editor interfaces
+of both formats, the renderer, the widget set, windows on Win32 and the glue
+that opens an editor in them exist and are tested
+([ADR 0007](docs/adr/0007-user-interface-layer.md)); an editor for the
+example effect and a test with two plugin binaries in one process are being
+built, and windows on macOS and Linux come after. The LV2 wrapper is tested
+in process, but nothing writes an `.lv2` bundle yet, so no LV2 host has
+loaded a plugin made with it and `lv2lint` has not checked one. Also missing:
+the Audio Unit and AAX formats; lossy formats (MP3, Ogg Vorbis, Opus);
+plugin scanning and the editors of hosted plugins.
 
 ## Quick start
 

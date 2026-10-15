@@ -17,13 +17,15 @@ pub trait Voice<S: Sample = f32> {
     /// Gets ready to render under `spec`. May allocate.
     fn prepare(&mut self, spec: &ProcessSpec);
 
-    /// Starts a note. `velocity` runs from 0 to 1.
+    /// Starts a note. `velocity` runs from 0 to 1: a [`Synth`] keeps it in
+    /// that range, and passes a velocity that is not a finite number as 0.
     ///
     /// This is also called on a voice that is still sounding, when the same
     /// key is struck again or when the voice is taken over for a new note.
     fn note_on(&mut self, note: NoteRef, velocity: f32);
 
-    /// The note was released: begin fading out.
+    /// The note was released: begin fading out. A [`Synth`] keeps
+    /// `velocity` between 0 and 1, as for [`note_on`](Self::note_on).
     fn note_off(&mut self, velocity: f32);
 
     /// Stop at once, with no fade, and return to the state the voice had
@@ -80,6 +82,18 @@ pub trait Voice<S: Sample = f32> {
 
 /// A controller nobody has moved yet. MIDI values stop at 127.
 const UNMOVED: u8 = 0xFF;
+
+/// A velocity as the voices receive it: between 0 and 1, and 0 when it is
+/// not a finite number. A host can send anything; a NaN or an infinity
+/// multiplied into a voice's sound would stay in every filter and reverb
+/// after it.
+fn velocity_in_range(velocity: f32) -> f32 {
+    if velocity.is_finite() {
+        velocity.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -229,7 +243,11 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     }
 
     /// Starts a note now. Real-time safe.
+    ///
+    /// The voice is given `velocity` limited to 0..=1, and 0 if it is not a
+    /// finite number.
     pub fn note_on(&mut self, note: NoteRef, velocity: f32) {
+        let velocity = velocity_in_range(velocity);
         self.reclaim_finished();
         self.clock += 1;
 
@@ -271,8 +289,10 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         slot.voice.note_on(note, velocity);
     }
 
-    /// Releases a note now. Real-time safe.
+    /// Releases a note now. Real-time safe. The velocity is limited as for
+    /// [`note_on`](Self::note_on).
     pub fn note_off(&mut self, note: NoteRef, velocity: f32) {
+        let velocity = velocity_in_range(velocity);
         let pedal_down = self.sustain[usize::from(note.channel & 0x0F)];
         for slot in &mut self.slots {
             if slot.stage == Stage::Held && note.matches(&slot.note) {
@@ -453,8 +473,15 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         }
     }
 
-    /// Chooses the voice for a new note: a free one, or else the one that
-    /// will be missed least.
+    /// Chooses the voice for a new note: the first free one, or else the one
+    /// that will be missed least.
+    ///
+    /// A free voice is chosen by its place alone, not by when it last
+    /// played: the voices are added up in their order, and which voice a
+    /// note lands on decides that order, which changes the last bit of a sum
+    /// of three or more. Chosen this way, once every note has ended the
+    /// synth lands notes exactly as a new one would, so playing the same
+    /// notes again gives the same output, bit for bit, reset or not.
     fn pick_voice(&self) -> Option<usize> {
         let cost = |stage: Stage| match stage {
             Stage::Idle => 0,
@@ -465,7 +492,14 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         self.slots
             .iter()
             .enumerate()
-            .min_by_key(|(_, slot)| (cost(slot.stage), slot.started))
+            .min_by_key(|(_, slot)| {
+                let age = if slot.stage == Stage::Idle {
+                    0
+                } else {
+                    slot.started
+                };
+                (cost(slot.stage), age)
+            })
             .map(|(index, _)| index)
     }
 }
@@ -500,11 +534,24 @@ impl<S: Sample, V: Voice<S>> Processor<S> for Synth<V, S> {
         self.reclaim_finished();
     }
 
+    /// Silences every voice, lifts the pedal, and forgets the voices' ages,
+    /// so that the same notes played after a reset land on the same voices
+    /// and sound exactly as they did the first time, bit for bit, which is
+    /// what a host rendering a project twice expects.
+    ///
+    /// The pitch wheel and the controllers keep their positions: they are
+    /// where the player left them, and a host that deactivates and
+    /// reactivates a plugin (to change the sample rate, or to render
+    /// offline) does not always send them again. Controller 121 puts them
+    /// back.
     fn reset(&mut self) {
+        self.clock = 0;
         self.sustain = [false; 16];
         for slot in &mut self.slots {
             slot.voice.choke();
             slot.stage = Stage::Idle;
+            slot.note = NoteRef::new(0, 0);
+            slot.started = 0;
         }
     }
 }
@@ -531,17 +578,21 @@ mod tests {
         cutoff: f64,
         modulation: f64,
         controller: Option<(u8, u8)>,
+        velocity: f32,
+        release: f32,
     }
 
     impl Voice for Probe {
         fn prepare(&mut self, _: &ProcessSpec) {}
-        fn note_on(&mut self, note: NoteRef, _: f32) {
+        fn note_on(&mut self, note: NoteRef, velocity: f32) {
             self.key = f32::from(note.key);
+            self.velocity = velocity;
             self.held = true;
             self.tail = 0;
             self.starts += 1;
         }
-        fn note_off(&mut self, _: f32) {
+        fn note_off(&mut self, velocity: f32) {
+            self.release = velocity;
             self.held = false;
             self.tail = 2;
         }
@@ -549,6 +600,9 @@ mod tests {
             self.held = false;
             self.tail = 0;
             self.chokes += 1;
+            // As new, as the contract asks: what the synth tells a fresh
+            // note about the controllers is all it knows of them.
+            self.controller = None;
         }
         fn is_active(&self) -> bool {
             self.held || self.tail > 0
@@ -907,6 +961,119 @@ mod tests {
         synth.reset();
         assert_eq!(run(&mut synth, 2, &[]), [0.0, 0.0]);
         assert_eq!(synth.polyphony(), 4);
+    }
+
+    #[test]
+    fn a_free_voice_is_chosen_by_its_place_not_by_its_age() {
+        let mut synth = synth(4);
+        // Three notes on the first three voices, released, and their tails
+        // over.
+        run(&mut synth, 2, &[(0, on(10)), (0, on(20)), (0, on(30))]);
+        run(&mut synth, 4, &[(0, off(10)), (0, off(20)), (0, off(30))]);
+        assert_eq!(synth.active_voices(), 0);
+        // The next note goes where it would in a new synth, the first voice,
+        // not to the voice that has gone longest without a note, the fourth.
+        run(&mut synth, 2, &[(0, on(40)), (0, on(50))]);
+        assert_eq!(starts(&mut synth), [2, 2, 1, 0]);
+        // Stealing still takes the oldest note: with all four held, a fifth
+        // replaces 40, the oldest.
+        run(&mut synth, 2, &[(0, on(60)), (0, on(70))]);
+        let keys: Vec<f32> = synth.voices_mut().map(|voice| voice.key).collect();
+        assert_eq!(keys, [40.0, 50.0, 60.0, 70.0]);
+        run(&mut synth, 2, &[(0, on(80))]);
+        let keys: Vec<f32> = synth.voices_mut().map(|voice| voice.key).collect();
+        assert_eq!(keys, [80.0, 50.0, 60.0, 70.0]);
+    }
+
+    #[test]
+    fn a_reset_forgets_the_notes_and_their_ages_but_keeps_the_controllers() {
+        let bend = EventKind::Midi(MidiMessage::PitchBend {
+            channel: 0,
+            value: 4_096,
+        });
+        let wheels = [(0, bend), (0, controller(1, 90))];
+        let mut used = synth(4);
+        run(&mut used, 4, &wheels);
+        run(
+            &mut used,
+            4,
+            &[
+                (0, controller(64, 127)),
+                (1, on(10)),
+                (1, on(20)),
+                (1, on(30)),
+            ],
+        );
+        run(&mut used, 4, &[(0, on(40)), (2, off(10))]);
+        used.reset();
+
+        // A new synth whose wheel and mod wheel were moved the same way, and
+        // that never played a note.
+        let mut new = synth(4);
+        run(&mut new, 4, &wheels);
+        let notes = [(0, on(50)), (1, on(60)), (3, off(50))];
+        let heard = run(&mut used, 8, &notes);
+        assert_eq!(heard, run(&mut new, 8, &notes));
+        // The notes land on the first two voices, as in the new synth; the
+        // pedal is up, so the released note fades; and the wheel (half way
+        // up, one semitone) and the mod wheel are where they were left.
+        for synth in [&mut used, &mut new] {
+            let state: Vec<_> = synth
+                .voices_mut()
+                .map(|voice| (voice.key, voice.held, voice.bend, voice.controller))
+                .collect();
+            assert_eq!(
+                state[..2],
+                [
+                    (50.0, false, 1.0, Some((1, 90))),
+                    (60.0, true, 1.0, Some((1, 90)))
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn velocities_reach_the_voices_in_range() {
+        for (sent, received) in [
+            (0.5, 0.5_f32),
+            (1.0, 1.0),
+            (0.0, 0.0),
+            (1.5, 1.0),
+            (f32::MAX, 1.0),
+            (-0.25, 0.0),
+            (f32::INFINITY, 0.0),
+            (f32::NEG_INFINITY, 0.0),
+            (f32::NAN, 0.0),
+        ] {
+            let mut synth = synth(1);
+            let note = NoteRef::new(0, 10);
+            run(
+                &mut synth,
+                2,
+                &[
+                    (
+                        0,
+                        EventKind::NoteOn {
+                            note,
+                            velocity: sent,
+                        },
+                    ),
+                    (
+                        1,
+                        EventKind::NoteOff {
+                            note,
+                            velocity: sent,
+                        },
+                    ),
+                ],
+            );
+            let voice = synth.voices_mut().next().unwrap();
+            assert_eq!(
+                (voice.velocity.to_bits(), voice.release.to_bits()),
+                (received.to_bits(), received.to_bits()),
+                "{sent}"
+            );
+        }
     }
 
     #[test]

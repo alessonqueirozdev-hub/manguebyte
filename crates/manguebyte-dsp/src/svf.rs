@@ -119,6 +119,89 @@ impl<S: Sample> StateVariableFilter<S> {
         self.q
     }
 
+    /// The phase shift, in radians, that the filter gives a steady sine of
+    /// `frequency` hertz at its current settings. Negative is a delay.
+    ///
+    /// The filter is the bilinear transform, with the cutoff prewarped, of
+    /// the analogue prototype `1 / (s² + s/Q + 1)` and its relatives, so this
+    /// is exact for the digital filter, not an approximation. The result
+    /// lies in `-2π..=π`, going from low frequencies to high: from 0 to -π
+    /// for the low-pass, π to 0 for the high-pass, π/2 to -π/2 for the
+    /// band-pass, 0 to -π/2 and then π/2 to 0 for the notch, and 0 to -2π
+    /// for the all-pass. Where the
+    /// response is zero (DC for the high-pass and band-pass, the cutoff for
+    /// the notch) the phase has no meaning and the value is that limit.
+    ///
+    /// A synthesiser can use it to keep a note in tune while a filter sweeps:
+    /// as a low-pass closes, its delay at the note's pitch grows, which
+    /// lowers the pitch heard while it moves, as a Doppler shift does.
+    ///
+    /// The filter needs to have been prepared, so that it knows the sample
+    /// rate. Real-time safe.
+    ///
+    /// ```
+    /// use core::f64::consts::FRAC_PI_2;
+    /// use manguebyte_dsp::{ProcessSpec, Processor, StateVariableFilter, SvfMode};
+    ///
+    /// let mut filter = StateVariableFilter::<f32>::new(SvfMode::Lowpass, 1_000.0, 0.707);
+    /// filter.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 64, num_channels: 1 });
+    /// // A second-order low-pass lags by a quarter turn at its cutoff.
+    /// assert!((filter.phase_response(1_000.0) + FRAC_PI_2).abs() < 1e-12);
+    /// assert!(filter.phase_response(10.0) > -0.02);
+    /// ```
+    pub fn phase_response(&self, frequency: f64) -> f64 {
+        let nyquist = 0.5 * self.sample_rate;
+        let frequency = frequency.clamp(0.0, nyquist * 0.999_999);
+        // The frequency as the analogue prototype sees it, cutoff at 1.
+        let w = (PI * frequency / self.sample_rate).tan() / self.g;
+        let real = 1.0 - w * w;
+        // The denominator's angle: 0 well below the cutoff, π/2 at it and
+        // π well above it.
+        let denominator = (self.k * w).atan2(real);
+        match self.mode {
+            SvfMode::Lowpass => -denominator,
+            SvfMode::Highpass => PI - denominator,
+            SvfMode::Bandpass => 0.5 * PI - denominator,
+            SvfMode::Notch => {
+                if real >= 0.0 {
+                    -denominator
+                } else {
+                    PI - denominator
+                }
+            }
+            SvfMode::Allpass => -2.0 * denominator,
+        }
+    }
+
+    /// The integrator gain `g` and the damping `k` the filter runs on:
+    /// `g = tan(π·cutoff / sample rate)` and `k = 1/Q`, with the cutoff and
+    /// the resonance as limited. They give the response at any frequency in
+    /// closed form: with `w = tan(π·frequency / sample rate) / g`, the
+    /// low-pass's is `1 / (1 - w² + i·k·w)`, which is what
+    /// [`phase_response`](Self::phase_response) works from.
+    ///
+    /// A caller that asks for the response at one frequency on every sample
+    /// while the cutoff moves can work out that frequency's tangent once and
+    /// use these, instead of a tangent per call. Real-time safe.
+    ///
+    /// ```
+    /// use core::f64::consts::PI;
+    /// use manguebyte_dsp::{ProcessSpec, Processor, StateVariableFilter, SvfMode};
+    ///
+    /// let mut filter = StateVariableFilter::<f32>::new(SvfMode::Lowpass, 1_000.0, 2.0);
+    /// filter.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 64, num_channels: 1 });
+    /// let (g, k) = filter.coefficients();
+    /// assert_eq!(g, (PI * 1_000.0 / 48_000.0).tan());
+    /// assert_eq!(k, 0.5);
+    /// // The low-pass's phase at 3 kHz, from them.
+    /// let w = (PI * 3_000.0 / 48_000.0).tan() / g;
+    /// let lag = (k * w).atan2(1.0 - w * w);
+    /// assert!((filter.phase_response(3_000.0) + lag).abs() < 1e-15);
+    /// ```
+    pub fn coefficients(&self) -> (f64, f64) {
+        (self.g, self.k)
+    }
+
     fn update(&mut self) {
         let frequency = self.frequency.clamp(1.0, self.sample_rate * 0.49);
         self.g = (PI * frequency / self.sample_rate).tan();
@@ -238,6 +321,68 @@ mod tests {
         for frequency in [100.0, 2_000.0, 10_000.0] {
             assert!(gain_db(&mut allpass, frequency).abs() < 0.01);
         }
+    }
+
+    /// Phase of a steady sine after the filter, in radians, from the
+    /// output's correlation with the input's sine and cosine over whole
+    /// periods once the filter has settled.
+    fn measured_phase(filter: &mut StateVariableFilter<f64>, frequency: f64) -> f64 {
+        filter.reset();
+        let step = 2.0 * PI * frequency / SAMPLE_RATE;
+        let settle = 96_000;
+        // A whole number of periods, as near to a second as there is.
+        let periods = (frequency.round() as usize).max(1);
+        let length = (periods as f64 * SAMPLE_RATE / frequency).round() as usize;
+        let (mut along, mut across) = (0.0, 0.0);
+        for n in 0..settle + length {
+            let angle = step * n as f64;
+            let output = filter.process_sample(0, angle.sin());
+            if n >= settle {
+                along += output * angle.sin();
+                across += output * angle.cos();
+            }
+        }
+        across.atan2(along)
+    }
+
+    #[test]
+    fn the_phase_response_is_what_a_sine_measures() {
+        let wrap = |angle: f64| (angle + PI).rem_euclid(2.0 * PI) - PI;
+        for mode in [
+            SvfMode::Lowpass,
+            SvfMode::Highpass,
+            SvfMode::Bandpass,
+            SvfMode::Notch,
+            SvfMode::Allpass,
+        ] {
+            for q in [0.5, 0.707, 2.0, 8.0] {
+                let mut filter = prepared(mode, 1_500.0, q);
+                for frequency in [50.0, 400.0, 1_000.0, 1_400.0, 1_700.0, 3_000.0, 15_000.0] {
+                    let predicted = filter.phase_response(frequency);
+                    let measured = measured_phase(&mut filter, frequency);
+                    let error = wrap(predicted - measured).abs();
+                    assert!(
+                        error < 1e-3,
+                        "{mode:?}, Q {q}, {frequency} Hz: predicted {predicted}, measured {measured}"
+                    );
+                }
+            }
+        }
+        // Exact values: a quarter turn at the cutoff, whatever the Q, and
+        // the ends of the ranges far from it.
+        let filter = prepared(SvfMode::Lowpass, 1_000.0, 5.0);
+        assert!((filter.phase_response(1_000.0) + PI / 2.0).abs() < 1e-12);
+        assert_eq!(filter.phase_response(0.0), 0.0);
+        assert!((filter.phase_response(23_999.0) + PI).abs() < 1e-2);
+        let allpass = prepared(SvfMode::Allpass, 1_000.0, 0.7);
+        assert!((allpass.phase_response(1_000.0) + PI).abs() < 1e-12);
+        let band = prepared(SvfMode::Bandpass, 1_000.0, 3.0);
+        assert!(band.phase_response(1_000.0).abs() < 1e-12);
+        // Beyond the Nyquist frequency, or negative, it holds the ends.
+        let low = prepared(SvfMode::Lowpass, 1_000.0, 0.7);
+        assert_eq!(low.phase_response(-5.0), 0.0);
+        assert!(low.phase_response(1e9).is_finite());
+        assert!(low.phase_response(f64::INFINITY) >= -PI);
     }
 
     #[test]

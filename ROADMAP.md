@@ -61,16 +61,21 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ High-order IIR design: Butterworth, Chebyshev I and II, elliptic, order
   1 to 16, gliding between designs without blowing up
 - ✅ Linkwitz-Riley crossovers, 2 to 5 bands that sum flat
-- ⬜ FIR filter processor
+- ✅ FIR filter processor, choosing direct or FFT convolution by length
 - ✅ Dynamics: compressor with soft knee, noise gate
 - ✅ Look-ahead limiter whose ceiling holds for every sample
-- ⬜ Expander, sidechain input
+- ✅ Expander, and sidechain keying for the compressor, gate and expander,
+  chosen per processor
 - ✅ Reverb (feedback delay network)
 - ✅ Chorus and flanger, phaser, dry/wet mixing with latency compensation,
   panner, envelope follower, interpolated delay lines
-- ⬜ Convolution
+- ✅ Convolution: uniformly partitioned, with zero latency or a latency of
+  one partition, true stereo, and responses swapped with a crossfade while
+  playing. A non-uniformly partitioned scheme, cheaper for long responses
+  at small block sizes, is not started
 - ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
-- ⬜ Wavetable oscillator
+- ✅ Wavetable oscillator: band-limited by a mip-map, with morphing between
+  frames and phase modulation
 - ⬜ Sampler: an SFZ player (multisamples, velocity layers, round robin,
   loop points, release samples), streamed from disk, open so that any
   program can play the instruments Parabolic exports
@@ -119,8 +124,9 @@ Write a processor once and ship it in every format.
   state, latency, reporting of parameter changes to the host. Checked in CI
   by the CLAP project's validator
 - 🚧 CLAP `gui`, `timer-support` and `posix-fd-support` for plugins with an
-  editor, tested through the C interface against a fake editor and host; no
-  window backend yet
+  editor, tested through the C interface against fake editors and hosts,
+  including `manguebyte-gui` editors in a headless window; not yet opened
+  in a real host
 - ⬜ CLAP extensions still to come: per-note automation, note-end and voice
   info, 64-bit audio, tail, presets, remote controls
 - ✅ VST 3: audio and event buses, every automation point on its frame,
@@ -129,11 +135,15 @@ Write a processor once and ship it in every format.
   Steinberg's validator on Windows, Linux and macOS
 - 🚧 VST 3 editor interfaces: the component handler kept and used for
   edits, `IPlugView` with content scale, `IPlugFrame` and `IRunLoop`, tested
-  against fake host objects; no window backend yet
+  against fake host objects, including `manguebyte-gui` editors in a
+  headless window; not yet opened in a real host
 - ⬜ VST 3 still to come: 64-bit audio, changing the bus layout, program
   lists
 - ⬜ Audio Unit (AUv2 and AUv3)
-- ⬜ LV2
+- 🚧 LV2: audio and sidechain ports, parameters as control ports, MIDI and
+  transport on their frames, state, latency and generated Turtle files,
+  tested in process through the C interface. Not yet bundled by
+  `cargo mangue`, checked by `lv2lint` or loaded in a host; no editor
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
   effects
 - 🚧 Tooling: `cargo mangue` bundles, installs and validates plugins and
@@ -158,8 +168,11 @@ our own, and nothing claimed before its test exists.
   spectra, damage-limited repaint that matches a full repaint bit for bit,
   and text with an embedded Inter subset. GPU rendering later, never the
   default while CI cannot test its pixels
-- ⬜ Windowing, including embedding inside a plugin host (Windows first, then
-  macOS and Linux as CI proves each)
+- 🚧 Windowing, including embedding inside a plugin host: Win32 child
+  windows inside a host's window and a headless backend for tests
+  (`manguebyte-window`), and the glue that opens an editor in them
+  (`manguebyte-gui`), tested on Windows; macOS and Linux follow as CI
+  proves each
 - 🚧 Layout, styling and a widget set (`manguebyte-ui`): row, column and
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
   done; text entry, menus and popups not started
@@ -168,7 +181,9 @@ our own, and nothing claimed before its test exists.
   default) and the test harness finds widgets only that way; platform
   adapters not started
 - 🚧 High-DPI: scale flows from the host through the contract to the
-  renderer; multi-monitor not started
+  renderer, and a Win32 window takes the system's scale when the host gives
+  none; a change of scale while a window is open, such as moving it to a
+  monitor with another scale, is handled but untested
 
 ## Phase 4: hosting and graphs
 

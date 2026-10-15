@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use manguebyte_core::{AtomicF32, ParamId};
 
-use crate::FloatRange;
+use crate::describe::decimal;
+use crate::{Curve, FloatRange, ParamDescription, ParamScale, ParamSmoother, Smoothing};
 
 /// What a host is allowed to do with a parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -206,11 +207,99 @@ pub trait Param: Send + Sync {
     /// The current value as text, followed by the unit if there is one.
     /// Allocates.
     fn display(&self) -> String {
-        let text = self.plain_to_text(self.plain());
+        self.display_plain(self.plain())
+    }
+
+    /// `plain` as text, followed by the unit if there is one: what
+    /// [`display`](Self::display) would show if the parameter held `plain`.
+    /// Allocates.
+    ///
+    /// ```
+    /// use manguebyte_params::{ChoiceParam, FloatParam, FloatRange, Param};
+    ///
+    /// let gain = FloatParam::new("gain", "Gain", FloatRange::linear(-60.0, 12.0), 0.0)
+    ///     .with_unit("dB")
+    ///     .with_precision(1);
+    /// assert_eq!(gain.display_plain(-6.0), "-6.0 dB");
+    /// assert_eq!(gain.parse_display("-6.0 dB"), Some(-6.0));
+    ///
+    /// let shape = ChoiceParam::new("shape", "Shape", &["Sine", "Saw"], 0);
+    /// assert_eq!(shape.display_plain(1.0), "Saw");
+    /// assert_eq!(shape.parse_display("saw"), Some(1.0));
+    /// ```
+    fn display_plain(&self, plain: f64) -> String {
+        let text = self.plain_to_text(plain);
         match self.info().unit() {
             "" => text,
             unit => format!("{text} {unit}"),
         }
+    }
+
+    /// Reads a value from text a person typed, or from the text
+    /// [`display_plain`](Self::display_plain) wrote. Allocates.
+    ///
+    /// It gives [`text_to_plain`](Self::text_to_plain) the text without its
+    /// unit first, so that the text of a switch or a choice that has a unit
+    /// reads back as itself, even when one option's name ends with the
+    /// unit. In turn, and taking the first that reads:
+    ///
+    /// 1. if the text ends with a space and the unit, exactly as
+    ///    [`display_plain`](Self::display_plain) writes it, the text without
+    ///    them;
+    /// 2. if the text, less trailing white space, ends with the unit in any
+    ///    ASCII case, the text without it (`"Off°"`, `"-6 DB"`);
+    /// 3. the text as it is.
+    ///
+    /// The result is clamped and snapped like the value
+    /// [`text_to_plain`](Self::text_to_plain) returns.
+    fn parse_display(&self, text: &str) -> Option<f64> {
+        let unit = self.info().unit();
+        if !unit.is_empty() {
+            let exact = text
+                .strip_suffix(unit)
+                .and_then(|rest| rest.strip_suffix(' '));
+            if let Some(plain) = exact.and_then(|rest| self.text_to_plain(rest)) {
+                return Some(plain);
+            }
+            let loose = text.trim_end();
+            if let Some(cut) = loose.len().checked_sub(unit.len()) {
+                if loose.is_char_boundary(cut) && loose[cut..].eq_ignore_ascii_case(unit) {
+                    if let Some(plain) = self.text_to_plain(&loose[..cut]) {
+                        return Some(plain);
+                    }
+                }
+            }
+        }
+        self.text_to_plain(text)
+    }
+
+    /// Everything an editor needs to draw a control for the parameter, as
+    /// data that [`ParamDescription::to_json`] writes as JSON. Allocates.
+    ///
+    /// Unless overridden it returns [`ParamDescription::derived`], which
+    /// works from the other methods of this trait. The parameter types of
+    /// this crate override it to give their exact scale, names and
+    /// smoothing; a wrapper around one of them should forward it.
+    ///
+    /// ```
+    /// use manguebyte_params::{ChoiceParam, Curve, Param, ParamScale};
+    ///
+    /// let shape = ChoiceParam::new("shape", "Shape", &["Sine", "Saw", "Square"], 1);
+    /// let description = shape.describe();
+    /// assert_eq!((description.min, description.max, description.default), (0.0, 2.0, 1.0));
+    /// assert_eq!(
+    ///     description.scale,
+    ///     ParamScale::Stepped {
+    ///         steps: 2,
+    ///         step: 1.0,
+    ///         names: vec!["Sine".into(), "Saw".into(), "Square".into()],
+    ///         curve: Curve::Linear,
+    ///         end: 2.0,
+    ///     }
+    /// );
+    /// ```
+    fn describe(&self) -> ParamDescription {
+        ParamDescription::derived(self)
     }
 }
 
@@ -269,6 +358,7 @@ pub struct FloatParam {
     value: AtomicF32,
     formatter: Option<Formatter>,
     parser: Option<Parser>,
+    smoothing: Option<Smoothing>,
 }
 
 impl FloatParam {
@@ -289,6 +379,7 @@ impl FloatParam {
             value: AtomicF32::new(default),
             formatter: None,
             parser: None,
+            smoothing: None,
         }
     }
 
@@ -336,6 +427,43 @@ impl FloatParam {
     ) -> Self {
         self.parser = Some(Arc::new(parser));
         self
+    }
+
+    /// Declares how the processor smooths changes to this parameter.
+    ///
+    /// It is a hint for editors and hosts, reported by
+    /// [`describe`](Param::describe) as `smoothing_ms`, and the style
+    /// [`smoother`](Self::smoother) starts from. It changes nothing else:
+    /// the parameter still stores each value as it is set.
+    ///
+    /// ```
+    /// use manguebyte_params::{FloatParam, FloatRange, Smoothing};
+    ///
+    /// let gain = FloatParam::new("gain", "Gain", FloatRange::linear(0.0, 1.0), 1.0)
+    ///     .with_smoothing(Smoothing::Linear(10.0));
+    /// assert_eq!(gain.smoothing(), Some(Smoothing::Linear(10.0)));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the time is negative or not finite.
+    #[must_use]
+    pub fn with_smoothing(mut self, smoothing: Smoothing) -> Self {
+        self.smoothing = Some(checked_smoothing(smoothing));
+        self
+    }
+
+    /// The smoothing declared with [`with_smoothing`](Self::with_smoothing),
+    /// if any.
+    pub fn smoothing(&self) -> Option<Smoothing> {
+        self.smoothing
+    }
+
+    /// A smoother in the declared style, or one that jumps straight to each
+    /// new value if none was declared. Call
+    /// [`prepare`](ParamSmoother::prepare) before using it.
+    pub fn smoother(&self) -> ParamSmoother {
+        ParamSmoother::new(self.smoothing.unwrap_or(Smoothing::None))
     }
 
     /// The current value. Real-time safe.
@@ -419,6 +547,45 @@ impl Param for FloatParam {
         let value = value as f32;
         (!value.is_nan()).then(|| f64::from(self.snap(value)))
     }
+    fn describe(&self) -> ParamDescription {
+        let curve = match self.range {
+            FloatRange::Linear { .. } => Curve::Linear,
+            FloatRange::Logarithmic { .. } => Curve::Log,
+            FloatRange::Skewed { factor, .. } => Curve::Skew {
+                factor: decimal(factor),
+                symmetric: false,
+            },
+            FloatRange::SymmetricSkewed { factor, .. } => Curve::Skew {
+                factor: decimal(factor),
+                symmetric: true,
+            },
+        };
+        let end = decimal(self.range.max());
+        // The highest value the parameter can hold: the end of the range
+        // snapped to the step, which is below the end when the step does not
+        // divide the range.
+        let max = decimal(self.snap(self.range.max()));
+        let scale = match (self.step, curve) {
+            (Some(step), _) => ParamScale::Stepped {
+                steps: self.step_count().unwrap_or(0),
+                step: decimal(step),
+                names: Vec::new(),
+                curve,
+                end,
+            },
+            (None, Curve::Linear) => ParamScale::Linear,
+            (None, Curve::Log) => ParamScale::Log,
+            (None, Curve::Skew { factor, symmetric }) => ParamScale::Skew { factor, symmetric },
+        };
+        ParamDescription::with(
+            &self.info,
+            decimal(self.range.min()),
+            max,
+            decimal(self.default),
+            scale,
+            self.smoothing,
+        )
+    }
 }
 
 /// A whole-number parameter.
@@ -437,6 +604,7 @@ pub struct IntParam {
     max: i32,
     default: i32,
     value: AtomicI32,
+    smoothing: Option<Smoothing>,
 }
 
 impl IntParam {
@@ -455,10 +623,44 @@ impl IntParam {
             max,
             default,
             value: AtomicI32::new(default),
+            smoothing: None,
         }
     }
 
     common_builders!();
+
+    /// Declares how the processor smooths changes to this parameter, as
+    /// for [`FloatParam::with_smoothing`]: a transpose in semitones that
+    /// glides from one pitch to the next, for example.
+    ///
+    /// It is a hint for editors and hosts, reported by
+    /// [`describe`](Param::describe) as `smoothing_ms`. It changes nothing
+    /// else: the parameter still holds whole numbers.
+    ///
+    /// ```
+    /// use manguebyte_params::{IntParam, Param, Smoothing};
+    ///
+    /// let transpose = IntParam::new("transpose", "Transpose", -24, 24, 0)
+    ///     .with_unit("st")
+    ///     .with_smoothing(Smoothing::Exponential(50.0));
+    /// assert_eq!(transpose.smoothing(), Some(Smoothing::Exponential(50.0)));
+    /// assert_eq!(transpose.describe().smoothing_ms(), Some(50.0));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the time is negative or not finite.
+    #[must_use]
+    pub fn with_smoothing(mut self, smoothing: Smoothing) -> Self {
+        self.smoothing = Some(checked_smoothing(smoothing));
+        self
+    }
+
+    /// The smoothing declared with [`with_smoothing`](Self::with_smoothing),
+    /// if any.
+    pub fn smoothing(&self) -> Option<Smoothing> {
+        self.smoothing
+    }
 
     /// The current value. Real-time safe.
     #[inline]
@@ -527,6 +729,23 @@ impl Param for IntParam {
     fn stored_plain(&self, value: f64) -> Option<f64> {
         (!value.is_nan()).then(|| f64::from((self.snap(value) as i32).clamp(self.min, self.max)))
     }
+    fn describe(&self) -> ParamDescription {
+        let scale = ParamScale::Stepped {
+            steps: self.span() as u32,
+            step: 1.0,
+            names: Vec::new(),
+            curve: Curve::Linear,
+            end: f64::from(self.max),
+        };
+        ParamDescription::with(
+            &self.info,
+            f64::from(self.min),
+            f64::from(self.max),
+            f64::from(self.default),
+            scale,
+            self.smoothing,
+        )
+    }
 }
 
 /// An on/off parameter.
@@ -544,6 +763,7 @@ pub struct BoolParam {
     default: bool,
     value: AtomicBool,
     labels: [String; 2],
+    smoothing: Option<Smoothing>,
 }
 
 impl BoolParam {
@@ -558,10 +778,43 @@ impl BoolParam {
             default,
             value: AtomicBool::new(default),
             labels: [String::from("Off"), String::from("On")],
+            smoothing: None,
         }
     }
 
     common_builders!();
+
+    /// Declares how the processor smooths a change of state, such as a
+    /// bypass that crossfades instead of cutting.
+    ///
+    /// It is a hint for editors and hosts, reported by
+    /// [`describe`](Param::describe) as `smoothing_ms`. It changes nothing
+    /// else: the parameter is still either off or on.
+    ///
+    /// ```
+    /// use manguebyte_params::{BoolParam, Param, Smoothing};
+    ///
+    /// let bypass = BoolParam::new("bypass", "Bypass", false)
+    ///     .as_bypass()
+    ///     .with_smoothing(Smoothing::Linear(10.0));
+    /// assert_eq!(bypass.smoothing(), Some(Smoothing::Linear(10.0)));
+    /// assert_eq!(bypass.describe().smoothing_ms(), Some(10.0));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the time is negative or not finite.
+    #[must_use]
+    pub fn with_smoothing(mut self, smoothing: Smoothing) -> Self {
+        self.smoothing = Some(checked_smoothing(smoothing));
+        self
+    }
+
+    /// The smoothing declared with [`with_smoothing`](Self::with_smoothing),
+    /// if any.
+    pub fn smoothing(&self) -> Option<Smoothing> {
+        self.smoothing
+    }
 
     /// Marks this as the processor's bypass switch, which hosts treat
     /// specially.
@@ -618,12 +871,14 @@ impl Param for BoolParam {
     fn plain_to_text(&self, plain: f64) -> String {
         self.labels[usize::from(plain >= 0.5)].clone()
     }
+    /// Matches a label as a choice's names are matched (see
+    /// [`ChoiceParam`]), then, if no label matches, `on`, `true`, `yes`,
+    /// `1`, `off`, `false`, `no` or `0` in any ASCII case.
     fn text_to_plain(&self, text: &str) -> Option<f64> {
-        let text = text.trim();
-        if let Some(index) = position_ignoring_case(&self.labels, text) {
+        if let Some(index) = matching_name(&self.labels, text) {
             return Some(index as f64);
         }
-        match text.to_ascii_lowercase().as_str() {
+        match text.trim().to_ascii_lowercase().as_str() {
             "on" | "true" | "yes" | "1" => Some(1.0),
             "off" | "false" | "no" | "0" => Some(0.0),
             _ => None,
@@ -631,6 +886,23 @@ impl Param for BoolParam {
     }
     fn stored_plain(&self, value: f64) -> Option<f64> {
         (!value.is_nan()).then(|| f64::from(u8::from(value >= 0.5)))
+    }
+    fn describe(&self) -> ParamDescription {
+        let scale = ParamScale::Stepped {
+            steps: 1,
+            step: 1.0,
+            names: self.labels.to_vec(),
+            curve: Curve::Linear,
+            end: 1.0,
+        };
+        ParamDescription::with(
+            &self.info,
+            0.0,
+            1.0,
+            self.default_plain(),
+            scale,
+            self.smoothing,
+        )
     }
 }
 
@@ -648,11 +920,18 @@ impl Param for BoolParam {
 ///
 /// The saved state holds the index, so only ever add new options at the end
 /// of the list; reordering or removing them changes what old sessions mean.
+///
+/// Text reads as the option whose name it is exactly, then as one whose
+/// name it is once outer white space is removed from both, then ignoring
+/// ASCII case as well. So every name reads back as its own option, even
+/// `"saw"` next to `"Saw"`, and a person may type `" SAW"`. Two options
+/// with exactly the same name cannot be told apart; the first one wins.
 pub struct ChoiceParam {
     info: ParamInfo,
     choices: Vec<String>,
     default: u32,
     value: AtomicU32,
+    smoothing: Option<Smoothing>,
 }
 
 impl ChoiceParam {
@@ -671,10 +950,42 @@ impl ChoiceParam {
             choices: choices.iter().map(|&choice| choice.to_owned()).collect(),
             default,
             value: AtomicU32::new(default),
+            smoothing: None,
         }
     }
 
     common_builders!();
+
+    /// Declares how the processor smooths a change of option, such as a
+    /// crossfade from one waveform to the next.
+    ///
+    /// It is a hint for editors and hosts, reported by
+    /// [`describe`](Param::describe) as `smoothing_ms`. It changes nothing
+    /// else: the parameter still holds one index.
+    ///
+    /// ```
+    /// use manguebyte_params::{ChoiceParam, Param, Smoothing};
+    ///
+    /// let shape = ChoiceParam::new("shape", "Shape", &["Sine", "Saw"], 0)
+    ///     .with_smoothing(Smoothing::Linear(5.0));
+    /// assert_eq!(shape.smoothing(), Some(Smoothing::Linear(5.0)));
+    /// assert_eq!(shape.describe().smoothing_ms(), Some(5.0));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the time is negative or not finite.
+    #[must_use]
+    pub fn with_smoothing(mut self, smoothing: Smoothing) -> Self {
+        self.smoothing = Some(checked_smoothing(smoothing));
+        self
+    }
+
+    /// The smoothing declared with [`with_smoothing`](Self::with_smoothing),
+    /// if any.
+    pub fn smoothing(&self) -> Option<Smoothing> {
+        self.smoothing
+    }
 
     /// Index of the selected option. Real-time safe.
     #[inline]
@@ -731,11 +1042,39 @@ impl Param for ChoiceParam {
         self.choices[self.snap(plain) as usize].clone()
     }
     fn text_to_plain(&self, text: &str) -> Option<f64> {
-        position_ignoring_case(&self.choices, text.trim()).map(|index| index as f64)
+        matching_name(&self.choices, text).map(|index| index as f64)
     }
     fn stored_plain(&self, value: f64) -> Option<f64> {
         (!value.is_nan()).then(|| (self.snap(value) as usize).min(self.choices.len() - 1) as f64)
     }
+    fn describe(&self) -> ParamDescription {
+        let scale = ParamScale::Stepped {
+            steps: self.choices.len() as u32 - 1,
+            step: 1.0,
+            names: self.choices.clone(),
+            curve: Curve::Linear,
+            end: self.last(),
+        };
+        ParamDescription::with(
+            &self.info,
+            0.0,
+            self.last(),
+            self.default_plain(),
+            scale,
+            self.smoothing,
+        )
+    }
+}
+
+/// `smoothing`, after checking that its time is a real duration.
+fn checked_smoothing(smoothing: Smoothing) -> Smoothing {
+    if let Smoothing::Linear(milliseconds) | Smoothing::Exponential(milliseconds) = smoothing {
+        assert!(
+            milliseconds.is_finite() && milliseconds >= 0.0,
+            "a smoothing time must be zero or more milliseconds, got {milliseconds}"
+        );
+    }
+    smoothing
 }
 
 /// Drops the sign from a number that rounded to zero.
@@ -749,10 +1088,26 @@ fn without_negative_zero(text: String) -> String {
     }
 }
 
-fn position_ignoring_case(labels: &[String], text: &str) -> Option<usize> {
-    labels
+/// The index of the name `text` stands for, trying in turn, and taking the
+/// first name that matches at the first stage that finds one:
+///
+/// 1. the name exactly as it is, so that every name reads back as itself
+///    (names that differ only in case or in outer white space included);
+/// 2. the name and the text with outer white space removed;
+/// 3. the same, ignoring ASCII case.
+///
+/// Names that are exactly the same cannot be told apart: the first wins.
+fn matching_name(names: &[String], text: &str) -> Option<usize> {
+    let trimmed = text.trim();
+    names
         .iter()
-        .position(|label| label.eq_ignore_ascii_case(text))
+        .position(|name| name == text)
+        .or_else(|| names.iter().position(|name| name.trim() == trimmed))
+        .or_else(|| {
+            names
+                .iter()
+                .position(|name| name.trim().eq_ignore_ascii_case(trimmed))
+        })
 }
 
 /// Reads a number a person typed: an optional unit after it is ignored, a

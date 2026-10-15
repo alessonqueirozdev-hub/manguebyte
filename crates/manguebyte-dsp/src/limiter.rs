@@ -22,7 +22,9 @@ use crate::{ProcessSpec, Processor};
 ///
 /// The average of minima that all cover a sample cannot exceed what that
 /// sample needs, so the ceiling holds for every sample, by construction.
-/// The channels share one gain, which keeps the stereo image still.
+/// The channels share one gain, which keeps the stereo image still. A
+/// sample that is not a finite number (a NaN or an infinity) comes out as
+/// silence and does not move the gain, so the ceiling holds for any input.
 ///
 /// The delay is reported by [`latency_samples`](Processor::latency_samples).
 ///
@@ -203,7 +205,15 @@ impl<S: Sample> Processor<S> for Limiter<S> {
         for frame in 0..buffer.num_frames() {
             let mut peak = 0.0f64;
             for channel in 0..channels {
-                peak = peak.max(buffer.channel(channel)[frame].to_f64().abs());
+                let sample = &mut buffer.channel_mut(channel)[frame];
+                let value = sample.to_f64();
+                if value.is_finite() {
+                    peak = peak.max(value.abs());
+                } else {
+                    // A fault upstream. Silence is the only output under
+                    // the ceiling it has, and it leaves the gain alone.
+                    *sample = S::ZERO;
+                }
             }
             let needed = if peak > self.ceiling {
                 self.ceiling / peak
@@ -400,6 +410,49 @@ mod tests {
         let reference = render(6_000);
         assert!(render(1) == reference);
         assert!(render(241) == reference);
+    }
+
+    #[test]
+    fn samples_that_are_not_finite_come_out_as_silence() {
+        for lookahead_ms in [0.0, 5.0] {
+            let render = |faults: bool| {
+                let mut limiter = Limiter::<f32>::new()
+                    .with_ceiling_db(-1.0)
+                    .with_lookahead_ms(lookahead_ms);
+                limiter.prepare(&ProcessSpec {
+                    num_channels: 2,
+                    ..SPEC
+                });
+                let mut signal = AudioBuffer::<f32>::new(2, 4_800);
+                for channel in 0..2 {
+                    for (n, sample) in signal.channel_mut(channel).iter_mut().enumerate() {
+                        *sample = 2.5 * ((n * 7 + channel) % 101) as f32 / 101.0 - 1.2;
+                    }
+                }
+                for (channel, frame, value) in [
+                    (0, 100, f32::NAN),
+                    (1, 101, f32::INFINITY),
+                    (0, 2_000, f32::NEG_INFINITY),
+                    (1, 2_000, -f32::NAN),
+                ] {
+                    signal.channel_mut(channel)[frame] = if faults { value } else { 0.0 };
+                }
+                limiter.process(&mut signal);
+                signal
+            };
+            let output = render(true);
+            // The gain is worked out in f64 and applied in f32, which may
+            // round up by half a unit.
+            let ceiling = 10f32.powf(-1.0 / 20.0) * (1.0 + f32::EPSILON);
+            for channel in 0..2 {
+                assert!(
+                    output.channel(channel).iter().all(|s| s.abs() <= ceiling),
+                    "look-ahead {lookahead_ms} ms, channel {channel}"
+                );
+            }
+            // Exactly as if those samples had been silence.
+            assert!(output == render(false), "look-ahead {lookahead_ms} ms");
+        }
     }
 
     #[test]

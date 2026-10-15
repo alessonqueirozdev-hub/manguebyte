@@ -3,8 +3,8 @@ use std::str::FromStr;
 
 use manguebyte_core::ParamId;
 
-use crate::Param;
 use crate::param::is_valid_id;
+use crate::{Param, ParamDescription};
 
 /// A group of parameters, usually a struct with one field per parameter.
 ///
@@ -105,6 +105,103 @@ pub trait ParamSet: Send + Sync {
             )),
             None => Ok(()),
         }
+    }
+
+    /// A description of every parameter, in the order
+    /// [`visit`](Self::visit) gives them. Allocates.
+    fn descriptions(&self) -> Vec<ParamDescription> {
+        let mut descriptions = Vec::new();
+        self.visit(&mut |param| descriptions.push(param.describe()));
+        descriptions
+    }
+
+    /// [`descriptions`](Self::descriptions) as one JSON array, in the format
+    /// of [`ParamDescription::to_json`]. Allocates.
+    ///
+    /// ```
+    /// use manguebyte_params::{BoolParam, IntParam, ParamSet, param_set};
+    ///
+    /// struct Params { voices: IntParam, mono: BoolParam }
+    /// param_set!(Params { voices, mono });
+    ///
+    /// let params = Params {
+    ///     voices: IntParam::new("voices", "Voices", 1, 16, 8),
+    ///     mono: BoolParam::new("mono", "Mono", false).hidden(),
+    /// };
+    /// assert_eq!(
+    ///     params.descriptions_json(),
+    ///     concat!(
+    ///         r#"[{"id":"voices","param_id":1816020030,"name":"Voices","unit":"","#,
+    ///         r#""min":1,"max":16,"default":8,"scale":{"kind":"stepped","steps":15,"step":1},"#,
+    ///         r#""flags":{"automatable":true,"hidden":false,"bypass":false}},"#,
+    ///         r#"{"id":"mono","param_id":4068929130,"name":"Mono","unit":"","#,
+    ///         r#""min":0,"max":1,"default":0,"#,
+    ///         r#""scale":{"kind":"stepped","steps":1,"step":1,"names":["Off","On"]},"#,
+    ///         r#""flags":{"automatable":true,"hidden":true,"bypass":false}}]"#,
+    ///     )
+    /// );
+    /// ```
+    fn descriptions_json(&self) -> String {
+        ParamDescription::json_array(&self.descriptions())
+    }
+
+    /// The text, with its unit, for the value the parameter `id` would hold
+    /// after [`set_plain`](Param::set_plain)`(plain)`, as its
+    /// [`stored_plain`](Param::stored_plain) predicts, written by its
+    /// [`display_plain`](Param::display_plain). Nothing is stored.
+    ///
+    /// For the parameter types of this crate that value is clamped to the
+    /// range and snapped to the step. A parameter of another type that
+    /// keeps the default `stored_plain` gets the text of `plain` as it is
+    /// given; a wrapper around one of this crate's types should forward
+    /// `stored_plain`, `display_plain` and [`parse_display`](Param::parse_display)
+    /// so that its text is the wrapped parameter's.
+    ///
+    /// `None` if there is no such parameter or `plain` is not a number.
+    /// Allocates.
+    ///
+    /// ```
+    /// use manguebyte_params::{ChoiceParam, FloatParam, FloatRange, ParamSet, param_set};
+    ///
+    /// struct Params { cutoff: FloatParam, shape: ChoiceParam }
+    /// param_set!(Params { cutoff, shape });
+    ///
+    /// let params = Params {
+    ///     cutoff: FloatParam::new("cutoff", "Cutoff", FloatRange::logarithmic(20.0, 20_000.0), 1_000.0)
+    ///         .with_unit("Hz")
+    ///         .with_precision(0),
+    ///     shape: ChoiceParam::new("shape", "Shape", &["Sine", "Saw"], 0),
+    /// };
+    /// assert_eq!(params.value_to_text("cutoff", 440.0).as_deref(), Some("440 Hz"));
+    /// assert_eq!(params.value_to_text("cutoff", 1e9).as_deref(), Some("20000 Hz"));
+    /// assert_eq!(params.value_to_text("shape", 1.0).as_deref(), Some("Saw"));
+    /// assert_eq!(params.text_to_value("cutoff", "2.5 kHz"), Some(2_500.0));
+    /// assert_eq!(params.text_to_value("shape", "SAW"), Some(1.0));
+    /// assert_eq!(params.text_to_value("shape", "Square"), None);
+    /// assert_eq!(params.value_to_text("nope", 1.0), None);
+    /// ```
+    fn value_to_text(&self, id: &str, plain: f64) -> Option<String> {
+        let param = self.find(id)?;
+        let stored = param.stored_plain(plain)?;
+        Some(param.display_plain(stored))
+    }
+
+    /// Reads a value for the parameter `id` from text a person typed or
+    /// [`value_to_text`](Self::value_to_text) wrote, with
+    /// [`Param::parse_display`]. Nothing is stored.
+    ///
+    /// For the parameter types of this crate, unless a float was given a
+    /// formatter and a parser that disagree, the text `value_to_text`
+    /// writes reads back as a value the parameter can hold whose text is
+    /// the same: the same option of a choice or a switch, the same whole
+    /// number, and a float to the precision of its text. The one exception
+    /// is a choice or a switch with two names that are exactly the same,
+    /// which cannot be told apart: both read as the first.
+    ///
+    /// `None` if there is no such parameter or the text means nothing to
+    /// it. Allocates.
+    fn text_to_value(&self, id: &str, text: &str) -> Option<f64> {
+        self.find(id)?.parse_display(text)
     }
 
     /// Puts every parameter back to its default.

@@ -25,6 +25,43 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   in its extensive mode, which runs in CI on Windows, Linux and macOS, and
   the wrapper's own tests run under Miri.
 - `scripts/bundle-vst3.sh` builds a `.vst3` bundle.
+- `manguebyte-lv2`: LV2 support. `export_lv2!(MyPlugin)` defines
+  `lv2_descriptor` for the same `Plugin`, and `bundle_files::<MyPlugin>`
+  gives the text of the bundle's `manifest.ttl` and of the plugin's own
+  Turtle file. The
+  plugin's URI is `urn:manguebyte:` followed by its id. Audio ports, with
+  the sidechain marked `lv2:isSideChain`; one control port per parameter,
+  in the parameter's own unit and range, whose changes become parameter
+  events on frame 0; an atom input carrying MIDI, each message on its
+  frame, and `time:Position`; an atom `notify` output, written empty; a
+  latency port; state through `state:interface`. `run` never allocates
+  (checked with the counting allocator) and flushes subnormal numbers; a
+  panic inside the plugin leaves a silent block, and the next block gives
+  the plugin every parameter's value again. Tested in process through the
+  real C descriptor, acting as a host; the Turtle has not yet been read by
+  `lv2lint` or a Turtle parser, and no LV2 host has loaded a plugin yet.
+  - Transport: a block is cut at each `time:Position` inside it, and the
+    transport moves on by itself between positions. LV2 counts beats in
+    `time:beatUnit` notes and the framework in quarter notes, so tempo and
+    positions are converted. The start of the bar is `time:beat` minus
+    `time:barBeat` when the host gives both, and `time:bar` times
+    `time:beatsPerBar` only when it does not give the running beat. A
+    position stamped past the end of a block is moved back by the
+    difference, at its own speed and tempo, and holds from the start of the
+    next block. A value that does not come out finite is passed on as
+    unknown.
+  - Turtle: a parameter with whole-number steps over a whole-number range
+    is an `lv2:integer` port (`lv2:toggled` for a switch), and its values
+    are listed as scale points with `lv2:enumeration` only when they have
+    names, as a choice's options do; any other stepped parameter gets
+    `pprops:rangeSteps`, the number of values it can take.
+  - Versions: LV2 gives `lv2:minorVersion` 0 to experimental plugins and
+    odd numbers to development versions, so a semantic version is not
+    copied across. `lv2:minorVersion` is 2 × (1000 × major + minor) + 2 and
+    `lv2:microVersion` is 2 × patch + 2, or 2 × patch + 1 for a pre-release:
+    a release is never marked experimental or in development, and versions
+    keep their order. `0.1.0` becomes 4 and 2. The URI does not change
+    with the major version.
 - `manguebyte-plugin`: the `Plugin` trait every format wraps; `Harness`,
   which runs a plugin in a unit test with scheduled notes and automation;
   `ParamWatcher`, which turns parameter changes made outside the host into
@@ -61,9 +98,9 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 
 ### User interface
 
-The first half of phase 1 of [ADR 0007](docs/adr/0007-user-interface-layer.md).
-Everything here is tested without a display; there are no windows yet, so no
-editor has been opened inside a real host.
+Phase 1 of [ADR 0007](docs/adr/0007-user-interface-layer.md), up to its
+item 8. Windows exist on Win32 only; everything else is tested without a
+display, and no editor has been opened inside a real host yet.
 
 - `manguebyte_plugin::editor`: the editor contract. `Plugin::editor` returns
   an optional `EditorSpec`, which is `Send + Sync + 'static`, so it cannot
@@ -97,6 +134,66 @@ editor has been opened inside a real host.
   implement; damage tracking, so a steady interface repaints nothing and
   touches no memory; and a harness that finds widgets by role and name and
   drives them with pointer, wheel and keys on a clock the test controls.
+- `manguebyte-window`: platform windows. `Window::open` makes a child of the
+  host's window, on Win32 so far; `Window::headless` makes a window with no
+  system window behind it, on every system, which a test drives through a
+  `Headless` controller. A `WindowHandler` receives `Event`s on the
+  window's thread: paint with its damage, pointer down, move, up, leave and
+  cancel, wheel turns in lines, keys with their modifiers and a repeat
+  flag, text, focus, resizes, scale changes, timers and closing. A window
+  presents a premultiplied pixmap through a back buffer of its own,
+  converting and copying only the damaged rectangles, and answers an
+  expose from that buffer without asking the handler. The two backends
+  share the damage, back buffer, pointer, timer and dispatch code.
+  - Win32: a `WS_CHILD` window presenting with `SetDIBitsToDevice`; the
+    pointer captured from the first button down to the last button up;
+    timers owned by the window. A message that arrives while the handler
+    runs waits and is delivered after it returns, so the handler is never
+    re-entered; while it waits, repeated timer ticks, pointer moves and
+    paints are merged, at most `MAX_QUEUED` (1024) events wait, and
+    `Window::dropped_events` counts any beyond that. Keys, characters and
+    wheel turns the handler declines go on to the parent window; Tab, Enter
+    and Escape are left to a host's dialog unless
+    `Window::set_wants_all_keys(true)` asks for them. A parent window owned
+    by another process is refused. The class, hook, thread and DPI rules
+    of ADR 0007 are kept and recorded there.
+  - The `testing` feature adds `win32::testing`: test parent windows,
+    message injection, message loops and pixel read-back. `ReadBack::Screen`
+    reads the pixels on the window's surface; `ReadBack::PrintClient` only
+    checks the `WM_PRINTCLIENT` answer. A pixel test fails when the session
+    cannot read windows back, unless `MANGUEBYTE_WINDOW_SKIP_READ_BACK` is
+    set, which CI never does.
+  - `examples/probe.rs` presents a known pattern and reads it back: it
+    exits 0 on `PASS` (or `SKIP` on a system with no window backend yet),
+    1 on `FAIL` and 2 on `CANNOT`, when the session cannot read windows
+    back. CI runs it on Windows.
+- `manguebyte-gui`: the glue between the plugin wrappers and the widgets.
+  `Editor` is an `EditorSpec` made from a size in logical pixels, resize
+  rules, an optional theme and a function that builds the view; a plugin
+  returns it from `Plugin::editor`. Opened, it makes a `manguebyte-window`
+  child of the host's window (Win32 only; other parents are refused with
+  `EditorError::Unsupported`), builds a `Root` on the wrapper's
+  `EditorContext`, sends it the window's input in logical pixels, and runs
+  a frame about every 16 ms (`FRAME_PERIOD_MS`) from a timer the window
+  owns while the editor is visible. A frame where nothing changed polls the
+  parameters and sources and then lays out, draws and presents nothing;
+  the timer is stopped while the editor is hidden. A hidden editor only
+  takes note of new sizes and scales, and draws them once when shown; a
+  new scale and the size the host grants for it are drawn in one frame. No
+  size the editor opens at, accepts or asks for is larger than
+  `manguebyte_ui::MAX_BUFFER_SIDE` device pixels a side. An interface that
+  panics while it handles an event or draws is dropped at once, which ends
+  its gestures and calls `EditorContext::closed`. The editor is visible as
+  soon as it opens, since VST 3 has no call that shows it.
+  - The `headless` feature adds `Editor::on_headless_open` and
+    `HeadlessEditor`, and only adds API: an editor opens headless only when
+    it was given a hook, so `cargo test --workspace` leaves every other
+    editor alone. Tests drive an editor with a headless hook end to end
+    through the real CLAP interface and VST 3's COM interfaces, open and
+    close it thousands of times while `process` runs under the counting
+    allocator, fuzz the hosts' calls, and compare it with golden images at
+    scales 1 and 2. On Windows, a test embeds it in a real window and reads
+    its pixels back.
 - `Param::stored_plain` says what a parameter would store for a value,
   without storing it.
 
@@ -154,9 +251,10 @@ editor has been opened inside a real host.
   `Harness` hold it around every block, so plugins need not. See ADR 0006.
 - Every crate that needs no `unsafe` code forbids it
   (`#![forbid(unsafe_code)]`): the facade, devices, signal processing, file
-  formats, graph, MIDI, parameters, standalone, OSC, plugin, graphics and the
-  command-line tool. The `unsafe` that remains is listed in
-  `docs/ARCHITECTURE.md`.
+  formats, graph, MIDI, parameters, standalone, OSC, plugin, graphics,
+  widgets, the interface glue (`manguebyte-gui`) and the command-line tool;
+  `manguebyte-window` denies it everywhere but its Win32 backend. The
+  `unsafe` that remains is listed in `docs/ARCHITECTURE.md`.
 - `LogQueue` (`manguebyte_core::log`): a log the audio thread can write to.
   Posting is wait-free and never allocates, even with formatting
   (`post_fmt(level, format_args!(..))` formats into a buffer on the stack);
@@ -173,6 +271,15 @@ editor has been opened inside a real host.
 - `AudioBuffer::windowed` narrows a buffer to a range of frames without
   copying, and `split_at_events` uses it to apply each event on its exact
   frame.
+- `ProcessContext` has a new public field, `offset`: where the buffer
+  begins within the host's block, so that the pieces of a split block read
+  the sidechain at their own frames. `split_at_events_with` hands each
+  piece its own context, as does `ProcessContext::for_piece`, and
+  `sidechain_peak` gives the sidechain's level at a frame of the piece. The
+  struct is `#[non_exhaustive]`, so the field breaks no other crate. A processor
+  that reads the sidechain must be given the piece's context; the older
+  pattern of `split_at_events` with `without_events()` leaves the
+  sidechain misaligned after the first piece.
 - `Synth` and `Voice`: polyphonic voice allocation with per-note expression
   and modulation, sustain pedal and voice stealing. The synth remembers
   where the pitch wheel and each controller stand on every channel and
@@ -206,6 +313,53 @@ editor has been opened inside a real host.
 - `Crossover`: Linkwitz-Riley splitters of 2 to 5 bands whose sum is flat.
 - `StateVariableFilter`, stable while its cutoff is modulated at audio rate.
 - `Compressor` with soft knee and linked channels; `NoiseGate` with hold.
+- `Expander`: downward expansion with threshold, ratio (an infinite ratio
+  makes it a gate), soft knee, attack, release, a range of at most 240 dB
+  and a gain-reduction meter.
+- Sidechain keying for `Compressor`, `NoiseGate` and `Expander`, opt-in:
+  `with_key_source(KeySource::Sidechain)` makes one listen to the context's
+  sidechain, and `KeySource::Input`, the default, keeps it on its own
+  input. A wrapper that always passes a sidechain, silent when the host
+  leaves it unconnected, changes nothing unless a processor asks for it,
+  and each processor in a chain chooses on its own. `Oversampled` does not
+  pass the sidechain to the processor inside it.
+- `Convolution` with an impulse response of any length, by uniformly
+  partitioned overlap-save in the frequency domain. In zero-latency mode,
+  the default, the first partition is convolved directly in the time
+  domain and the output is not delayed; otherwise it is late by exactly one
+  partition. The output is identical bit for bit whatever the host's block
+  sizes, while the response stays the same. Routings: one response for
+  every channel or one per channel, and true stereo (left to left, left to
+  right, right to left, right to right). The sums of the older partitions
+  are spread over the samples of each partition, so with host blocks
+  smaller than a partition no block carries all of them. Against direct
+  convolution in double precision, the largest error measured is 1.47e-6
+  of the output's RMS level in single precision, for responses of 1 to
+  100,000 samples (the test fails above 2e-6), and below 1e-13 in double
+  precision up to 20,000 samples. A `ConvolutionEngine` is built off the
+  audio thread and handed to the playing `Convolution` by its
+  `ConvolutionLoader` through a wait-free queue, with an optional
+  crossfade; the old engine travels back to be dropped there, so the audio
+  thread never allocates or frees. An engine that arrives during a
+  crossfade waits for it to end. `ConvolutionLoader::latency` gives the
+  latency of the engine sent last, so a plugin can tell when a new
+  response changes it.
+- `FirFilter`: a FIR filter processor for any coefficients, such as those
+  of the `fir` design functions, with no latency. It chooses on its own
+  between direct convolution and the partitioned FFT engine, by the number
+  of multiplications per sample, or takes `FirMode` to force one.
+- `WavetableOscillator` and `Wavetable`: single-cycle frames of any
+  length, split into at most 2,048 harmonics and built off the audio thread
+  into a mip-map of two levels per octave, each read with fifth-order
+  Lagrange interpolation; the oscillator plays the level whose harmonics
+  stay below half the sample rate. It morphs between frames, with an
+  optional glide, takes phase modulation from its input, and is identical
+  bit for bit across block sizes. A table is shared through an `Arc`, and
+  `set_table` hands the old one back so that the audio thread never drops
+  it. A sawtooth played at 48 kHz from A0 to C8 keeps the energy away from
+  its harmonics below -125 dB, the test's limit (the worst measured was
+  -131.4 dB, with the measurement's own floor below -150 dB), and stays
+  within -120 dB of the ideal band-limited sawtooth.
 - `Reverb`: an eight-line feedback delay network.
 - `fft::Fft` and `fft::RealFft` for any length; `window::Window` with nine
   shapes.
@@ -285,7 +439,13 @@ editor has been opened inside a real host.
 - The same material rendered with different block sizes must be identical
   bit for bit.
 - Miri runs the tests of the places that contain `unsafe` code that
-  handles memory: the queue, the triple buffer, both wrappers and the host.
+  handles memory: the queue, the triple buffer, the CLAP, VST 3 and LV2
+  wrappers and the host. It also runs the window crate's
+  platform-independent code and its headless backend.
+- CI checks that no crate that processes audio depends on an interface
+  crate (`scripts/check-layering.sh`), checks every dependency's licence
+  with `cargo deny` against the list in `deny.toml`, and runs the window
+  probe on Windows.
 - CI runs `cargo mangue`'s end-to-end test on Windows, Linux and macOS:
   generate a plugin of each kind, build it, test it and bundle it.
 

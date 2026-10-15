@@ -540,7 +540,13 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 name = "mangue-duck"
 version = "0.1.0"
 dependencies = [
+ "mangue-pluck",
  "manguebyte",
+ "manguebyte-gfx",
+ "manguebyte-gui",
+ "manguebyte-ui",
+ "manguebyte-window",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -548,6 +554,9 @@ name = "mangue-pluck"
 version = "0.1.0"
 dependencies = [
  "manguebyte",
+ "manguebyte-gfx",
+ "manguebyte-gui",
+ "manguebyte-ui",
 ]
 
 [[package]]
@@ -637,6 +646,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "manguebyte-gui"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-clap",
+ "manguebyte-core",
+ "manguebyte-dsp",
+ "manguebyte-gfx",
+ "manguebyte-gui",
+ "manguebyte-params",
+ "manguebyte-plugin",
+ "manguebyte-ui",
+ "manguebyte-vst3",
+ "manguebyte-window",
+]
+
+[[package]]
 name = "manguebyte-host"
 version = "0.1.0"
 dependencies = [
@@ -651,6 +676,17 @@ dependencies = [
  "manguebyte-params",
  "manguebyte-plugin",
  "vst3",
+]
+
+[[package]]
+name = "manguebyte-lv2"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-dsp",
+ "manguebyte-midi",
+ "manguebyte-params",
+ "manguebyte-plugin",
 ]
 
 [[package]]
@@ -669,6 +705,7 @@ name = "manguebyte-params"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -679,6 +716,16 @@ dependencies = [
  "manguebyte-dsp",
  "manguebyte-midi",
  "manguebyte-params",
+]
+
+[[package]]
+name = "manguebyte-sampler"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-dsp",
+ "manguebyte-formats",
+ "manguebyte-midi",
 ]
 
 [[package]]
@@ -713,6 +760,25 @@ dependencies = [
  "manguebyte-params",
  "manguebyte-plugin",
  "vst3",
+]
+
+[[package]]
+name = "manguebyte-web"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-dsp",
+ "manguebyte-params",
+]
+
+[[package]]
+name = "manguebyte-window"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-gfx",
+ "manguebyte-plugin",
+ "manguebyte-window",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
