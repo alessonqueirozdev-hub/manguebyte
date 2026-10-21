@@ -9,7 +9,12 @@
 //! exits. The host waits a set time, kills a scanner that is still
 //! running, and reports what it found, plugin by plugin, and what failed,
 //! with how. An LV2 bundle says what it is in its Turtle files and runs no
-//! code to be listed, so it is read in the host itself.
+//! code to be listed, so it is read in the host itself. An Audio Unit
+//! bundle (`.component`, on macOS) says what it holds in its `Info.plist`,
+//! but a unit's code runs only when it is instantiated, so the scanner
+//! process finds each of its units with `AudioComponentFindNext` and
+//! instantiates it, which is what a unit that crashes or hangs does it
+//! on.
 //!
 //! What a scan found is kept in a [`ScanCache`], by path and by a
 //! [`Fingerprint`] of when the file was last written and how large it is,
@@ -21,7 +26,7 @@
 //! [`serve_if_asked`] first thing: a host application can be its own
 //! scanner, with [`Scanner::this_program`]. This crate also builds one,
 //! `manguebyte-scan`, which does nothing else, for [`Scanner::new`]. It is
-//! started as `<program> --manguebyte-scan <clap|vst3> <path>`.
+//! started as `<program> --manguebyte-scan <clap|vst3|au> <path>`.
 //!
 //! ```no_run
 //! use manguebyte_host::any::Format;
@@ -32,7 +37,7 @@
 //!     // scanner, and exits right after.
 //!     unsafe { manguebyte_host::scan::serve_if_asked() };
 //!
-//!     let formats = [Format::Clap, Format::Vst3, Format::Lv2];
+//!     let formats = [Format::Clap, Format::Vst3, Format::Lv2, Format::Au];
 //!     let mut places = Vec::new();
 //!     for format in formats {
 //!         places.extend(standard_paths(format));
@@ -481,8 +486,8 @@ pub unsafe fn serve_if_asked() {
 }
 
 /// Acts as the scanner: lists the plugins of the file named by `arguments`,
-/// its format (`clap`, `vst3` or `lv2`) and its path, on standard output,
-/// for the [`Scanner`] that started this process.
+/// its format (`clap`, `vst3`, `lv2` or `au`) and its path, on standard
+/// output, for the [`Scanner`] that started this process.
 ///
 /// Returns failure for arguments that make no sense; a file that is not a
 /// plugin is an answer, and success.
@@ -506,7 +511,7 @@ pub unsafe fn run_scanner(arguments: &[OsString]) -> ExitCode {
 /// As for [`serve_if_asked`].
 unsafe fn serve(arguments: &[OsString]) -> bool {
     let [format, path] = arguments else {
-        eprintln!("usage: {SCAN_ARGUMENT} <clap|vst3|lv2> <path>");
+        eprintln!("usage: {SCAN_ARGUMENT} <clap|vst3|lv2|au> <path>");
         return false;
     };
     let Some(format) = format.to_str().and_then(format_from_word) else {
@@ -538,6 +543,8 @@ unsafe fn serve(arguments: &[OsString]) -> bool {
 
 /// Loads a file, reads its plugins, and unloads it again before answering,
 /// so that a plugin that crashes on the way out is reported as crashing.
+/// Each Audio Unit is also instantiated and put away again, since that is
+/// when its code first runs.
 ///
 /// # Safety
 ///
@@ -553,6 +560,12 @@ unsafe fn list(format: Format, path: &Path) -> Result<Vec<PluginEntry>, String> 
     let library =
         unsafe { crate::any::Library::load_as(path, format) }.map_err(|e| e.to_string())?;
     let entries = library.plugins().to_vec();
+    if format == Format::Au {
+        for entry in &entries {
+            let plugin = library.create(&entry.id).map_err(|e| e.to_string())?;
+            drop(plugin);
+        }
+    }
     drop(library);
     Ok(entries)
 }

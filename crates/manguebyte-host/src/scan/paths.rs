@@ -58,6 +58,7 @@ fn listed(name: &str) -> Vec<PathBuf> {
 /// | CLAP | `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP` | `~/Library/Audio/Plug-Ins/CLAP`, `/Library/Audio/Plug-Ins/CLAP` | `~/.clap`, `/usr/lib/clap` |
 /// | VST 3 | `%COMMONPROGRAMFILES%\VST3`, `%LOCALAPPDATA%\Programs\Common\VST3` | `~/Library/Audio/Plug-Ins/VST3`, `/Library/Audio/Plug-Ins/VST3`, `/Network/Library/Audio/Plug-Ins/VST3` | `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` |
 /// | LV2 | `%APPDATA%\LV2`, `%COMMONPROGRAMFILES%\LV2` | `~/Library/Audio/Plug-Ins/LV2`, `~/.lv2`, `/usr/local/lib/lv2`, `/usr/lib/lv2`, `/Library/Audio/Plug-Ins/LV2` | `~/.lv2`, `/usr/local/lib/lv2`, `/usr/lib/lv2` |
+/// | AU | none | `~/Library/Audio/Plug-Ins/Components`, `/Library/Audio/Plug-Ins/Components` | none |
 ///
 /// CLAP's `CLAP_PATH` adds folders before these, and LV2's `LV2_PATH`
 /// replaces them, as each format's specification says.
@@ -91,6 +92,14 @@ pub fn standard_paths(format: Format) -> Vec<PathBuf> {
                 paths.push(in_home(".vst3"));
                 paths.push(Some("/usr/lib/vst3".into()));
                 paths.push(Some("/usr/local/lib/vst3".into()));
+            }
+        }
+        Format::Au => {
+            // Apple's "Audio Unit Programming Guide", "Installing": the
+            // user's folder and the system's.
+            if cfg!(target_os = "macos") {
+                paths.push(in_home("Library/Audio/Plug-Ins/Components"));
+                paths.push(Some("/Library/Audio/Plug-Ins/Components".into()));
             }
         }
         Format::Lv2 => {
@@ -130,6 +139,7 @@ fn format_of(path: &Path, is_folder: bool, formats: &[Format]) -> Option<Format>
         "clap" => Format::Clap,
         "vst3" => Format::Vst3,
         "lv2" if is_folder => Format::Lv2,
+        "component" if is_folder => Format::Au,
         _ => return None,
     };
     formats.contains(&format).then_some(format)
@@ -137,7 +147,8 @@ fn format_of(path: &Path, is_folder: bool, formats: &[Format]) -> Option<Format>
 
 /// Finds the plugins of `formats` in `paths` and the folders below them,
 /// by their names: a file or folder ending in `.clap` or `.vst3`, and a
-/// folder ending in `.lv2`. Runs nothing, and reads no file.
+/// folder ending in `.lv2` or `.component`. Runs nothing, and reads no
+/// file.
 ///
 /// A bundle is not searched inside. Each path is given at most once,
 /// sorted, even when a folder is reached twice through links; a folder is
@@ -306,6 +317,17 @@ mod tests {
         );
         assert_eq!(format_of(Path::new("B.lv2"), true, &all), Some(Format::Lv2));
         assert_eq!(format_of(Path::new("B.lv2"), false, &all), None);
+        let au = [Format::Au];
+        assert_eq!(
+            format_of(Path::new("B.component"), true, &au),
+            Some(Format::Au)
+        );
+        assert_eq!(format_of(Path::new("B.component"), false, &au), None);
+        assert_eq!(format_of(Path::new("B.component"), true, &all), None);
+        assert_eq!(
+            standard_paths(Format::Au).is_empty(),
+            cfg!(not(target_os = "macos"))
+        );
         assert_eq!(format_of(Path::new("B.dll"), false, &all), None);
         assert_eq!(format_of(Path::new("B.clap"), false, &[Format::Vst3]), None);
     }

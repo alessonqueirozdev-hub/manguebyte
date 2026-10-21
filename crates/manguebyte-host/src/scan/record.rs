@@ -72,6 +72,7 @@ pub(crate) fn format_word(format: Format) -> &'static str {
         Format::Clap => "clap",
         Format::Vst3 => "vst3",
         Format::Lv2 => "lv2",
+        Format::Au => "au",
     }
 }
 
@@ -80,6 +81,7 @@ pub(crate) fn format_from_word(word: &str) -> Option<Format> {
         "clap" => Format::Clap,
         "vst3" => Format::Vst3,
         "lv2" => Format::Lv2,
+        "au" => Format::Au,
         _ => return None,
     })
 }
@@ -182,9 +184,9 @@ mod tests {
         let mut empty = fields.clone();
         empty[0].clear();
         assert_eq!(plugin_from_fields(Format::Clap, &empty), None);
-        for format in [Format::Clap, Format::Vst3, Format::Lv2] {
+        for format in [Format::Clap, Format::Vst3, Format::Lv2, Format::Au] {
             assert_eq!(format_from_word(format_word(format)), Some(format));
         }
-        assert_eq!(format_from_word("au"), None);
+        assert_eq!(format_from_word("aax"), None);
     }
 }

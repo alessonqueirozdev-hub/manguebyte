@@ -6,6 +6,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+#[cfg_attr(
+    not(any(feature = "clap", feature = "vst3", feature = "lv2")),
+    allow(unused_imports)
+)]
 use std::path::{Path, PathBuf};
 
 use manguebyte_core::AudioBuffer;
@@ -460,4 +464,43 @@ pub fn as_lv2_delivers(kind: EventKind) -> EventKind {
 pub fn plain_at(params: &dyn ParamSet, id: ParamId, position: f64) -> f64 {
     let param = params.find_param(id).expect("a known parameter");
     f64::from(param.normalized_to_plain(position) as f32)
+}
+
+// --- Audio Units -------------------------------------------------------------
+
+/// The factory function of the framework's AU wrapper for `P`, as a unit's
+/// bundle exports it on macOS (`ManguebyteAudioUnitFactory`); here it is
+/// the plugin linked into the test, so that it is hosted on every system.
+#[cfg(feature = "au")]
+unsafe extern "C" fn au_factory<P: manguebyte_plugin::Plugin>(
+    _description: *const std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    manguebyte_au::__private::factory::<P>()
+}
+
+/// The components of `P` as its bundle's `Info.plist` lists them, written
+/// by the wrapper and read by the host, made in this process through the
+/// wrapper's factory, as AudioToolbox makes a version 2 unit.
+#[cfg(feature = "au")]
+pub fn au_library<P: manguebyte_plugin::Plugin>() -> manguebyte_host::au::AuLibrary {
+    let plist = manguebyte_au::info_plist(&P::INFO, P::INFO.name, P::INFO.id, P::INFO.version);
+    let components = manguebyte_host::au::read_info_plist(plist.as_bytes())
+        .expect("the wrapper's Info.plist lists the unit");
+    // SAFETY: the factory is the framework's own AU wrapper around a plugin
+    // of this workspace, linked into the test, which keeps to Apple's Audio
+    // Unit interface and is callable for as long as the test runs.
+    unsafe {
+        manguebyte_host::au::AuLibrary::from_factory(
+            au_factory::<P>,
+            components,
+            format!("{}.component", P::INFO.name),
+        )
+    }
+}
+
+/// What an Audio Unit is given for an event: notes and pressure as MIDI
+/// 1.0, and a value as the 32-bit float `AudioUnitParameterEvent` holds,
+/// in the parameter's own unit, which is what the LV2 host delivers too.
+pub fn as_au_delivers(kind: EventKind) -> EventKind {
+    as_lv2_delivers(kind)
 }

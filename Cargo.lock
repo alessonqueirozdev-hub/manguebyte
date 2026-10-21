@@ -742,6 +742,7 @@ dependencies = [
  "libloading 0.8.9",
  "mangue-duck",
  "mangue-pluck",
+ "manguebyte-au",
  "manguebyte-core",
  "manguebyte-dsp",
  "manguebyte-graph",
