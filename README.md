@@ -117,7 +117,7 @@ exists and what is planned.
 | [`manguebyte-vst3`](crates/manguebyte-vst3) | Exports the same `Plugin` as a VST 3 plugin with one line. Every automation point lands on its frame; notes carry ids, tuning and per-note expression; the MIDI controllers the plugin declares arrive as MIDI again; a plugin's notes and expressions go out through an output event bus. Passes Steinberg's validator on Windows, Linux and macOS |
 | [`manguebyte-lv2`](crates/manguebyte-lv2) | Exports the same `Plugin` as an LV2 plugin with one line, and generates its Turtle files; `cargo mangue` writes the `.lv2` bundle. Tested through its C interface in process, and CI loads the example plugins' bundles with lilv; not yet checked by `lv2lint` or loaded in any host but the framework's own |
 | [`manguebyte-au`](crates/manguebyte-au) | Exports the same `Plugin` as an Audio Unit (version 2) for macOS with one line; `cargo mangue` writes and installs the `.component`. Tested through its C interface on every system, and both example plugins pass Apple's `auval` in a macOS CI job |
-| [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP, VST 3 and LV2 plugins made by anyone and runs them as processors, through one interface for all three formats, with every event on its frame and nothing allocated while processing; LV2 bundles read with its own Turtle reader. Finds the plugins installed on a system and lists them in a process of their own, so one that crashes or hangs is reported and the host goes on, with a cache of what it found |
+| [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP, VST 3, LV2 and Audio Unit (version 2) plugins made by anyone and runs them as processors, through one interface for all four formats, with every event on its frame and nothing allocated while processing; LV2 bundles read with its own Turtle reader, Audio Units found and made through AudioToolbox on macOS. Finds the plugins installed on a system and lists them in a process of their own, so one that crashes or hangs is reported and the host goes on, with a cache of what it found |
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state; MIDI-CI: discovery, profiles, property exchange and process inquiry, and a device agent an application drives |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF, FLAC, Ogg Vorbis, Ogg Opus (CELT) and MP3, read and written, and MPEG layers I and II read, whole or block by block with exact seeking; codecs written from their specifications: FLAC checked against FFmpeg, the Vorbis, Opus and MPEG decoders tested on files libvorbis, libopus, LAME and FFmpeg wrote, the Vorbis and MP3 encoders' files decoded by FFmpeg and libvorbis to the same audio and length, and the Opus encoder's by this crate's decoder, to the exact length; tags, cue points, loops, Broadcast Wave fields and pictures in one metadata model, kept on a round trip; waveform thumbnails with a cache; AAC, ALAC and WMA through the system's codecs on Windows and macOS; wait-free bridges to play and record from an audio callback, and a transport source: play, pause, stop, seek and loop a streamed file from any thread, sample-exact |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
@@ -153,8 +153,9 @@ DAWs and browsers are not tried. The browser engine and the sampler are
 tested natively and in Node.js, not yet in a browser's audio thread under
 load. Also missing: the AUv3 and AAX formats; encoding Opus speech (SILK
 and hybrid frames; CELT is written); MIDI output
-through the systems' own Universal MIDI Packet APIs; hosting AU plugins,
-and the editors of hosted plugins.
+through the systems' own Universal MIDI Packet APIs; the editors of
+hosted plugins. Hosting Audio Units through AudioToolbox runs only in the
+macOS job of continuous integration, not yet against a vendor's unit.
 
 ## Quick start
 

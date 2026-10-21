@@ -444,7 +444,9 @@ jobs:
       # methods; here they run against the system's own CoreFoundation, and
       # the wrapper is built and linked against AudioToolbox, which no other
       # job does.
-      - run: cargo clippy -p manguebyte-au -p mangue-pluck -p mangue-duck --all-targets
+      # The AU host's macOS code (AudioToolbox, CoreFoundation's property
+      # lists) is linted here too: no other job compiles it.
+      - run: cargo clippy -p manguebyte-au -p manguebyte-host -p mangue-pluck -p mangue-duck --all-targets
       - run: cargo test -p manguebyte-au
       # An instrument and an effect with a sidechain, installed where hosts
       # look, so that Apple's own validator finds them by their codes.
@@ -473,6 +475,16 @@ jobs:
       # The same check through the command-line tool, which reads the codes
       # from the bundle and judges auval's last word.
       - run: cargo run -p cargo-mangue -- mangue validate -p mangue-duck --format au --release
+      # The host's side (issue #4). The in-process tests, through each unit's
+      # factory, against the system's CoreFoundation. Then the installed
+      # units, found with AudioComponentFindNext, made with
+      # AudioComponentInstanceNew and driven through AudioToolbox: they must
+      # sound as the plugins do with no host, bit for bit, and the scanner
+      # must list their bundles and report a unit that crashes or hangs.
+      # In release, as the units were installed; one test at a time, since
+      # one of them installs fake units where the registry looks.
+      - run: cargo test -p manguebyte-host --test au_pluck --test au_duck --test au_host_calls
+      - run: cargo test -p manguebyte-host --release --test au_system -- --ignored --test-threads=1
 
   window-probe:
     name: Window probe (Windows)

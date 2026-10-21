@@ -334,7 +334,19 @@ our own, and nothing claimed before its test exists.
 - ✅ Plugin scanning: the standard folders of each format, each CLAP and
   VST 3 file listed in a process of its own with a time limit, crashes and
   hangs reported, a cache keyed by path, time and size
-- ⬜ Hosting AU plugins, and hosted plugins' editors
+- 🚧 Hosting Audio Units, version 2 (issue #4): components found with
+  `AudioComponentFindNext` and made with `AudioComponentInstanceNew` on
+  macOS, or in process from a factory function anywhere; stream formats,
+  `MaximumFramesPerSlice`, channels as `SupportedNumChannels` allows, the
+  main input and sidechain through render callbacks, parameters with
+  `AudioUnitScheduleParameters` and MIDI with `MusicDeviceMIDIEvent` on
+  their frames, the host's transport callbacks, latency, tail, `ClassInfo`
+  state and bypass, through the one interface and the out-of-process
+  scanner. The example plugins sound the same, bit for bit, as with no
+  host, through their factories on every system; through AudioToolbox the
+  tests are written for the macOS CI job and have not run yet. No AUv3 as
+  such, editors or factory presets (TECH_DEBT 93)
+- ⬜ Hosted plugins' editors
 - ✅ Transport, tempo map and timeline primitives: a tempo map with steps,
   linear ramps and time signatures, exact conversions between frames,
   seconds, quarter notes and bars, beats and ticks, and a real-time

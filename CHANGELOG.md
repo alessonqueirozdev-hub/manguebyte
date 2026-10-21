@@ -261,6 +261,7 @@ break the API.
   them on when the transport knows them.
 - Limits: TECH_DEBT 86.
 
+<<<<<<< HEAD
 ### Plugins
 
 - **Layouts** (issue #15). `Plugin::LAYOUTS` lists every layout a plugin
@@ -314,6 +315,44 @@ break the API.
   1.0 by the default translation, through `OutputTranslator`, from memory
   set aside before audio runs.
 - Limits: TECH_DEBT 91.
+=======
+### Hosting
+
+- `manguebyte-host` hosts Audio Units, version 2 (issue #4), in a new
+  `au` module behind a feature of the same name, on by default.
+  `au::components` lists what the system's registry holds
+  (`AudioComponentFindNext`), `AuLibrary::system` and `AuLibrary::load`
+  (a `.component` bundle, its `Info.plist` in XML or binary form) make
+  instances through AudioToolbox (`AudioComponentInstanceNew`), on macOS;
+  `AuLibrary::from_factory` makes them in process from a component's
+  factory function, through its `AudioComponentPlugInInterface`, on every
+  system. `AuPlugin` sets each element's stream format (32-bit float, one
+  buffer a channel), `MaximumFramesPerSlice` (a unit that refuses keeps
+  its own, and longer blocks are rendered in slices), the main channels
+  as `SupportedNumChannels` allows (`set_channels`), and the host's
+  transport callbacks; lists parameters in their own unit and range,
+  with the unit's own text both ways; reads latency and tail; saves and
+  restores `ClassInfo` as the XML of its property list (`.aupreset`
+  form); and bypasses with `BypassEffect`. `AuProcessor` is a
+  `Processor<f32>` that feeds the main input and the sidechain through
+  render callbacks, schedules every parameter change on its frame with
+  `AudioUnitScheduleParameters` and every note and MIDI message with
+  `MusicDeviceMIDIEvent`, answers the transport callbacks for each slice
+  from the `Transport` it is given, and allocates nothing while it
+  renders. The example plugins hosted as Audio Units sound the same, bit
+  for bit, as with no host, however the blocks fall.
+- The one interface (`any`) has `Format::Au`, `Library::load` takes a
+  `.component` bundle, and `Library::from(AuLibrary)`, `as_au` and
+  `as_au_mut` reach the format's own types. The scanner finds
+  `.component` bundles in `~/Library/Audio/Plug-Ins/Components` and
+  `/Library/Audio/Plug-Ins/Components` and instantiates each unit in a
+  process of its own, so a unit that crashes or hangs is reported
+  (`manguebyte-scan --manguebyte-scan au <path>`).
+- The AU host shares the AU wrapper's declarations of Apple's C interface
+  (`manguebyte_au::sys`) rather than declaring them again; the MIDI 1.0
+  conversion of notes moved from the LV2 host to a module both use.
+- Limits: TECH_DEBT 93.
+>>>>>>> 634a4db (Document Audio Unit hosting and run its tests in the macOS AU job)
 
 ### Breaking
 
