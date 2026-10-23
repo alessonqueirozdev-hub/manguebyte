@@ -308,10 +308,13 @@ fn parameters_text_and_state() {
         assert_ne!(again.param_value(LEVEL), Some(-12.0));
         again.load_state(&state).unwrap();
         assert_eq!(again.param_value(LEVEL), Some(-12.0));
-        assert!(matches!(
-            again.load_state(b"nonsense"),
-            Err(AuError::BadState)
-        ));
+        // Bytes that are no unit's state are refused, and change nothing.
+        // Which error depends on the system: the CoreFoundation stand-in
+        // refuses them as a property list, while the real one reads the
+        // bare word as an old-style (OpenStep) string and the unit then
+        // refuses that as its class data.
+        assert!(again.load_state(b"nonsense").is_err());
+        assert_eq!(again.param_value(LEVEL), Some(-12.0));
         // Another unit's state is refused, and changes nothing.
         let other = another_units(&text);
         assert_ne!(other, text);
