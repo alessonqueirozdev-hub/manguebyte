@@ -261,7 +261,6 @@ break the API.
   them on when the transport knows them.
 - Limits: TECH_DEBT 86.
 
-<<<<<<< HEAD
 ### Plugins
 
 - **Layouts** (issue #15). `Plugin::LAYOUTS` lists every layout a plugin
@@ -315,7 +314,7 @@ break the API.
   1.0 by the default translation, through `OutputTranslator`, from memory
   set aside before audio runs.
 - Limits: TECH_DEBT 91.
-=======
+
 ### Hosting
 
 - `manguebyte-host` hosts Audio Units, version 2 (issue #4), in a new
@@ -352,7 +351,6 @@ break the API.
   (`manguebyte_au::sys`) rather than declaring them again; the MIDI 1.0
   conversion of notes moved from the LV2 host to a module both use.
 - Limits: TECH_DEBT 93.
->>>>>>> 634a4db (Document Audio Unit hosting and run its tests in the macOS AU job)
 
 ### Breaking
 
