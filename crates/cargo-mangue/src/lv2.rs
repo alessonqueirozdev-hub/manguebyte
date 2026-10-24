@@ -10,9 +10,10 @@
 //! This tool does not know the plugin's type, so it writes a small program
 //! that does: a package that depends on the plugin's crate (which needs the
 //! `rlib` type for that) and writes the files that function gives into a
-//! folder. The program is built and run with cargo, for this machine, in
-//! the plugin's own target folder and with the plugin build's profile and
-//! features, so what the two have in common is built once. It is a
+//! folder. The program is built and run with cargo, for this machine, with
+//! the plugin build's profile and features, in
+//! [`helper_target_dir`](crate::cargo::helper_target_dir), apart from the
+//! workspace's own builds. It is a
 //! workspace of its own, in `<target>/manguebyte/lv2/<package>/`, with a
 //! copy of the plugin workspace's `Cargo.lock`, so that it builds the same
 //! versions of every dependency.

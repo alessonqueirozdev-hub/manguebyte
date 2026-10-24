@@ -172,6 +172,13 @@ break the API.
 
 ### Fixed
 
+- `cargo mangue` built the programs that write an LV2 bundle's Turtle files
+  and an Audio Unit's `Info.plist` in the workspace's target directory,
+  where cargo could give their builds of the plugin and of the framework the
+  same file names as the workspace's own: after a bundle was made in
+  release, `cargo test --release` could fail with "multiple different
+  versions of crate `manguebyte_plugin`". They are now built in
+  `target/manguebyte/helpers`.
 - A block longer than a graph was prepared for was run in pieces with all
   of its events given to the first piece, at offsets past that piece's
   end, so they took effect at the end of the first piece instead of on

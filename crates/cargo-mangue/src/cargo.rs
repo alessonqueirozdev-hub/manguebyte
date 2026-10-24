@@ -318,6 +318,21 @@ pub enum Profile {
     Named(String),
 }
 
+/// Where the programs that write a bundle's metadata are built, for a
+/// workspace whose target directory is `target_directory`.
+///
+/// Not `target_directory` itself: a program's package is a workspace of
+/// its own, in which the plugin's crate and the framework's crates are path
+/// dependencies rather than members, and cargo builds them with other flags
+/// but can give them the same file names. Built in the same directory, they
+/// replaced the workspace's own builds, and a later `cargo test --release`
+/// in the workspace linked a plugin against one build of `manguebyte-plugin`
+/// and the test against another. The programs share this directory with
+/// each other, so that what they have in common is built once.
+pub fn helper_target_dir(target_directory: &Path) -> PathBuf {
+    target_directory.join("manguebyte").join("helpers")
+}
+
 /// The arguments of the `cargo build` that builds a plugin's library.
 ///
 /// `target` is a target triple, or `None` to build for cargo's default.
@@ -709,9 +724,8 @@ impl Cargo {
 
     /// Builds and runs the program that writes an LV2 bundle's Turtle files
     /// (see [`lv2`](crate::lv2)): `cargo run` on the package in
-    /// `helper_manifest`, sharing `target_directory` and the profile of
-    /// `request` with the plugin's own build, so that what both build is
-    /// built once. `args` go to the program.
+    /// `helper_manifest`, with the profile of `request`, in
+    /// [`helper_target_dir`]`(target_directory)`. `args` go to the program.
     ///
     /// Cargo's own progress and diagnostics go straight to the terminal.
     ///
@@ -763,7 +777,7 @@ impl Cargo {
             .arg("--manifest-path")
             .arg(helper_manifest)
             .arg("--target-dir")
-            .arg(target_directory);
+            .arg(helper_target_dir(target_directory));
         match &request.profile {
             Profile::Dev => {}
             Profile::Release => {

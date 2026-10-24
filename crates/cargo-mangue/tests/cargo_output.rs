@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use cargo_mangue::cargo::{
     BuildRequest, BuiltFor, LibraryScan, Metadata, Package, Profile, Settings, build_args,
-    built_for, find_library, parse_metadata, select_package,
+    built_for, find_library, helper_target_dir, parse_metadata, select_package,
 };
 use cargo_mangue::platform::Os;
 
@@ -595,5 +595,19 @@ fn a_damaged_build_report_is_an_error_or_is_passed_over_and_never_a_panic() {
     ] {
         let result = find_library(junk, &duck, Os::Windows);
         assert!(result.is_err(), "{:.40}", junk);
+    }
+}
+
+/// The programs that write a bundle's metadata are workspaces of their own,
+/// so they are built apart from the workspace's own builds, which they would
+/// otherwise replace, and still under its target directory.
+#[test]
+fn the_metadata_programs_are_built_apart_from_the_workspace() {
+    let target_directory = metadata().target_directory;
+    let helpers = helper_target_dir(&target_directory);
+    assert!(helpers.starts_with(&target_directory));
+    assert_ne!(helpers, target_directory);
+    for profile in ["debug", "release"] {
+        assert!(!helpers.starts_with(target_directory.join(profile)));
     }
 }
