@@ -387,7 +387,28 @@ fn install_fake(name: &str, subtype: &str, body: &str) -> Fake {
         ),
     )
     .unwrap();
+    // As `cargo mangue` signs the bundles it makes: the system may pass
+    // over a bundle that is not sealed.
+    let signed = Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&bundle)
+        .status()
+        .expect("codesign runs");
+    assert!(signed.success(), "the fake unit {name} is signed");
     Fake { bundle }
+}
+
+/// The registry as a process started now sees it, from `auval -a`.
+///
+/// Not [`components`] in this process: AudioToolbox keeps the list it read
+/// the first time it was asked, and hears of units added since only through
+/// a run loop, which a test has none of.
+fn listed_by_a_new_process() -> String {
+    let output = Command::new("auval")
+        .arg("-a")
+        .output()
+        .expect("auval runs");
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// This test leaves AudioToolbox's registry to notice two bundles written
@@ -406,20 +427,27 @@ fn the_scanner_reports_a_unit_that_crashes_or_hangs() {
     let _ = Command::new("killall")
         .args(["-9", "AudioComponentRegistrar"])
         .status();
-    let wanted = [
-        ComponentCodes::new(*b"aufx", *b"crsh", *b"Mbtx"),
-        ComponentCodes::new(*b"aufx", *b"hang", *b"Mbtx"),
-    ];
+    let wanted = ["aufx crsh Mbtx", "aufx hang Mbtx"];
     let started = Instant::now();
-    while !wanted
-        .iter()
-        .all(|codes| components().iter().any(|unit| unit.codes == *codes))
-    {
+    loop {
+        let listed = listed_by_a_new_process();
+        if wanted.iter().all(|codes| listed.contains(codes)) {
+            break;
+        }
         assert!(
             started.elapsed() < Duration::from_secs(60),
-            "the registry did not list the fake units"
+            "the registry did not list the fake units; it lists:
+{}",
+            listed
+                .lines()
+                .filter(|line| line.contains("Mbtx") || line.contains("Manguebyte"))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+"
+                )
         );
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_secs(1));
     }
     let scanner =
         Scanner::new(env!("CARGO_BIN_EXE_manguebyte-scan")).with_timeout(Duration::from_secs(8));
