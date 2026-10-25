@@ -398,17 +398,46 @@ fn install_fake(name: &str, subtype: &str, body: &str) -> Fake {
     Fake { bundle }
 }
 
-/// The registry as a process started now sees it, from `auval -a`.
+/// Set for the run of [`print_the_registry`] that
+/// [`listed_by_a_new_process`] starts.
+const PRINT_THE_REGISTRY: &str = "MANGUEBYTE_TEST_PRINT_THE_REGISTRY";
+
+/// The codes of the registry's units, one per line, as a process started
+/// now sees them: this test binary run again for [`print_the_registry`].
 ///
 /// Not [`components`] in this process: AudioToolbox keeps the list it read
 /// the first time it was asked, and hears of units added since only through
-/// a run loop, which a test has none of.
+/// a run loop, which a test has none of. Nor `auval -a`, which goes down
+/// with the unit that crashes before it has listed the rest.
 fn listed_by_a_new_process() -> String {
-    let output = Command::new("auval")
-        .arg("-a")
+    let output = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["print_the_registry", "--exact", "--ignored", "--nocapture"])
+        .env(PRINT_THE_REGISTRY, "1")
         .output()
-        .expect("auval runs");
-    String::from_utf8_lossy(&output.stdout).into_owned()
+        .expect("the test binary runs again");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("registry: "))
+        .map(|codes| {
+            format!(
+                "{codes}
+"
+            )
+        })
+        .collect()
+}
+
+/// Prints the registry's units for [`listed_by_a_new_process`], and
+/// nothing when run any other way.
+#[test]
+#[ignore = "run by another test, in a process of its own"]
+fn print_the_registry() {
+    if std::env::var_os(PRINT_THE_REGISTRY).is_none() {
+        return;
+    }
+    for unit in components() {
+        println!("registry: {}", unit.codes);
+    }
 }
 
 /// This test leaves AudioToolbox's registry to notice two bundles written
@@ -427,7 +456,7 @@ fn the_scanner_reports_a_unit_that_crashes_or_hangs() {
     let _ = Command::new("killall")
         .args(["-9", "AudioComponentRegistrar"])
         .status();
-    let wanted = ["aufx crsh Mbtx", "aufx hang Mbtx"];
+    let wanted = ["aufx:crsh:Mbtx", "aufx:hang:Mbtx"];
     let started = Instant::now();
     loop {
         let listed = listed_by_a_new_process();
@@ -440,7 +469,7 @@ fn the_scanner_reports_a_unit_that_crashes_or_hangs() {
 {}",
             listed
                 .lines()
-                .filter(|line| line.contains("Mbtx") || line.contains("Manguebyte"))
+                .filter(|line| line.contains("Mbtx") || line.contains("Ogvj"))
                 .collect::<Vec<_>>()
                 .join(
                     "
