@@ -577,10 +577,11 @@ mod tests {
     #[test]
     fn note_expression_comes_back_within_its_stated_absolute_error() {
         // Values close to zero of either sign, where an absolute error is
-        // many units in the last place.
+        // many units in the last place. The powers of two are made exactly,
+        // not with `powi`, which Miri lets be off in the last place.
         let near_zero: Vec<f64> = (1..=60)
             .flat_map(|power| {
-                let value = 1.1 * 2f64.powi(-power);
+                let value = 1.1 / (1u64 << power) as f64;
                 [value, -value]
             })
             .collect();
@@ -611,7 +612,8 @@ mod tests {
         // Volume from 2^-1020 up, vibrato and brightness: exactly.
         let positive: Vec<f64> = near_zero.iter().map(|value| value.abs()).collect();
         let mut extra = positive.clone();
-        extra.extend([2f64.powi(-1020), 4.0]);
+        // 2^-1020, the smallest value whose quarter is not subnormal.
+        extra.extend([4.0 * f64::MIN_POSITIVE, 4.0]);
         for value in across(0.0, 4.0, &extra) {
             assert_eq!(
                 round_trip_error(Expression::Volume, value),
