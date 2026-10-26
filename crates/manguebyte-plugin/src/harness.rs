@@ -1130,7 +1130,10 @@ mod tests {
         map
     }
 
+    // Eight seconds of song four times, once a frame at a time: hours
+    // under Miri, for arithmetic that has no unsafe code in it.
     #[test]
+    #[cfg_attr(miri, ignore = "too long for Miri, and safe code only")]
     fn a_plugin_follows_the_tempo_map_on_its_frames() {
         const RATE: f64 = 44_100.0;
         let map = song();
