@@ -611,11 +611,13 @@ impl TimedEvent {
                 value2,
             } => {
                 event.r#type = EventTypes_::kLegacyMIDICCOutEvent as u16;
+                // The SDK's `int8` is bound as `c_char`, which is unsigned on
+                // some targets (aarch64 Linux), so convert explicitly.
                 event.__field0.midiCCOut = vst::LegacyMIDICCOutEvent {
                     controlNumber: control,
-                    channel,
-                    value,
-                    value2,
+                    channel: channel as std::ffi::c_char,
+                    value: value as std::ffi::c_char,
+                    value2: value2 as std::ffi::c_char,
                 };
             }
         }
@@ -670,11 +672,12 @@ impl TimedEvent {
                 }
             } else if kind == EventTypes_::kLegacyMIDICCOutEvent as u32 {
                 let midi = event.__field0.midiCCOut;
+                // `int8` is `c_char` in the bindings: unsigned on some targets.
                 NoteEvent::MidiOut {
                     control: midi.controlNumber,
-                    channel: midi.channel,
-                    value: midi.value,
-                    value2: midi.value2,
+                    channel: midi.channel as i8,
+                    value: midi.value as i8,
+                    value2: midi.value2 as i8,
                 }
             } else {
                 return None;

@@ -232,9 +232,10 @@ fn controller(message: MidiMessage) -> Option<vst::Event> {
     let mut out = event(vst::Event_::EventTypes_::kLegacyMIDICCOutEvent as u32);
     out.__field0.midiCCOut = vst::LegacyMIDICCOutEvent {
         controlNumber: number as u8,
-        channel: (channel & 0x0F) as i8,
-        value: (value & 0x7F) as i8,
-        value2: (value2 & 0x7F) as i8,
+        // `int8` is bound as `c_char`, which is unsigned on some targets.
+        channel: (channel & 0x0F) as std::ffi::c_char,
+        value: (value & 0x7F) as std::ffi::c_char,
+        value2: (value2 & 0x7F) as std::ffi::c_char,
     };
     Some(out)
 }
