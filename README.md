@@ -86,7 +86,7 @@ in CI.
 **Where JUCE is ahead.** JUCE has more than twenty years of production use
 behind it and more breadth: a full GUI toolkit, with plugin editors on
 macOS and Linux as well as Windows; AUv3 and AAX; Audio Units proven in
-real hosts; hosting of AU plugins and of plugins' editors; SIMD wrappers
+real hosts; hosting of plugins' editors; SIMD wrappers
 and lookup tables among its DSP utilities; and applications that run on
 iOS and Android. Manguebyte's editors open on Windows only, its Audio Unit
 (version 2) passes `auval` in CI but has not been loaded in a DAW, its

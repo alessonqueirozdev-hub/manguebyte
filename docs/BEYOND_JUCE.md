@@ -683,8 +683,8 @@ it has, and Manguebyte does not:
   well as Windows (Manguebyte's editors open on Windows only so far);
 - the AUv3 and AAX plugin formats, and Audio Units checked in real hosts
   (Manguebyte's AUv2 wrapper has only its own tests and `auval` in CI);
-- hosting of AU plugins and the editors of hosted plugins (Manguebyte hosts
-  CLAP, VST 3 and LV2 plugins, without their editors, and scans for them);
+- the editors of hosted plugins (Manguebyte hosts CLAP, VST 3, LV2 and
+  Audio Unit plugins, without their editors, and scans for them);
 - SIMD wrappers and lookup tables among its DSP utilities;
 - iOS and Android (Manguebyte's audio and device crates are built for both
   in CI, but not run on a device);
