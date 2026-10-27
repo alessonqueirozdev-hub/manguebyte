@@ -339,6 +339,11 @@ impl Room {
         }
     }
 
+    /// How far every device has played, in seconds of the song.
+    fn now(&self) -> f64 {
+        self.clock.load(Ordering::Acquire) as f64 / 1e9
+    }
+
     fn finish(mut self) -> Played {
         self.stop.store(true, Ordering::Release);
         self.thread.take().unwrap().join().unwrap()
@@ -529,11 +534,11 @@ fn fade_frames(rate: u32) -> usize {
 /// Checks that, around a crossfade at `seconds` from `old` to `new`, the
 /// two devices together never dip: their gains add up in power to at least
 /// 0.9 of the song's level, and to no more than 1.3.
-fn assert_no_dip(old: &Take<'_>, new: &Take<'_>, seconds: f64, what: &str) {
+fn assert_no_dip(old: &Take<'_>, new: &Take<'_>, seconds: f64, until: f64, what: &str) {
     let mut lowest = f64::MAX;
     let mut highest = 0.0f64;
     let mut t = seconds - 0.02;
-    while t < seconds + 0.25 {
+    while t < until.min(seconds + 0.25) {
         let total = old.gain_at(t).hypot(new.gain_at(t));
         lowest = lowest.min(total);
         highest = highest.max(total);
@@ -592,14 +597,19 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
 
     let room = Room::start(&mock, &devices, seconds);
 
+    // Each change is asked for at a time of the song, but a busy machine
+    // can let this thread wake later than that: where in the song each one
+    // really happened is noted, and the checks below are made from there.
     // To another device at the same rate, with a smaller block.
     room.wait(&mut manager, 0.3);
+    let to_b = room.now();
     manager.apply(&setup(B)).unwrap();
     assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Crossfade);
 
     // To one at 44.1 kHz: the engine stays at 48 kHz, the edge resamples.
     room.wait(&mut manager, 0.6);
     assert_eq!(mock.stream_count(), 1, "the crossfade is over");
+    let to_c = room.now();
     manager.apply(&setup(C)).unwrap();
     assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Crossfade);
     assert_eq!(manager.format().unwrap().sample_rate, 44_100.0);
@@ -608,6 +618,7 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     // so it fades out, closes, opens again and fades in.
     room.wait(&mut manager, 0.9);
     assert_eq!(mock.stream_count(), 1);
+    let reset_asked = room.now();
     assert!(mock.request_restart(Direction::Output));
     let events = manager.poll_devices();
     assert!(
@@ -623,10 +634,12 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     manager.follow(&events[0]).unwrap().unwrap();
     let reset = manager.last_swap().unwrap();
     assert_eq!(reset.kind, SwapKind::Gap);
+    let reset_done = room.now();
 
     // To one with four channels and blocks of 64 frames.
     room.wait(&mut manager, 1.2);
     let reset = manager.last_swap().unwrap_or(reset);
+    let to_d = room.now();
     manager.apply(&setup(D).with_buffer_size(64)).unwrap();
     assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Crossfade);
     assert_eq!(manager.format().unwrap().output_channels, 4);
@@ -650,7 +663,6 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
 
     // (b) The engine's own stream is the song, bit for bit.
     let engine = rendered(copy);
-    assert!(engine.len() as f64 > (seconds - 0.1) * f64::from(RATE));
     assert!(
         engine == Song::reference(engine.len()),
         "the engine's output differs from the song rendered with no device"
@@ -677,21 +689,28 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     assert_eq!((a.offset, a.first), (0, 0), "a starts the song");
     assert!(a.faded <= fade_frames(48_000) + 1, "a has no fade-in");
     assert!(b.faded <= 2 * fade_frames(48_000) + 2);
-    // ... at full level outside the fades, ...
-    for (take, at) in [
-        (&takes[0], 0.15),
-        (&takes[1], 0.45),
-        (&takes[2], 0.75),
-        (&takes[2], 1.05),
-        (&takes[3], 1.4),
+    // ... at full level outside the fades, halfway between changes, ...
+    let end = seconds - 0.05;
+    for (take, from, to) in [
+        (&takes[0], 0.0, to_b),
+        (&takes[1], to_b, to_c),
+        (&takes[2], to_c, reset_asked),
+        (&takes[2], reset_done, to_d),
+        (&takes[3], to_d, end),
     ] {
+        assert!(
+            to - from > 0.1,
+            "only {:.3} s between changes at {from:.3} and {to:.3} s",
+            to - from
+        );
+        let at = (from + to) / 2.0;
         let gain = take.gain_at(at);
-        assert!((gain - 1.0).abs() < 0.01, "a gain of {gain} at {at} s");
+        assert!((gain - 1.0).abs() < 0.01, "a gain of {gain} at {at:.3} s");
     }
     // ... with no dip while two devices play at once, ...
-    assert_no_dip(&takes[0], &takes[1], 0.3, "a to b");
-    assert_no_dip(&takes[1], &takes[2], 0.6, "b to c");
-    assert_no_dip(&takes[2], &takes[3], 1.2, "c to d");
+    assert_no_dip(&takes[0], &takes[1], to_b, to_c, "a to b");
+    assert_no_dip(&takes[1], &takes[2], to_c, reset_asked, "b to c");
+    assert_no_dip(&takes[2], &takes[3], to_d, end, "c to d");
     // ... and a short gap where the device was opened again.
     let (gap, at) = takes[2].longest_gap();
     let gap_seconds = gap as f64 / 44_100.0;
@@ -705,10 +724,17 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
         d.first as isize + d.offset
     );
     assert!(
-        (0.9..1.0).contains(&at_seconds),
-        "the gap is at {at_seconds} s"
+        (reset_asked - 0.01..reset_done + 0.1).contains(&at_seconds),
+        "the gap is at {at_seconds} s, the reset was asked for at {reset_asked:.3} s"
     );
     assert!(gap_seconds < 0.1, "a gap of {gap_seconds} s");
+    // The engine had played the song up to where the room stopped, less
+    // the short gap of the reset, which it may wait through.
+    let engine_seconds = engine.len() as f64 / f64::from(RATE);
+    assert!(
+        engine_seconds > seconds - 0.1 - gap_seconds,
+        "the engine rendered {engine_seconds} s, with a gap of {gap_seconds} s; changes at          {to_b:.3}, {to_c:.3}, {reset_asked:.3}-{reset_done:.3} and {to_d:.3} s"
+    );
     assert!(
         reset
             .silence
