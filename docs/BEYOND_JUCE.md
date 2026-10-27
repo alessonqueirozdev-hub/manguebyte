@@ -220,13 +220,16 @@ in `abi.rs` does it through CLAP.
 `abi.rs` plays one phrase as CLAP notes, as MPE and as MIDI 2.0 packets
 and requires the same output from all three, with no heap use.
 
-**Limit.** Per-note *automation* from a CLAP host is not accepted yet.
+**Limit.** Per-note *automation* from a CLAP host arrives for a note id
+or a key, not for a whole channel, and reaches a voice only if the voice
+overrides `Voice::set_note_param` ([TECH_DEBT](TECH_DEBT.md) item 91).
 A plugin sends notes and per-note expression out, as MIDI 2.0 packets
 where the host takes them, through CLAP, VST 3 and the standalone runner
-(`Plugin::process_with_output`), but a `Processor` on its own cannot send
-events, LV2 and AU send none, and a MIDI output port gets MIDI 1.0 bytes:
-the systems' own packet APIs are not used yet ([TECH_DEBT](TECH_DEBT.md)
-item 82). Per-note controllers with no `Expression` to become
+(`Plugin::process_with_output`), and as MIDI 1.0 through AU and LV2, but
+a `Processor` on its own cannot send events. A MIDI output port opened
+for MIDI 2.0 gets the packets unchanged through CoreMIDI on macOS and iOS
+and the ALSA sequencer on Linux; on Windows, and on every other port, it
+gets MIDI 1.0 bytes ([TECH_DEBT](TECH_DEBT.md) items 82 and 90). Per-note controllers with no `Expression` to become
 (modulation, breath, the assignable ones) are dropped, and channel-wide
 MIDI 2.0 messages reach the processor at MIDI 1.0 resolution
 ([TECH_DEBT](TECH_DEBT.md) item 76).

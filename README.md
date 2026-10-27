@@ -144,7 +144,8 @@ Mangue Duck's are still to be tried, and windows on macOS and Linux come
 after. `cargo mangue` writes `.lv2` bundles and CI loads the examples'
 with lilv, but no LV2 host but the framework's own has run one and
 `lv2lint`, which the Ubuntu archive does not carry, has not checked one;
-LV2 plugins have no editor and send no MIDI. The Audio Unit wrapper is
+LV2 plugins have no editor, and the MIDI 1.0 they send on the notify
+port has been read by no host but the framework's own. The Audio Unit wrapper is
 tested through its C interface on every system, and both example plugins
 pass Apple's `auval` in a macOS CI job, but no DAW has loaded one yet and
 it has no editor. The Aratu Bridge has been tried by hand once, as a CLAP
@@ -152,9 +153,8 @@ in REAPER on Windows with a Chromium page on `http://127.0.0.1`; other
 DAWs and browsers are not tried. The browser engine and the sampler are
 tested natively and in Node.js, not yet in a browser's audio thread under
 load. Also missing: the AUv3 and AAX formats; encoding Opus speech (SILK
-and hybrid frames; CELT is written); MIDI output
-through the systems' own Universal MIDI Packet APIs; the editors of
-hosted plugins. Hosting Audio Units through AudioToolbox runs only in the
+and hybrid frames; CELT is written); Universal MIDI Packet output on
+Windows; the editors of hosted plugins. Hosting Audio Units through AudioToolbox runs only in the
 macOS job of continuous integration, not yet against a vendor's unit.
 
 ## Quick start
