@@ -13,22 +13,37 @@
 //! [`ClapPlugin::pump`](super::ClapPlugin::pump) acts on it later, on the
 //! main thread, outside any call into the plugin. That keeps the plugin
 //! from re-entering the host in the middle of something else.
+//!
+//! An editor's timers and file descriptors are the one thing the callbacks
+//! keep rather than flag, in [`EditorLoop`]. CLAP has them registered on
+//! the main thread only, so the mutex around them is never contended: it
+//! is there because [`Shared`] has to be `Sync`, and it is held for the
+//! length of one registration or one look, never across a call into the
+//! plugin. A plugin may register or unregister from inside any call the
+//! host makes to it, `on_timer` included, and finds the lock free.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 use clap_sys::ext::audio_ports::*;
+use clap_sys::ext::gui::{CLAP_EXT_GUI, clap_host_gui};
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_host_latency};
 use clap_sys::ext::log::{CLAP_EXT_LOG, clap_host_log, clap_log_severity};
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
+use clap_sys::ext::posix_fd_support::{
+    CLAP_EXT_POSIX_FD_SUPPORT, CLAP_POSIX_FD_ERROR, CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE,
+    clap_host_posix_fd_support, clap_posix_fd_flags,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state};
 use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_host_tail};
 use clap_sys::ext::thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check};
+use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support};
 use clap_sys::host::clap_host;
-use clap_sys::id::clap_id;
+use clap_sys::id::{CLAP_INVALID_ID, clap_id};
 use clap_sys::plugin::clap_plugin;
 use clap_sys::version::CLAP_VERSION;
 use manguebyte_core::spsc::Consumer;
@@ -37,6 +52,7 @@ use super::library::ClapLibrary;
 use super::mailbox::{MESSAGE_BYTES, Mailbox};
 use super::text::{copy_bounded, text_is};
 use super::{HostInfo, ProcessFailure, ToAudio};
+use crate::editor::{EditorSize, FdInterest, FdWatches, Timers};
 
 /// Things a plugin has asked for and the main thread has not handled yet,
 /// as bits of [`Shared::requests`]. Requests to read a list again are kept
@@ -50,6 +66,17 @@ pub(crate) mod request {
     pub(crate) const LATENCY: u32 = 1 << 5;
     pub(crate) const TAIL: u32 = 1 << 6;
     pub(crate) const PARAM_CLEAR: u32 = 1 << 7;
+}
+
+/// What a plugin's editor has asked the application for and the main
+/// thread has not handled yet, as bits of [`Shared::editor_requests`]. A
+/// later request of the same kind replaces an earlier one: the size asked
+/// for last, shown or hidden as asked last.
+pub(crate) mod editor_request {
+    pub(crate) const RESIZE: u32 = 1 << 0;
+    pub(crate) const SHOW: u32 = 1 << 1;
+    pub(crate) const HIDE: u32 = 1 << 2;
+    pub(crate) const CLOSED: u32 = 1 << 3;
 }
 
 /// Most requests to clear a parameter's automation that are kept between
@@ -139,6 +166,16 @@ pub(crate) struct Shared {
     main_gone: AtomicBool,
     /// Set when the plugin has been destroyed, or is about to be.
     closed: AtomicBool,
+    /// The timers and descriptors the plugin registered. Only the main
+    /// thread touches this, and never while it calls into the plugin.
+    editor_loop: Mutex<EditorLoop>,
+    /// Set from just before the plugin's `gui.create` until its editor is
+    /// destroyed: the time in which its requests mean something.
+    editor_created: AtomicBool,
+    /// [`editor_request`] bits.
+    editor_requests: AtomicU32,
+    /// The size of the latest resize request, the width in the high half.
+    requested_size: AtomicU64,
     /// Keeps the plugin's code loaded for as long as this value exists,
     /// which is at least as long as the plugin does.
     _library: ClapLibrary,
@@ -203,6 +240,10 @@ impl Shared {
             leftover: Mutex::new(None),
             main_gone: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            editor_loop: Mutex::new(EditorLoop::default()),
+            editor_created: AtomicBool::new(false),
+            editor_requests: AtomicU32::new(0),
+            requested_size: AtomicU64::new(0),
             _library: library,
         })
     }
@@ -328,6 +369,85 @@ impl Shared {
         self.latency.store(frames, Ordering::Relaxed);
     }
 
+    /// The editor's timers and descriptors, locked. Main thread only, and
+    /// never to be held across a call into the plugin.
+    pub(crate) fn editor_loop(&self) -> MutexGuard<'_, EditorLoop> {
+        self.editor_loop
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Whether the plugin's editor exists, as far as its requests go.
+    fn editor_created(&self) -> bool {
+        self.editor_created.load(Ordering::Acquire)
+    }
+
+    /// Records that the editor is about to be created, or is gone. Either
+    /// way, requests left from an earlier editor are forgotten.
+    pub(crate) fn set_editor_created(&self, created: bool) {
+        self.editor_created.store(created, Ordering::Release);
+        self.editor_requests.store(0, Ordering::Release);
+    }
+
+    /// The editor's requests since the last call, as [`editor_request`]
+    /// bits, and the size of the latest resize request. They are then
+    /// forgotten.
+    pub(crate) fn take_editor_requests(&self) -> (u32, EditorSize) {
+        let bits = self.editor_requests.swap(0, Ordering::Acquire);
+        let size = self.requested_size.load(Ordering::Acquire);
+        // The two halves of one `u64`.
+        let size = EditorSize::new((size >> 32) as u32, size as u32);
+        (bits, size)
+    }
+
+    /// The editor asks to be `size`. True if the request is taken, which
+    /// it is whenever the editor exists and the size is not empty: the
+    /// application answers it later, from `pump`.
+    fn request_editor_resize(&self, size: EditorSize) -> bool {
+        if !self.editor_created() || size.width == 0 || size.height == 0 {
+            return false;
+        }
+        let packed = (u64::from(size.width) << 32) | u64::from(size.height);
+        // The size is in place before the bit that says it is there.
+        self.requested_size.store(packed, Ordering::Release);
+        self.editor_requests
+            .fetch_or(editor_request::RESIZE, Ordering::Release);
+        true
+    }
+
+    /// The editor asks to be shown or hidden; the later request replaces
+    /// the earlier. True if the editor exists.
+    fn request_editor_visible(&self, visible: bool) -> bool {
+        if !self.editor_created() {
+            return false;
+        }
+        let (wanted, replaced) = if visible {
+            (editor_request::SHOW, editor_request::HIDE)
+        } else {
+            (editor_request::HIDE, editor_request::SHOW)
+        };
+        // One step, so that of two requests from two threads at once one
+        // is the last, and not both nor neither.
+        let mut bits = self.editor_requests.load(Ordering::Acquire);
+        while let Err(now) = self.editor_requests.compare_exchange_weak(
+            bits,
+            bits & !replaced | wanted,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            bits = now;
+        }
+        true
+    }
+
+    /// The editor closed by itself.
+    fn editor_closed(&self) {
+        if self.editor_created() {
+            self.editor_requests
+                .fetch_or(editor_request::CLOSED, Ordering::Release);
+        }
+    }
+
     /// Deactivates the plugin if it is active, and destroys it. Does
     /// nothing the second time.
     ///
@@ -405,6 +525,98 @@ impl Shared {
     }
 }
 
+/// The timers and descriptors a plugin registered through
+/// `timer-support` and `posix-fd-support`, and which of them go with its
+/// editor.
+///
+/// A plugin may register a timer at any time, not only while its editor is
+/// open. The ones it registers while the editor exists are noted, so that
+/// closing the editor takes away whatever it left behind without stopping
+/// the others.
+#[derive(Debug, Default)]
+pub(crate) struct EditorLoop {
+    pub(crate) timers: Timers,
+    /// Every registered timer's id, and whether the editor existed when it
+    /// was registered. No longer than `timers`, which is bounded.
+    timer_ids: Vec<(u32, bool)>,
+    pub(crate) fds: FdWatches,
+    /// The descriptors watched since the editor was created.
+    editor_fds: Vec<i32>,
+}
+
+impl EditorLoop {
+    fn register_timer(&mut self, period: Duration, editor: bool) -> Option<u32> {
+        let id = self.timers.add(period, Instant::now())?;
+        self.timer_ids.push((id, editor));
+        Some(id)
+    }
+
+    fn unregister_timer(&mut self, id: u32) -> bool {
+        self.timer_ids.retain(|&(known, _)| known != id);
+        self.timers.remove(id)
+    }
+
+    /// Whether the timer `id` is registered.
+    pub(crate) fn has_timer(&self, id: u32) -> bool {
+        self.timer_ids.iter().any(|&(known, _)| known == id)
+    }
+
+    fn register_fd(&mut self, fd: i32, interest: FdInterest, editor: bool) -> bool {
+        let added = self.fds.add(fd, interest);
+        if added && editor {
+            self.editor_fds.push(fd);
+        }
+        added
+    }
+
+    fn unregister_fd(&mut self, fd: i32) -> bool {
+        self.editor_fds.retain(|&known| known != fd);
+        self.fds.remove(fd)
+    }
+
+    /// Forgets the timers and descriptors registered while the editor
+    /// existed, as it goes.
+    pub(crate) fn forget_editor(&mut self) {
+        let timers = &mut self.timers;
+        self.timer_ids.retain(|&(id, editor)| {
+            if editor {
+                timers.remove(id);
+            }
+            !editor
+        });
+        for fd in std::mem::take(&mut self.editor_fds) {
+            self.fds.remove(fd);
+        }
+    }
+
+    /// Forgets every timer and descriptor, as the main half goes: nothing
+    /// could fire them any more.
+    pub(crate) fn clear(&mut self) {
+        self.timers.clear();
+        self.timer_ids.clear();
+        self.fds.clear();
+        self.editor_fds.clear();
+    }
+}
+
+/// What a plugin waits for on a descriptor, from CLAP's flags. Flags CLAP
+/// does not define are ignored.
+pub(crate) fn fd_interest(flags: clap_posix_fd_flags) -> FdInterest {
+    FdInterest {
+        read: flags & CLAP_POSIX_FD_READ != 0,
+        write: flags & CLAP_POSIX_FD_WRITE != 0,
+        error: flags & CLAP_POSIX_FD_ERROR != 0,
+    }
+}
+
+/// CLAP's flags for what happened on a descriptor.
+pub(crate) fn fd_flags(interest: FdInterest) -> clap_posix_fd_flags {
+    let flag = |set: bool, flag: clap_posix_fd_flags| if set { flag } else { 0 };
+    flag(interest.read, CLAP_POSIX_FD_READ)
+        | flag(interest.write, CLAP_POSIX_FD_WRITE)
+        | flag(interest.error, CLAP_POSIX_FD_ERROR)
+}
+
 /// The `Shared` behind a host pointer a plugin passed back.
 ///
 /// # Safety
@@ -428,16 +640,51 @@ unsafe fn shared<'a>(host: *const clap_host) -> Option<&'a Shared> {
 ///
 /// As for [`shared`].
 unsafe fn on_main_thread(host: *const clap_host, work: impl FnOnce(&Shared)) {
-    guard((), || {
+    // SAFETY: passed on from the caller.
+    unsafe { main_thread_answer(host, (), work) }
+}
+
+/// Answers a callback that CLAP allows on the main thread only with what
+/// `work` returns. From any other thread the call is counted and answered
+/// with `refused`, as is a call for a host that is not there.
+///
+/// # Safety
+///
+/// As for [`shared`].
+unsafe fn main_thread_answer<R: Copy>(
+    host: *const clap_host,
+    refused: R,
+    work: impl FnOnce(&Shared) -> R,
+) -> R {
+    guard(refused, || {
         // SAFETY: passed on from the caller.
-        if let Some(shared) = unsafe { shared(host) } {
-            if shared.is_main() {
-                work(shared);
-            } else {
-                shared.wrong_thread();
-            }
+        let Some(shared) = (unsafe { shared(host) }) else {
+            return refused;
+        };
+        if shared.is_main() {
+            work(shared)
+        } else {
+            shared.wrong_thread();
+            refused
         }
-    });
+    })
+}
+
+/// Answers a callback that CLAP allows on any thread with what `work`
+/// returns, or with `refused` for a host that is not there.
+///
+/// # Safety
+///
+/// As for [`shared`].
+unsafe fn any_thread_answer<R: Copy>(
+    host: *const clap_host,
+    refused: R,
+    work: impl FnOnce(&Shared) -> R,
+) -> R {
+    guard(refused, || {
+        // SAFETY: passed on from the caller.
+        unsafe { shared(host) }.map_or(refused, work)
+    })
 }
 
 /// Records a request that may come from any thread.
@@ -480,6 +727,15 @@ unsafe extern "C" fn get_extension(host: *const clap_host, id: *const c_char) ->
             ptr::from_ref(&AUDIO_PORTS).cast()
         } else if is(CLAP_EXT_NOTE_PORTS) {
             ptr::from_ref(&NOTE_PORTS).cast()
+        } else if is(CLAP_EXT_GUI) {
+            ptr::from_ref(&GUI).cast()
+        } else if is(CLAP_EXT_TIMER_SUPPORT) {
+            ptr::from_ref(&TIMER_SUPPORT).cast()
+        } else if is(CLAP_EXT_POSIX_FD_SUPPORT) {
+            // Offered on every system: a descriptor is only a number, and
+            // where the application has no use for one, no plugin there
+            // registers any.
+            ptr::from_ref(&POSIX_FD_SUPPORT).cast()
         } else {
             ptr::null()
         }
@@ -651,6 +907,134 @@ unsafe extern "C" fn note_ports_rescan(host: *const clap_host, flags: u32) {
             shared.note_ports_rescan.fetch_or(flags, Ordering::Relaxed);
         });
     }
+}
+
+// --- Editors -------------------------------------------------------------
+
+static GUI: clap_host_gui = clap_host_gui {
+    resize_hints_changed: Some(gui_resize_hints_changed),
+    request_resize: Some(gui_request_resize),
+    request_show: Some(gui_request_show),
+    request_hide: Some(gui_request_hide),
+    closed: Some(gui_closed),
+};
+
+// CLAP lets a plugin make these requests from any thread. They are recorded
+// in atomics, which any thread may touch without waiting, and answered by
+// `pump` on the main thread. None of them calls the plugin back, so a
+// plugin may make them from inside any call the host makes to it.
+
+unsafe extern "C" fn gui_resize_hints_changed(_: *const clap_host) {
+    // Nothing is kept of the hints: whether the editor can be resized, and
+    // to what, is asked anew each time the application resizes it.
+}
+
+unsafe extern "C" fn gui_request_resize(host: *const clap_host, width: u32, height: u32) -> bool {
+    // The answer is "taken": the application resizes its window when it
+    // reads the request, and then tells the plugin with `set_size`. That is
+    // never called from in here, where the plugin is still in the middle of
+    // asking.
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe {
+        any_thread_answer(host, false, |shared| {
+            shared.request_editor_resize(EditorSize::new(width, height))
+        })
+    }
+}
+
+unsafe extern "C" fn gui_request_show(host: *const clap_host) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe { any_thread_answer(host, false, |shared| shared.request_editor_visible(true)) }
+}
+
+unsafe extern "C" fn gui_request_hide(host: *const clap_host) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe { any_thread_answer(host, false, |shared| shared.request_editor_visible(false)) }
+}
+
+unsafe extern "C" fn gui_closed(host: *const clap_host, _was_destroyed: bool) {
+    // Whether the plugin says its editor was destroyed or only that the
+    // connection to it was lost, `pump` destroys the editor: CLAP asks for
+    // that as the acknowledgement in the first case, and in the second the
+    // application is about to let go of the window the editor was in.
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe { any_thread_answer(host, (), Shared::editor_closed) }
+}
+
+static TIMER_SUPPORT: clap_host_timer_support = clap_host_timer_support {
+    register_timer: Some(timer_register),
+    unregister_timer: Some(timer_unregister),
+};
+
+unsafe extern "C" fn timer_register(
+    host: *const clap_host,
+    period_ms: u32,
+    timer_id: *mut clap_id,
+) -> bool {
+    if timer_id.is_null() {
+        return false;
+    }
+    // SAFETY: the plugin passes the host it was created with.
+    let id = unsafe {
+        main_thread_answer(host, None, |shared| {
+            let editor = shared.editor_created();
+            shared
+                .editor_loop()
+                .register_timer(Duration::from_millis(period_ms.into()), editor)
+        })
+    };
+    // SAFETY: the plugin passes a place for the id, checked non-null above.
+    unsafe { timer_id.write(id.unwrap_or(CLAP_INVALID_ID)) };
+    id.is_some()
+}
+
+unsafe extern "C" fn timer_unregister(host: *const clap_host, timer_id: clap_id) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe {
+        main_thread_answer(host, false, |shared| {
+            shared.editor_loop().unregister_timer(timer_id)
+        })
+    }
+}
+
+static POSIX_FD_SUPPORT: clap_host_posix_fd_support = clap_host_posix_fd_support {
+    register_fd: Some(fd_register),
+    modify_fd: Some(fd_modify),
+    unregister_fd: Some(fd_unregister),
+};
+
+unsafe extern "C" fn fd_register(
+    host: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe {
+        main_thread_answer(host, false, |shared| {
+            let editor = shared.editor_created();
+            shared
+                .editor_loop()
+                .register_fd(fd, fd_interest(flags), editor)
+        })
+    }
+}
+
+unsafe extern "C" fn fd_modify(
+    host: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe {
+        main_thread_answer(host, false, |shared| {
+            shared.editor_loop().fds.modify(fd, fd_interest(flags))
+        })
+    }
+}
+
+unsafe extern "C" fn fd_unregister(host: *const clap_host, fd: i32) -> bool {
+    // SAFETY: the plugin passes the host it was created with.
+    unsafe { main_thread_answer(host, false, |shared| shared.editor_loop().unregister_fd(fd)) }
 }
 
 #[cfg(test)]

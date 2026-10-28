@@ -6,7 +6,7 @@
 //! | Type | What it is | Threads |
 //! |---|---|---|
 //! | [`ClapLibrary`] | A loaded plugin file and the list of plugins in it | Any; can be cloned and sent |
-//! | [`ClapPlugin`] | One plugin, as the main thread deals with it: ports, parameters, state, activation | The thread that created it, and no other |
+//! | [`ClapPlugin`] | One plugin, as the main thread deals with it: ports, parameters, state, activation, its editor and the editor's timers | The thread that created it, and no other |
 //! | [`ClapProcessor`] | The same plugin, as the audio thread deals with it: a `Processor<f32>` | One thread at a time; can be sent |
 //!
 //! CLAP says which thread may call each of a plugin's functions. Here those
@@ -473,6 +473,82 @@
 //! # Ok::<(), manguebyte_host::clap::ClapError>(())
 //! ```
 //!
+//! # Editors
+//!
+//! A plugin's editor goes inside a window the application owns, named by a
+//! [`ParentWindow`](crate::editor::ParentWindow). Everything about it is
+//! done on the main thread, through [`ClapPlugin`]:
+//! [`open_editor`](ClapPlugin::open_editor) and
+//! [`close_editor`](ClapPlugin::close_editor),
+//! [`set_editor_size`](ClapPlugin::set_editor_size) when the window
+//! changes size, [`set_editor_scale`](ClapPlugin::set_editor_scale) when
+//! it moves to a screen of another density.
+//!
+//! This crate has no window and no event loop, so what the editor asks for
+//! comes out of [`ClapPlugin::pump`] as [`HostEvent::Editor`] requests for
+//! the application to carry out: a new size for the window, to be shown or
+//! hidden, and the news that the editor closed by itself. The plugin's
+//! timers are kept here and fire inside `pump`;
+//! [`next_editor_timer`](ClapPlugin::next_editor_timer) says when `pump` is
+//! next due. File descriptors, which an editor on Linux may want watched,
+//! are listed by [`editor_fds`](ClapPlugin::editor_fds) for the
+//! application's loop to watch, and passed back with
+//! [`editor_fd_ready`](ClapPlugin::editor_fd_ready).
+//!
+//! The plugin may call the host back from inside any call to its editor,
+//! and nothing it asks for is acted on there and then: a resize request
+//! made from inside `set_size` waits for the next `pump`, like every other.
+//!
+//! This example is compiled and not run, since it needs a plugin on disk
+//! and a window.
+//!
+//! ```no_run
+//! use manguebyte_host::clap::{ClapError, ClapLibrary, ClapPlugin, HostEvent};
+//! use manguebyte_host::editor::{EditorRequest, EditorSize, ParentWindow};
+//!
+//! /// What the application does with its own window: here, nothing.
+//! fn resize_window(_size: EditorSize) {}
+//!
+//! /// Called on every frame of the application's loop, and by
+//! /// `plugin.next_editor_timer()` at the latest.
+//! fn on_frame(plugin: &mut ClapPlugin) -> Result<(), ClapError> {
+//!     for event in plugin.pump() {
+//!         match event {
+//!             HostEvent::Editor(EditorRequest::Resize(wanted)) => {
+//!                 // The window first, then the editor, which says what it
+//!                 // took.
+//!                 resize_window(wanted);
+//!                 let taken = plugin.set_editor_size(wanted)?;
+//!                 if taken != wanted {
+//!                     resize_window(taken);
+//!                 }
+//!             }
+//!             HostEvent::Editor(EditorRequest::Closed) => {
+//!                 // The editor is gone already; the window can go too.
+//!             }
+//!             _ => {}
+//!         }
+//!     }
+//!     Ok(())
+//! }
+//!
+//! # fn main() -> Result<(), ClapError> {
+//! // SAFETY: the file is a CLAP plugin that this program is willing to run.
+//! let library = unsafe { ClapLibrary::load("Mangue Pluck.clap") }?;
+//! let mut plugin = library.create("org.manguebyte.pluck")?;
+//! // The application's window, made with its own toolkit.
+//! let parent = ParentWindow::win32(0x0004_05A2).expect("a window");
+//! if plugin.has_editor() {
+//!     let size = plugin.open_editor(parent, Some(1.5))?;
+//!     resize_window(size);
+//! }
+//! on_frame(&mut plugin)?;
+//! // Before the window goes. Dropping the plugin would close it too.
+//! plugin.close_editor();
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # What is covered
 //!
 //! | CLAP feature | Behaviour |
@@ -486,8 +562,10 @@
 //! | Parameters | Listing, values, text both ways, flush; every value held to the declared range, in both directions |
 //! | State | Saved and restored through streams, with a size limit |
 //! | Latency, tail | Read and reported |
+//! | Editor (`gui`) | Embedded in a Win32, Cocoa or X11 window; opened in CLAP's order, sized, scaled (not in Cocoa) and closed. Floating windows are not asked for |
+//! | Timers, descriptors | `timer-support` timers fire in [`ClapPlugin::pump`]; `posix-fd-support` descriptors are listed for the application to watch. At most 64 of each |
 //! | Host callbacks | `request_restart`, `request_process` and `request_callback`, acted on by [`ClapPlugin::pump`] |
-//! | Host extensions | `thread-check`, `log`, `params`, `state`, `latency`, `tail`, `audio-ports`, `note-ports` |
+//! | Host extensions | `thread-check`, `log`, `params`, `state`, `latency`, `tail`, `audio-ports`, `note-ports`, `gui`, `timer-support`, `posix-fd-support` |
 //!
 //! # A plugin is not trusted
 //!
@@ -519,8 +597,8 @@
 //!
 //! # Limits
 //!
-//! No plugin window, no 64-bit audio, no presets, no system exclusive or
-//! MIDI 2.0 events. One note port and three audio ports carry signal; a
+//! No floating editor windows, no 64-bit audio, no presets, no system
+//! exclusive or MIDI 2.0 events. One note port and three audio ports carry signal; a
 //! plugin with more is still hosted, with silence on the rest. Events in
 //! other vendors' event spaces are ignored.
 
@@ -537,6 +615,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use manguebyte_core::ParamId;
+
+use crate::editor::WindowApi;
 
 pub use clap_sys;
 pub use events::{OutputEvent, OutputKind};
@@ -750,6 +830,18 @@ pub enum ClapError {
     StateTooLarge,
     /// The plugin refused the state it was given.
     StateLoadFailed,
+    /// The plugin has no editor this host can show: it offers no `gui`
+    /// extension, or one without a function every editor needs.
+    NoEditor,
+    /// The plugin's editor cannot be put inside a window of this kind.
+    EditorApiUnsupported(WindowApi),
+    /// The editor is already open. Close it first.
+    EditorAlreadyOpen,
+    /// The editor is not open.
+    EditorNotOpen,
+    /// The plugin's editor refused a call. The text names the call. If the
+    /// call was part of opening the editor, it has been destroyed again.
+    EditorRefused(&'static str),
 }
 
 impl fmt::Display for ClapError {
@@ -800,6 +892,13 @@ impl fmt::Display for ClapError {
                 f.write_str("the plugin's state is larger than this host accepts")
             }
             Self::StateLoadFailed => f.write_str("the plugin refused the state"),
+            Self::NoEditor => f.write_str("the plugin has no editor this host can show"),
+            Self::EditorApiUnsupported(api) => {
+                write!(f, "the plugin's editor cannot go inside a {api:?} window")
+            }
+            Self::EditorAlreadyOpen => f.write_str("the plugin's editor is already open"),
+            Self::EditorNotOpen => f.write_str("the plugin's editor is not open"),
+            Self::EditorRefused(call) => write!(f, "the plugin's editor refused {call}"),
         }
     }
 }

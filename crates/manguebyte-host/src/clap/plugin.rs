@@ -1,5 +1,7 @@
 //! The main-thread half of a hosted plugin.
 
+mod editor;
+
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
@@ -7,12 +9,15 @@ use std::sync::atomic::Ordering;
 
 use clap_sys::events::{clap_event_header, clap_output_events};
 use clap_sys::ext::audio_ports::*;
+use clap_sys::ext::gui::{CLAP_EXT_GUI, clap_plugin_gui};
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_latency};
 use clap_sys::ext::log::*;
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
+use clap_sys::ext::posix_fd_support::{CLAP_EXT_POSIX_FD_SUPPORT, clap_plugin_posix_fd_support};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
+use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_plugin_timer_support};
 use clap_sys::id::CLAP_INVALID_ID;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{clap_process, clap_process_status};
@@ -33,6 +38,7 @@ use super::{
     MAX_LATENCY_FRAMES, MAX_PARAMS, MAX_PORTS, MAX_SCRATCH_SAMPLES, MAX_STATE_BYTES,
     ProcessFailure, QUEUE_CAPACITY, ToAudio,
 };
+use crate::editor::EditorRequest;
 
 /// Room given to a plugin for the text of one parameter value.
 const VALUE_TEXT_BYTES: usize = 256;
@@ -309,6 +315,11 @@ pub enum HostEvent {
         /// The text, cut to a fixed length.
         message: String,
     },
+    /// The plugin's editor asks the application for something its window
+    /// has to do: see [`EditorRequest`]. Only reported while the editor is
+    /// open. A [`EditorRequest::Closed`] comes after the editor has been
+    /// destroyed, so nothing is left to close.
+    Editor(EditorRequest),
 }
 
 impl From<FromAudio> for HostEvent {
@@ -333,6 +344,10 @@ struct Extensions {
     note_ports: Option<clap_plugin_note_ports>,
     latency: Option<clap_plugin_latency>,
     tail: Option<clap_plugin_tail>,
+    /// Only kept if it has every function an embedded editor needs.
+    gui: Option<clap_plugin_gui>,
+    timer: Option<clap_plugin_timer_support>,
+    fd: Option<clap_plugin_posix_fd_support>,
 }
 
 /// The main thread's ends of the two queues to the audio half.
@@ -403,6 +418,11 @@ pub struct ClapPlugin {
     waiting: Vec<HostEvent>,
     /// Most bytes a state stream moves per call.
     stream_chunk: usize,
+    /// The editor, while it is open.
+    editor: Option<editor::OpenEditor>,
+    /// The ids of the timers due in one `pump`, gathered before any of
+    /// them fires. Kept between calls so that it is allocated once.
+    due_timers: Vec<u32>,
 }
 
 impl ClapPlugin {
@@ -478,6 +498,8 @@ impl ClapPlugin {
             link: None,
             waiting: Vec::new(),
             stream_chunk: usize::MAX,
+            editor: None,
+            due_timers: Vec::new(),
         };
         this.extensions = Extensions {
             params: this.extension(CLAP_EXT_PARAMS),
@@ -486,6 +508,9 @@ impl ClapPlugin {
             note_ports: this.extension(CLAP_EXT_NOTE_PORTS),
             latency: this.extension(CLAP_EXT_LATENCY),
             tail: this.extension(CLAP_EXT_TAIL),
+            gui: this.extension(CLAP_EXT_GUI).filter(editor::is_complete),
+            timer: this.extension(CLAP_EXT_TIMER_SUPPORT),
+            fd: this.extension(CLAP_EXT_POSIX_FD_SUPPORT),
         };
         this.read_params();
         this.read_audio_ports();
@@ -1253,11 +1278,18 @@ impl ClapPlugin {
     ///   waits for [`deactivate`](Self::deactivate);
     /// - parameter changes, gestures and failures from the audio thread,
     ///   log messages, and requests only the application can act on
-    ///   (a restart, more processing) are returned.
+    ///   (a restart, more processing, a new size for the editor's window)
+    ///   are returned;
+    /// - first of all, the plugin's timers that are due fire. While the
+    ///   editor is open, call `pump` again by
+    ///   [`next_editor_timer`](Self::next_editor_timer) at the latest;
+    /// - an editor that closed by itself is destroyed, and
+    ///   [`EditorRequest::Closed`] returned.
     ///
     /// Call it regularly: a few times a second is enough for most plugins,
     /// and a user interface wants it on every frame.
     pub fn pump(&mut self) -> Vec<HostEvent> {
+        self.fire_timers();
         let mut requests = self.shared.take_requests();
         if requests & request::CALLBACK != 0 {
             if let Some(callback) = self.table.on_main_thread {
@@ -1273,6 +1305,7 @@ impl ClapPlugin {
             // function from returning.
             requests |= self.shared.take_requests_except(request::CALLBACK);
         }
+        self.answer_editor();
 
         if let Some(link) = &mut self.link {
             while let Some(report) = link.from_audio.pop() {
@@ -1407,6 +1440,15 @@ impl ClapPlugin {
 
 impl Drop for ClapPlugin {
     fn drop(&mut self) {
+        // The editor goes first, while this is still the main thread and
+        // the plugin certainly exists: an audio half that outlives this
+        // value may destroy the plugin later, on its own thread, and an
+        // editor cannot be destroyed there.
+        self.close_editor();
+        // Only `pump` fires timers and only this value tells the plugin of
+        // descriptors, so whatever the plugin still has registered is
+        // forgotten with it.
+        self.shared.editor_loop().clear();
         // Destroys the plugin now if its audio half is gone, and leaves
         // that to the audio half if it is not.
         self.shared.main_handle_dropped();

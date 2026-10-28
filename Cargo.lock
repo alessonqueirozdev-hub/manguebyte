@@ -750,6 +750,7 @@ dependencies = [
  "manguebyte-params",
  "manguebyte-plugin",
  "manguebyte-web",
+ "manguebyte-window",
  "vst3",
 ]
 
