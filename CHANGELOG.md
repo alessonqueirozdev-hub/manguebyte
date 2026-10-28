@@ -7,6 +7,14 @@ break the API.
 
 ## Unreleased
 
+## [0.2.0] - 2026-10-28
+
+The second release on crates.io: 27 crates, two of them new,
+`manguebyte-state` (application state with undo and redo) and
+`manguebyte-ump-io` (the systems' own MIDI 2.0 output, for
+`manguebyte-devices`). Before 1.0 a minor version may break the API:
+Breaking, below, lists what code written against 0.1.0 may need.
+
 ### Core
 
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
