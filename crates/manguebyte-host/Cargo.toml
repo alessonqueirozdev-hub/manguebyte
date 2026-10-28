@@ -14,9 +14,9 @@ homepage.workspace = true
 [features]
 default = ["clap", "vst3", "lv2", "au"]
 ## Hosting CLAP plugins.
-clap = ["dep:clap-sys", "dep:libloading"]
+clap = ["dep:clap-sys", "dep:libloading", "dep:manguebyte-plugin"]
 ## Hosting VST 3 plugins.
-vst3 = ["dep:vst3", "dep:libloading"]
+vst3 = ["dep:vst3", "dep:libloading", "dep:manguebyte-plugin"]
 ## Hosting LV2 plugins. The Turtle reader is the crate's own.
 lv2 = ["dep:libloading"]
 ## Hosting Audio Units (version 2). Components are found and instantiated
@@ -28,6 +28,9 @@ au = ["dep:manguebyte-au"]
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-midi.workspace = true
+# Names the window an editor goes in, as a plugin made with the framework
+# receives it.
+manguebyte-plugin = { workspace = true, optional = true }
 clap-sys = { version = "0.5", optional = true }
 vst3 = { version = "0.3", optional = true }
 # Opens the plugin's shared library and finds its entry point.
@@ -48,6 +51,8 @@ manguebyte-web.workspace = true
 manguebyte-plugin.workspace = true
 manguebyte-params.workspace = true
 manguebyte-graph.workspace = true
+# Real top-level windows for the editors of hosted plugins to go in.
+manguebyte-window = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

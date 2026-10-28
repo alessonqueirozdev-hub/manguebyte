@@ -41,6 +41,8 @@ mod bundle;
 pub mod clap;
 #[cfg(any(feature = "lv2", feature = "au"))]
 mod delivery;
+#[cfg(any(feature = "clap", feature = "vst3"))]
+pub mod editor;
 #[cfg(feature = "lv2")]
 pub mod lv2;
 #[cfg(any(feature = "clap", feature = "vst3", feature = "lv2", feature = "au"))]
