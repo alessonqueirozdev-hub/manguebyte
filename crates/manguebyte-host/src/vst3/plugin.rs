@@ -5,9 +5,11 @@
 // other.
 #![allow(clippy::unnecessary_cast)]
 
+use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use manguebyte_core::ParamId;
 use manguebyte_core::spsc::{self, Consumer, Producer};
@@ -16,10 +18,15 @@ use vst3::Steinberg::Vst::{
     IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
     IEditControllerTrait, IMidiMapping, IMidiMappingTrait, MediaTypes_, RestartFlags_,
 };
-use vst3::Steinberg::{IPluginBaseTrait, TUID, kNotImplemented, kResultOk, kResultTrue};
-use vst3::{ComPtr, ComRef};
+use vst3::Steinberg::{
+    self as sb, FIDString, IPlugView, IPlugViewContentScaleSupport,
+    IPlugViewContentScaleSupportTrait, IPlugViewTrait, IPluginBaseTrait, TUID, ViewRect,
+    kNotImplemented, kResultOk, kResultTrue,
+};
+use vst3::{ComPtr, ComRef, ComWrapper};
 
 use super::convert::{CONTROLLERS, MidiMap, unit};
+use super::frame::{EditorLoop, Frame, frame_ptr, rect_of, rect_size};
 use super::module::ClassInfo;
 use super::objects::{
     ComponentHandler, Edit, HostApplication, Inbox, MemoryStream, context_ptr, handler_ptr,
@@ -32,6 +39,7 @@ use super::{
     FromAudio, MAX_BLOCK_SIZE, MAX_BUSES, MAX_CHANNELS_PER_BUS, MAX_LATENCY_FRAMES, MAX_PARAMS,
     MAX_SCRATCH_SAMPLES, ProcessFailure, QUEUE_CAPACITY, ToAudio, Vst3Error, Vst3Module, state,
 };
+use crate::editor::{EditorRequest, EditorSize, FdInterest, FdWatch, ParentWindow};
 
 /// What a plugin says about one of its buses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,9 +183,18 @@ pub enum HostEvent {
     },
     /// The plugin's state differs from what was last saved or loaded.
     StateDirty,
-    /// The plugin asked for its editor to be shown. This host shows no
-    /// plugin windows and told the plugin so.
+    /// The plugin asked for its editor to be shown: open it with
+    /// [`Vst3Plugin::open_editor`], or bring its window forward if it is
+    /// open.
+    ///
+    /// Only the application can make the window an editor goes in, so the
+    /// plugin was told its request was met only if the editor was open
+    /// already. A request for a view other than the editor, the one view
+    /// this host opens, is refused and remarked on instead.
     EditorRequested,
+    /// The open editor asked the application for something; see
+    /// [`EditorRequest`]. A VST 3 editor asks only for a new size.
+    Editor(EditorRequest),
     /// The plugin's latency is now this many frames.
     LatencyChanged(u32),
     /// At least one block came out silent, for this reason, since the last
@@ -213,6 +230,18 @@ struct Link {
     delivered: Arc<Delivered>,
 }
 
+/// The plugin's open editor.
+struct OpenEditor {
+    view: ComPtr<IPlugView>,
+    /// The view's content scale, if it takes one.
+    scale_support: Option<ComPtr<IPlugViewContentScaleSupport>>,
+    /// The frame the view was given. The plugin holds references of its
+    /// own, which refuse everything once the editor is closed.
+    _frame: ComWrapper<Frame>,
+    /// The size the view last reported or was given.
+    size: EditorSize,
+}
+
 /// The objects the main thread calls, as pointers that [`Shared`] owns.
 #[derive(Clone, Copy)]
 struct Raw {
@@ -225,8 +254,8 @@ struct Raw {
 /// A hosted VST 3 plugin as the main thread deals with it.
 ///
 /// It owns everything VST 3 reserves for the main thread: buses,
-/// parameters and their text, state, activation, and what the plugin's
-/// controller reports to its host. Audio is processed by the
+/// parameters and their text, state, activation, the editor, and what the
+/// plugin's controller reports to its host. Audio is processed by the
 /// [`Vst3Processor`] that [`activate`](Self::activate) returns.
 ///
 /// The value cannot leave the thread it was created on, and the compiler
@@ -282,6 +311,13 @@ pub struct Vst3Plugin {
     waiting: Vec<HostEvent>,
     /// Most bytes a state stream moves per call.
     stream_chunk: usize,
+    /// The open editor, if there is one.
+    editor: Option<OpenEditor>,
+    /// What the editor's frames record: its requests, timers and
+    /// descriptors.
+    editor_loop: Arc<EditorLoop>,
+    /// Room for the ids of the timers due in one `pump`.
+    due_timers: Vec<u32>,
     /// Keeps the value on the thread that made it.
     _not_send: PhantomData<*const ()>,
 }
@@ -384,6 +420,9 @@ impl Vst3Plugin {
             pending: Vec::new(),
             waiting: remarks.into_iter().map(HostEvent::Remark).collect(),
             stream_chunk: usize::MAX,
+            editor: None,
+            editor_loop: EditorLoop::new(),
+            due_timers: Vec::new(),
             _not_send: PhantomData,
         };
         if this.has_controller() {
@@ -1310,6 +1349,264 @@ impl Vst3Plugin {
         }
     }
 
+    // --- The editor --------------------------------------------------------
+
+    /// Whether the plugin may have an editor: it has a controller, which is
+    /// what makes one. Whether it really has one is known only once
+    /// [`open_editor`](Self::open_editor) asks for it.
+    pub fn has_editor(&self) -> bool {
+        self.has_controller()
+    }
+
+    /// Opens the plugin's editor inside `parent`, a window of the
+    /// application's, and returns the editor's size.
+    ///
+    /// The controller is asked for its `"editor"` view. The view is asked
+    /// whether it can live in a window of the parent's kind, is given the
+    /// host's frame, then `scale` if it takes a content scale, and is then
+    /// attached to the window, which puts it on screen: VST 3 has no call
+    /// that shows a view. Make the window the size returned.
+    ///
+    /// `scale` is the factor a user interface is drawn at on the parent's
+    /// screen, such as 1.5 for 144 dots per inch on Windows. `None` leaves
+    /// the plugin to find its own. A plugin that refuses the scale, as
+    /// every plugin made with this framework does on macOS, where sizes
+    /// are points that the system scales, opens at its own.
+    ///
+    /// From then on, the editor's requests are among the events that
+    /// [`pump`](Self::pump) returns, and its timers fire there; see
+    /// [`next_editor_timer`](Self::next_editor_timer). What the person does
+    /// with its controls comes back from `pump` as the plugin's own edits,
+    /// and reaches the processor at the start of its next block.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is left open after an error.
+    ///
+    /// - [`Vst3Error::EditorAlreadyOpen`] if the editor is open.
+    /// - [`Vst3Error::InvalidArgument`] for a scale that is not a positive
+    ///   number.
+    /// - [`Vst3Error::NoController`] if the plugin has no controller, and
+    ///   [`Vst3Error::NoView`] if its controller makes no editor.
+    /// - [`Vst3Error::PlatformUnsupported`] if the editor cannot be put in
+    ///   a window of the parent's kind.
+    /// - [`Vst3Error::EditorRefused`] if the view refuses the frame, refuses
+    ///   to be attached, or then cannot say its size.
+    pub fn open_editor(
+        &mut self,
+        parent: ParentWindow,
+        scale: Option<f64>,
+    ) -> Result<EditorSize, Vst3Error> {
+        if self.editor.is_some() {
+            return Err(Vst3Error::EditorAlreadyOpen);
+        }
+        if let Some(scale) = scale {
+            check_scale(scale)?;
+        }
+        let api = parent.api();
+        let (kind, handle) = platform_of(parent).ok_or(Vst3Error::PlatformUnsupported(api))?;
+        let view = {
+            let controller = self.controller().ok_or(Vst3Error::NoController)?;
+            // SAFETY: the plugin's initialised controller, on its main
+            // thread, with a name the bindings end in a zero. The view, if
+            // any, comes with one reference, which is ours.
+            unsafe { ComPtr::from_raw(controller.createView(vst::ViewType::kEditor)) }
+        };
+        let view = view.ok_or(Vst3Error::NoView)?;
+        // SAFETY: the plugin's view, on its main thread, with a platform
+        // type the bindings end in a zero.
+        if unsafe { view.isPlatformTypeSupported(kind) } != kResultTrue {
+            return Err(Vst3Error::PlatformUnsupported(api));
+        }
+        let frame = self.editor_loop.begin();
+        // SAFETY: as above, with a frame that stays valid for as long as
+        // the plugin holds a reference to it.
+        if unsafe { view.setFrame(frame_ptr(&frame)) } != kResultOk {
+            self.abandon(view, false);
+            return Err(Vst3Error::EditorRefused("setFrame"));
+        }
+        let scale_support = view.cast::<IPlugViewContentScaleSupport>();
+        if let (Some(scale), Some(support)) = (scale, &scale_support) {
+            // SAFETY: the view, as above. A refusal leaves the plugin at its
+            // own scale, as the documentation says.
+            unsafe { support.setContentScaleFactor(scale as f32) };
+        }
+        // SAFETY: the view, as above, with the parent's handle, which the
+        // caller says is a window of the kind named.
+        if unsafe { view.attached(handle, kind) } != kResultOk {
+            self.abandon(view, false);
+            return Err(Vst3Error::EditorRefused("attached"));
+        }
+        let Some(size) = view_size(&view) else {
+            self.abandon(view, true);
+            return Err(Vst3Error::EditorRefused("getSize"));
+        };
+        self.editor = Some(OpenEditor {
+            view,
+            scale_support,
+            _frame: frame,
+            size,
+        });
+        self.inbox.set_editor_open(true);
+        Ok(size)
+    }
+
+    /// Takes a view apart that is being closed or failed to open: removed
+    /// from its window if it was attached, its frame taken back, what it
+    /// registered forgotten, and released, in the order VST 3 has a host
+    /// do it.
+    fn abandon(&self, view: ComPtr<IPlugView>, attached: bool) {
+        // SAFETY: the plugin's view, on its main thread. Null takes the
+        // frame back.
+        unsafe {
+            if attached {
+                view.removed();
+            }
+            view.setFrame(std::ptr::null_mut());
+        }
+        // Frames refuse everything from here on, and the handlers the
+        // editor left registered are released.
+        self.editor_loop.end();
+        drop(view);
+    }
+
+    /// Whether the editor is open.
+    pub fn is_editor_open(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// The editor's size, as the plugin reports it now, or the size it last
+    /// reported or was given if it cannot say. `None` when no editor is
+    /// open.
+    pub fn editor_size(&self) -> Option<EditorSize> {
+        let open = self.editor.as_ref()?;
+        Some(view_size(&open.view).unwrap_or(open.size))
+    }
+
+    /// Whether the person may resize the editor's window. False when no
+    /// editor is open.
+    pub fn can_resize_editor(&self) -> bool {
+        self.editor.as_ref().is_some_and(|open| {
+            // SAFETY: the plugin's open view, on its main thread.
+            unsafe { open.view.canResize() == kResultTrue }
+        })
+    }
+
+    /// Tells the editor its window is now `size`, and returns the size it
+    /// was given.
+    ///
+    /// Call it when the application has resized the window around the
+    /// editor, whether the person did or the application is answering an
+    /// [`EditorRequest::Resize`]. A resizable editor is first asked which
+    /// size nearest `size` it can take (`checkSizeConstraint`), and given
+    /// that; make the window the size returned. An editor of fixed size is
+    /// given `size` as it is, and takes only its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Vst3Error::EditorNotOpen`] if no editor is open, and
+    /// [`Vst3Error::EditorRefused`] if the editor refuses the size; it then
+    /// keeps the size it had.
+    pub fn set_editor_size(&mut self, size: EditorSize) -> Result<EditorSize, Vst3Error> {
+        let open = self.editor.as_ref().ok_or(Vst3Error::EditorNotOpen)?;
+        let view = open.view.clone();
+        let mut applied = size;
+        // SAFETY: the plugin's open view, on its main thread, with
+        // rectangles this function owns.
+        unsafe {
+            if view.canResize() == kResultTrue {
+                let mut fitted = rect_of(size);
+                if view.checkSizeConstraint(&raw mut fitted) == kResultTrue {
+                    applied = rect_size(&raw const fitted).unwrap_or(size);
+                }
+            }
+            let mut rect = rect_of(applied);
+            if view.onSize(&raw mut rect) != kResultOk {
+                return Err(Vst3Error::EditorRefused("onSize"));
+            }
+        }
+        if let Some(open) = &mut self.editor {
+            open.size = applied;
+        }
+        Ok(applied)
+    }
+
+    /// Gives the editor a new content scale, as when its window moved to a
+    /// screen of another density. The editor may then ask for a new size,
+    /// among the events [`pump`](Self::pump) returns.
+    ///
+    /// A plugin whose view takes no content scale scales by itself, and
+    /// this does nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Vst3Error::InvalidArgument`] for a scale that is not a positive
+    /// number, [`Vst3Error::EditorNotOpen`] if no editor is open, and
+    /// [`Vst3Error::EditorRefused`] if the editor refuses the scale, as
+    /// every editor made with this framework does on macOS.
+    pub fn set_editor_scale(&mut self, scale: f64) -> Result<(), Vst3Error> {
+        check_scale(scale)?;
+        let open = self.editor.as_ref().ok_or(Vst3Error::EditorNotOpen)?;
+        let Some(support) = open.scale_support.clone() else {
+            return Ok(());
+        };
+        // SAFETY: the plugin's open view, on its main thread.
+        if unsafe { support.setContentScaleFactor(scale as f32) } != kResultOk {
+            return Err(Vst3Error::EditorRefused("setContentScaleFactor"));
+        }
+        Ok(())
+    }
+
+    /// Closes the editor: removes it from its window, takes back its frame,
+    /// forgets its timers and descriptors, and releases it. The window can
+    /// go after that. Does nothing if no editor is open.
+    ///
+    /// Dropping the plugin closes its editor first.
+    pub fn close_editor(&mut self) {
+        let Some(open) = self.editor.take() else {
+            return;
+        };
+        self.inbox.set_editor_open(false);
+        let OpenEditor {
+            view,
+            scale_support,
+            _frame: frame,
+            ..
+        } = open;
+        drop(scale_support);
+        self.abandon(view, true);
+        drop(frame);
+    }
+
+    /// When the editor's next timer is due, if it has one. Call
+    /// [`pump`](Self::pump) then: it fires every timer that is due.
+    ///
+    /// VST 3 has an editor register timers with its host on Linux, where
+    /// it runs from the host's loop; elsewhere an editor keeps its own
+    /// timers, and this is `None`.
+    pub fn next_editor_timer(&self) -> Option<Instant> {
+        self.editor_loop.next_timer()
+    }
+
+    /// The file descriptors the editor asked to be told about, on Linux,
+    /// where VST 3 has an editor run from its host's loop. Watch them with
+    /// the application's own loop, and call
+    /// [`editor_fd_ready`](Self::editor_fd_ready) when one is ready. Read
+    /// the list again after every call into the plugin: the editor adds
+    /// and removes descriptors as it goes. Empty elsewhere.
+    pub fn editor_fds(&self) -> Vec<FdWatch> {
+        self.editor_loop.fds()
+    }
+
+    /// Tells the editor that `fd`, one of [`editor_fds`](Self::editor_fds),
+    /// is `ready`. Does nothing for a descriptor the editor does not watch,
+    /// or for nothing ready.
+    pub fn editor_fd_ready(&mut self, fd: i32, ready: FdInterest) {
+        if self.editor.is_some() {
+            self.editor_loop.fd_ready(fd, ready);
+        }
+    }
+
     // --- The plugin's requests ---------------------------------------------
 
     /// How many blocks have come out silent because the plugin failed,
@@ -1354,10 +1651,18 @@ impl Vst3Plugin {
     ///   one that needs a new activation is returned.
     /// - While the plugin is active, its tail is read again, for
     ///   [`Vst3Processor::tail`] to report.
+    /// - The editor's timers that are due fire, first, so that what they do
+    ///   is passed on in the same call, and what the editor asked for is
+    ///   returned as [`HostEvent::Editor`].
     ///
     /// Call it regularly: a few times a second is enough for most plugins,
-    /// and a user interface wants it on every frame.
+    /// and a user interface wants it on every frame. While the editor has
+    /// timers, call it again by [`next_editor_timer`](Self::next_editor_timer).
     pub fn pump(&mut self) -> Vec<HostEvent> {
+        if self.editor.is_some() {
+            self.editor_loop
+                .fire_timers(Instant::now(), &mut self.due_timers);
+        }
         self.pass_on();
         self.restart(self.inbox.take_restart());
         let requests = self.inbox.take_requests();
@@ -1367,11 +1672,28 @@ impl Vst3Plugin {
         if requests & request::OPEN_EDITOR != 0 {
             self.waiting.push(HostEvent::EditorRequested);
         }
+        if requests & request::OTHER_VIEW != 0 {
+            self.remark(
+                "the plugin asked for a view other than its editor, which this host does not open"
+                    .to_owned(),
+            );
+        }
+        if let Some(size) = self.editor_loop.take_resize() {
+            self.waiting
+                .push(HostEvent::Editor(EditorRequest::Resize(size)));
+        }
         let wrong = self.inbox.take_off_thread();
         if wrong > 0 {
             self.remark(format!(
                 "the plugin called a main-thread function of the host from another thread \
                  {wrong} time(s)"
+            ));
+        }
+        let refused = self.editor_loop.take_off_thread();
+        if refused > 0 {
+            self.remark(format!(
+                "the plugin called its editor's frame or run loop from another thread \
+                 {refused} time(s); the calls were refused"
             ));
         }
         for failure in ProcessFailure::from_bits(self.shared.take_failures()) {
@@ -1469,6 +1791,9 @@ impl Vst3Plugin {
 
 impl Drop for Vst3Plugin {
     fn drop(&mut self) {
+        // The editor goes first, here on the main thread, while the
+        // controller that made it is still initialised.
+        self.close_editor();
         // Closes the plugin now if its audio half is gone, and leaves that
         // to the audio half if it is not.
         self.shared.main_handle_dropped();
@@ -1484,6 +1809,53 @@ impl std::fmt::Debug for Vst3Plugin {
             .field("params", &self.params.len())
             .finish_non_exhaustive()
     }
+}
+
+/// Refuses a content scale that is not a positive number, in `f32` as VST 3
+/// passes it.
+fn check_scale(scale: f64) -> Result<(), Vst3Error> {
+    let narrow = scale as f32;
+    if scale.is_finite() && scale > 0.0 && narrow.is_finite() && narrow > 0.0 {
+        Ok(())
+    } else {
+        Err(Vst3Error::InvalidArgument(
+            "a content scale has to be a positive number",
+        ))
+    }
+}
+
+/// The VST 3 platform type of a parent window, and the handle `attached`
+/// is given for it.
+fn platform_of(parent: ParentWindow) -> Option<(FIDString, *mut c_void)> {
+    let (kind, handle) = match parent {
+        ParentWindow::Win32 { hwnd } => (sb::kPlatformTypeHWND, hwnd.get()),
+        ParentWindow::Cocoa { ns_view } => (sb::kPlatformTypeNSView, ns_view.get()),
+        // VST 3 passes an X11 window's id in place of the pointer.
+        ParentWindow::X11 { window } => (sb::kPlatformTypeX11EmbedWindowID, window.get() as usize),
+        _ => return None,
+    };
+    // The handle is the application's: a number to the plugin, or the
+    // address of an `NSView` it calls, which is why it keeps its
+    // provenance.
+    Some((kind, std::ptr::with_exposed_provenance_mut(handle)))
+}
+
+/// The size a view reports, or `None` if it does not say or reports a
+/// rectangle inside out.
+fn view_size(view: &ComPtr<IPlugView>) -> Option<EditorSize> {
+    let mut rect = ViewRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: the plugin's view, on its main thread, with a rectangle this
+    // function owns.
+    if unsafe { view.getSize(&raw mut rect) } != kResultOk {
+        return None;
+    }
+    // SAFETY: as above.
+    unsafe { rect_size(&raw const rect) }
 }
 
 /// Makes and initialises the separate controller a component names, or

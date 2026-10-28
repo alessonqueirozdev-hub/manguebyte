@@ -16,9 +16,9 @@
 // other.
 #![allow(clippy::unnecessary_cast)]
 
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use vst3::Steinberg::IBStream_::IStreamSeekMode_;
@@ -30,8 +30,8 @@ use vst3::Steinberg::Vst::{
     IMessageTrait, IMidiMapping, IPlugInterfaceSupport, IPlugInterfaceSupportTrait,
 };
 use vst3::Steinberg::{
-    FIDString, FUnknown, IBStream, IBStreamTrait, TBool, TUID, kInvalidArgument, kNotImplemented,
-    kResultFalse, kResultOk, kResultTrue, tresult,
+    FIDString, FUnknown, IBStream, IBStreamTrait, IPlugView, IPlugViewContentScaleSupport, TBool,
+    TUID, kInvalidArgument, kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult,
 };
 use vst3::{Class, ComWrapper, Interface};
 
@@ -170,6 +170,8 @@ impl IPlugInterfaceSupportTrait for HostApplication {
             IEditController::IID,
             IConnectionPoint::IID,
             IMidiMapping::IID,
+            IPlugView::IID,
+            IPlugViewContentScaleSupport::IID,
         ];
         if used.contains(&asked) {
             kResultTrue
@@ -454,6 +456,8 @@ pub(crate) enum Edit {
 pub(crate) mod request {
     pub(crate) const DIRTY: u32 = 1 << 0;
     pub(crate) const OPEN_EDITOR: u32 = 1 << 1;
+    /// A view other than the editor was asked for.
+    pub(crate) const OTHER_VIEW: u32 = 1 << 2;
 }
 
 /// What a plugin has told its host and the main thread has not handled yet.
@@ -470,6 +474,8 @@ pub(crate) struct Inbox {
     lost_edits: AtomicU32,
     /// Calls made on a thread other than the main one.
     off_thread: AtomicU32,
+    /// Whether the plugin's editor is open, for `requestOpenEditor`.
+    editor_open: AtomicBool,
 }
 
 impl Inbox {
@@ -482,6 +488,7 @@ impl Inbox {
             edits: Mutex::new(Vec::new()),
             lost_edits: AtomicU32::new(0),
             off_thread: AtomicU32::new(0),
+            editor_open: AtomicBool::new(false),
         })
     }
 
@@ -525,6 +532,11 @@ impl Inbox {
     /// How many calls came on another thread since the last call.
     pub(crate) fn take_off_thread(&self) -> u32 {
         self.off_thread.swap(0, Ordering::Relaxed)
+    }
+
+    /// Records whether the plugin's editor is open.
+    pub(crate) fn set_editor_open(&self, open: bool) {
+        self.editor_open.store(open, Ordering::Relaxed);
     }
 }
 
@@ -586,14 +598,36 @@ impl IComponentHandler2Trait for ComponentHandler {
         kResultOk
     }
 
-    unsafe fn requestOpenEditor(&self, _name: FIDString) -> tresult {
-        // This host shows no plugin windows. The request is passed on, and
-        // the plugin is told it was not met.
-        self.inbox.called();
-        self.inbox
-            .requests
-            .fetch_or(request::OPEN_EDITOR, Ordering::Relaxed);
-        kResultFalse
+    unsafe fn requestOpenEditor(&self, name: FIDString) -> tresult {
+        guard(kResultFalse, || {
+            self.inbox.called();
+            // VST 3 has the editor asked for by default; null is taken to
+            // mean the same.
+            // SAFETY: the plugin passes a NUL-terminated name, or null, and
+            // the bindings' constant is a literal ending in a zero.
+            let editor = name.is_null()
+                || unsafe { CStr::from_ptr(name) == CStr::from_ptr(vst::ViewType::kEditor) };
+            if !editor {
+                // The editor is the one view this host opens.
+                self.inbox
+                    .requests
+                    .fetch_or(request::OTHER_VIEW, Ordering::Relaxed);
+                return kResultFalse;
+            }
+            // Only the application can make a window to open the editor
+            // in, and this host cannot tell whether it will. So the request
+            // is passed on, and the plugin is told it was met only if the
+            // editor is open already: the application is then asked to
+            // bring it forward, which needs nothing new.
+            self.inbox
+                .requests
+                .fetch_or(request::OPEN_EDITOR, Ordering::Relaxed);
+            if self.inbox.editor_open.load(Ordering::Relaxed) {
+                kResultTrue
+            } else {
+                kResultFalse
+            }
+        })
     }
 
     unsafe fn startGroupEdit(&self) -> tresult {
@@ -1049,6 +1083,20 @@ mod tests {
         assert_eq!(inbox.take_restart(), 0);
         assert_eq!(inbox.take_requests(), request::DIRTY | request::OPEN_EDITOR);
         assert_eq!(inbox.take_off_thread(), 0);
+
+        // The editor asked for while it is open is met: the application is
+        // asked to bring it forward. Any other view is refused.
+        inbox.set_editor_open(true);
+        // SAFETY: terminated names.
+        unsafe {
+            assert_eq!(second.requestOpenEditor(c"editor".as_ptr()), kResultTrue);
+            assert_eq!(second.requestOpenEditor(c"other".as_ptr()), kResultFalse);
+        }
+        assert_eq!(
+            inbox.take_requests(),
+            request::OPEN_EDITOR | request::OTHER_VIEW
+        );
+        inbox.set_editor_open(false);
 
         // From another thread the call is still taken, and remarked on.
         let elsewhere = wrapper.clone();

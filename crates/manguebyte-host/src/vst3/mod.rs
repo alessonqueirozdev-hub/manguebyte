@@ -7,7 +7,7 @@
 //! | Type | What it is | Threads |
 //! |---|---|---|
 //! | [`Vst3Module`] | A loaded module (a bundle or a bare library) and the classes its factory offers | Any; can be cloned and sent |
-//! | [`Vst3Plugin`] | One plugin, as the main thread deals with it: buses, parameters, state, activation | The thread that created it, and no other |
+//! | [`Vst3Plugin`] | One plugin, as the main thread deals with it: buses, parameters, state, activation, the editor | The thread that created it, and no other |
 //! | [`Vst3Processor`] | The same plugin, as the audio thread deals with it: a `Processor<f32>` | One thread at a time; can be sent |
 //!
 //! These are the same three roles the [CLAP host](crate::clap) has, with
@@ -114,6 +114,50 @@
 //! | Host objects | Host application, component handler (begin, perform and end of an edit, restart requests, dirty state), memory streams, messages, parameter changes, event lists; everything the audio thread uses is allocated at activation |
 //! | State | Component and controller state in one run of bytes. A loaded state replaces every parameter value still on its way between the halves |
 //! | Latency, tail | Read on the main thread, as VST 3 asks: both at activation, the tail again at every `pump`. The audio half reports the values read there |
+//! | Editor | The `"editor"` view in a window of the application's (`HWND`, `NSView` or X11), with the host's frame, a content scale, resizing both ways and, on Linux and other X11 systems, the host's run loop for timers and file descriptors; see [Editors](#editors) |
+//!
+//! # Editors
+//!
+//! A plugin's editor goes inside a window the application owns:
+//! [`Vst3Plugin::open_editor`] takes a [`ParentWindow`](crate::editor::ParentWindow)
+//! and the scale the window is drawn at, asks the controller for its
+//! view, and attaches the view to the window, which puts it on screen.
+//! [`Vst3Plugin::close_editor`] takes it out again; dropping the plugin
+//! closes it first. What the editor draws, and how, is the plugin's
+//! business.
+//!
+//! This crate has no windows and no event loop, so what the editor asks of
+//! its host is passed on rather than done. The view's frame records its
+//! `resizeView` requests and answers yes, and [`Vst3Plugin::pump`] returns
+//! each as [`HostEvent::Editor`] with an
+//! [`EditorRequest::Resize`](crate::editor::EditorRequest::Resize). The
+//! application resizes its window and then tells the view with
+//! [`Vst3Plugin::set_editor_size`], which also serves for a window the
+//! person resized: a resizable view is asked for the nearest size it can
+//! take first. Until then the view keeps its old size. VST 3 lets a host
+//! call `onSize` from inside `resizeView` or after it; this host always
+//! does it after, since only the application can resize the window, and
+//! the window should have the size before the view is told it has.
+//!
+//! On Linux and the other systems whose windows are X11's, the frame also
+//! offers `IRunLoop`, because an editor there runs from its host's loop.
+//! Its timers fire in `pump`, which
+//! [`Vst3Plugin::next_editor_timer`] says when to call next, and its file
+//! descriptors are listed by [`Vst3Plugin::editor_fds`] for the
+//! application to watch and report with [`Vst3Plugin::editor_fd_ready`].
+//! A handler is always called with nothing of the host's locked or
+//! borrowed, so it may register and unregister anything, itself included.
+//! Elsewhere editors keep their own timers and the lists stay empty.
+//!
+//! What a person does with the editor's controls reaches the controller,
+//! which reports it to the host as edits; `pump` passes them on to the
+//! processor, which hears them at the start of its next block, and returns
+//! them as [`HostEvent::GestureBegin`], [`HostEvent::ParamValue`] and
+//! [`HostEvent::GestureEnd`], as for any edit the controller makes.
+//!
+//! The frame and the run loop are the main thread's: a call from another
+//! thread is refused and remarked on. A frame belongs to one opening of
+//! the editor, and refuses everything once the editor has closed.
 //!
 //! # A plugin is not trusted
 //!
@@ -138,8 +182,8 @@
 //!
 //! # Limits
 //!
-//! No plugin window, no 64-bit audio, no program lists, no unit
-//! information, no changes to the bus layout. Further audio buses carry
+//! No 64-bit audio, no program lists, no unit information, no changes to
+//! the bus layout, and no view but the editor. Further audio buses carry
 //! silence in and are discarded out; further event buses are not used. A
 //! note expression reaches only a note that has an id, since VST 3
 //! addresses expression by id alone. VST 3 has no choke and no parameter
@@ -158,6 +202,7 @@
 mod bundle;
 mod changes;
 mod convert;
+mod frame;
 mod module;
 mod objects;
 mod plugin;
@@ -170,6 +215,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use manguebyte_core::ParamId;
+
+use crate::editor::WindowApi;
 
 pub use ::vst3;
 pub use module::{ClassInfo, FactoryInfo, Vst3Module};
@@ -358,6 +405,21 @@ pub enum Vst3Error {
     StateOfAnotherClass(ClassId),
     /// The plugin refused the state it was given.
     StateLoadFailed,
+    /// The plugin has no controller, and so no editor.
+    NoController,
+    /// The plugin's controller made no editor when asked for one: it has
+    /// none.
+    NoView,
+    /// The editor is open already. Close it first.
+    EditorAlreadyOpen,
+    /// No editor is open.
+    EditorNotOpen,
+    /// The plugin's editor cannot be put in a window of this kind.
+    PlatformUnsupported(WindowApi),
+    /// The plugin's editor refused a call, and nothing was changed. The
+    /// text names the call. An editor that refused to open has been closed
+    /// again, and nothing of it is left.
+    EditorRefused(&'static str),
 }
 
 impl fmt::Display for Vst3Error {
@@ -403,6 +465,14 @@ impl fmt::Display for Vst3Error {
             Self::NotAState(what) => write!(f, "not a saved state: {what}"),
             Self::StateOfAnotherClass(id) => write!(f, "the state belongs to the class {id}"),
             Self::StateLoadFailed => f.write_str("the plugin refused the state"),
+            Self::NoController => f.write_str("the plugin has no controller, and so no editor"),
+            Self::NoView => f.write_str("the plugin has no editor"),
+            Self::EditorAlreadyOpen => f.write_str("the plugin's editor is open already"),
+            Self::EditorNotOpen => f.write_str("the plugin's editor is not open"),
+            Self::PlatformUnsupported(api) => {
+                write!(f, "the plugin's editor cannot be put in a {api:?} window")
+            }
+            Self::EditorRefused(call) => write!(f, "the plugin's editor refused {call}"),
         }
     }
 }
