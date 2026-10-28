@@ -53,6 +53,12 @@ manguebyte-params.workspace = true
 manguebyte-graph.workspace = true
 # Real top-level windows for the editors of hosted plugins to go in.
 manguebyte-window = { workspace = true, features = ["testing"] }
+# The wrappers themselves, for a test plugin linked into a test and hosted
+# from the entry points they make, in process: none of the example plugins
+# sends notes.
+manguebyte-clap.workspace = true
+manguebyte-vst3.workspace = true
+manguebyte-lv2.workspace = true
 
 [lints]
 workspace = true

@@ -70,11 +70,11 @@
 //! | LV2 | Behaviour |
 //! |---|---|
 //! | Turtle | `manifest.ttl` and the files its plugins point at with `rdfs:seeAlso`, inside the bundle; prefixes, bases, relative IRIs, blank nodes, collections, literals |
-//! | Library | `lv2_descriptor`, from a library that must be inside the bundle |
+//! | Library | `lv2_descriptor`, from a library that must be inside the bundle, or a function of this process that stands for it ([`Lv2Library::from_entry`]) |
 //! | Features | `urid:map`, `urid:unmap`, `options:options` (`buf-size:minBlockLength`, `maxBlockLength`, `nominalBlockLength`, `sequenceSize`, `param:sampleRate`), `buf-size:boundedBlockLength`, `log:log`. A plugin that requires any other is refused by name |
 //! | Audio ports | One channel each: main inputs, inputs marked `lv2:isSideChain` from the sidechain, main outputs. Never in place |
 //! | Control ports | Inputs are the parameters, in their own unit and range, changed on their frames by running the block in pieces; `lv2:freeWheeling` is held at 0 and `lv2:enabled` starts on; the output designated `lv2:latency` (or marked `lv2:reportsLatency`) is the latency |
-//! | Atom ports | The input designated `lv2:control`, or the first that takes MIDI, gets MIDI 1.0 on its frames and a `time:Position` per piece if it takes one; others get empty sequences; outputs are given room and not read |
+//! | Atom ports | The input designated `lv2:control`, or the first that takes MIDI, gets MIDI 1.0 on its frames and a `time:Position` per piece if it takes one; others get empty sequences. Outputs are given room before every call of `run`; those that support `midi:MidiEvent` are read after it, and the MIDI 1.0 the plugin sent there is in [`Lv2Processor::output_events`], on its frames |
 //! | CV ports | Inputs silent, outputs discarded |
 //! | State | `state:interface`, saved together with every parameter's value, by URI and port symbol (see [`Lv2Plugin::save_state`]) |
 //!
@@ -82,7 +82,9 @@
 //!
 //! No plugin user interfaces (`ui:`), no worker (`worker:schedule`), no
 //! file paths in state (`state:mapPath`, `state:makePath`), no reading of
-//! MIDI or other atoms a plugin writes, no 64-bit audio, no presets. `log`
+//! atoms a plugin writes other than MIDI events (no patch messages, no
+//! MIDI 2.0, which LV2 has no event type for), no 64-bit audio, no
+//! presets. `log`
 //! shows a message whose format is a lone `%s` as its string, and any other
 //! format as it is, its conversions unexpanded: C's variadic arguments
 //! cannot be read portably from stable Rust (see the comment in the source
@@ -107,7 +109,7 @@ pub use description::{
     Direction, Lv2PluginInfo, MAX_PLUGINS_PER_BUNDLE, MAX_PORTS, PortInfo, PortKind,
     PortProperties, read_bundle,
 };
-pub use library::Lv2Library;
+pub use library::{Lv2Entry, Lv2Library};
 pub use plugin::{Lv2Event, Lv2Failure, Lv2Param, Lv2Plugin};
 pub use processor::Lv2Processor;
 pub use state::MAX_STATE_BYTES;
@@ -117,6 +119,12 @@ pub const MAX_BLOCK_SIZE: usize = 1 << 20;
 
 /// Largest latency taken from a plugin, in frames.
 pub const MAX_LATENCY_FRAMES: u32 = 1 << 24;
+
+/// Most events a plugin sends that are kept for one block, however many
+/// pieces the block is run in, since that is what
+/// [`Lv2Processor::output_events`] returns. Further events are dropped and
+/// counted, never allocated for.
+pub const EVENTS_PER_BLOCK: usize = 4_096;
 
 /// Most events that wait for the next block.
 pub(crate) const CARRIED_EVENTS: usize = 1_024;

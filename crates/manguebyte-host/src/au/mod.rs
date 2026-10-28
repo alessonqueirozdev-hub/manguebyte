@@ -89,6 +89,7 @@
 //! | Parameters | `ParameterList` and `ParameterInfo` in the global scope, in the unit's own unit and range: switches (`Boolean`) and menus (`Indexed`) move in steps; names from `cfNameString`; text both ways through `ParameterStringFromValue` and `ParameterValueFromString` for a unit with `ValuesHaveStrings` |
 //! | Automation | Each [`EventKind::ParamValue`](manguebyte_dsp::event::EventKind::ParamValue) through `AudioUnitScheduleParameters`, as an immediate change on its frame of the slice; `AudioUnitSetParameter` from the main thread, which the unit hears from the next slice |
 //! | MIDI | For music devices, music effects and MIDI processors, `MusicDeviceMIDIEvent` on the event's frame of the slice: notes as MIDI 1.0, pressure as polyphonic aftertouch, MIDI as it is |
+//! | MIDI out | For a unit with `MIDIOutputCallbackInfo`, a `MIDIOutputCallback`, whose `MIDIPacketList`s are read into [`AuProcessor::output_events`] on the frames their packets are stamped with |
 //! | Transport | `HostCallbacks`: beat and tempo, the frames to the next beat, the time signature and the bar's first beat, playing, recording, a change of either or a jump, the position in frames and the cycle, for each slice |
 //! | Latency, tail | `Latency` and `TailTime`, in seconds, as frames at the activation's rate; latency read at activation and on [`AuPlugin::pump`] |
 //! | State | `ClassInfo`, as the XML of its property list (see [`AuPlugin::save_state`]) |
@@ -103,7 +104,8 @@
 //!
 //! No editors (`CocoaUI`), no Audio Unit version 3 extensions beyond what
 //! `AudioComponentInstanceNew` makes of them, no factory presets, no MIDI
-//! or parameter changes read back from a unit, no channel layouts other
+//! 2.0 read back from a unit (`MIDIOutputEventListCallback`), no parameter
+//! changes read back from a unit, no channel layouts other
 //! than the stream formats' channel counts, no input or output elements
 //! beyond the main ones and one sidechain, and no 64-bit audio. A
 //! parameter the unit itself changes is seen when it is read, not
@@ -149,6 +151,12 @@ pub const MAX_LATENCY_FRAMES: u32 = 1 << 24;
 
 /// Largest `Info.plist` read from a bundle.
 pub(crate) const MAX_INFO_PLIST_BYTES: usize = 4 << 20;
+
+/// Most events a unit sends that are kept for one block, however many
+/// slices the block is rendered in, since that is what
+/// [`AuProcessor::output_events`] returns. Further events are dropped and
+/// counted, never allocated for.
+pub const EVENTS_PER_BLOCK: usize = 4_096;
 
 /// Most events that wait for the next block.
 pub(crate) const CARRIED_EVENTS: usize = 1_024;

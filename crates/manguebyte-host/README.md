@@ -38,8 +38,12 @@ timers, and an edit made in it reaches the hosted processor. This is
 tested in real Win32 windows; on macOS and Linux no editor has been
 opened in a real window yet.
 
-Not yet: the editors of LV2 and AU plugins, reading the notes and MIDI a
-hosted plugin sends, Audio Units version 3 as such, and runs against
+The notes and MIDI a hosted plugin sends are read on their frames in all
+four formats, and `any::AnyProcessor` hands them over in one type
+whatever the format; LV2 and AU plugins send MIDI 1.0.
+
+Not yet: the editors of LV2 and AU plugins, MIDI 2.0 out of hosted LV2
+and AU plugins, Audio Units version 3 as such, and runs against
 plugins from other vendors.
 
 Documentation: <https://docs.rs/manguebyte-host>

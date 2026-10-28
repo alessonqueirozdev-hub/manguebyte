@@ -8,10 +8,10 @@ use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Transport};
 
-use super::CARRIED_EVENTS;
 use super::atom::{AtomBuffer, Urids};
 use super::plugin::{Layout, Lv2Param, ParamSlot, Shared, ToAudio, clamp_latency, find_param};
-use crate::delivery::{advance, midi_of};
+use super::{CARRIED_EVENTS, EVENTS_PER_BLOCK};
+use crate::delivery::{Sent, advance, midi_of};
 
 /// Everything [`Lv2Processor::new`] needs.
 pub(crate) struct Setup<'a> {
@@ -81,6 +81,18 @@ pub(crate) struct Setup<'a> {
 ///
 /// An event at or beyond the end of a block is delivered on the first
 /// frame of the next; 1,024 can wait that way.
+///
+/// # What the plugin sends
+///
+/// Every atom output is given an empty buffer of the size the plugin was
+/// told (`options:sequenceSize`, at least the `rsz:minimumSize` it asks
+/// for) before each call of `run`, as LV2 has a host ready an output: a
+/// chunk whose size is the room there is, for the plugin to overwrite
+/// with a sequence. After the call, the outputs that say they carry
+/// `midi:MidiEvent` are read, and every MIDI 1.0 message the plugin wrote
+/// there is in [`output_events`](Self::output_events), on its frame of the
+/// caller's block, however many pieces the block was run in. Other atoms
+/// in those sequences, and the other outputs, are not read.
 pub struct Lv2Processor {
     shared: Arc<Shared>,
     layout: Arc<Layout>,
@@ -103,6 +115,8 @@ pub struct Lv2Processor {
     param_ports: Box<[u32]>,
     from_main: Option<Consumer<ToAudio>>,
     carry: Vec<Event>,
+    /// What the plugin sent during the last block.
+    sent: Sent,
     wrong_rate: bool,
     lost: u64,
     undeliverable: u64,
@@ -151,6 +165,7 @@ impl Lv2Processor {
             param_ports,
             from_main: Some(setup.from_main),
             carry: Vec::with_capacity(CARRIED_EVENTS),
+            sent: Sent::new(EVENTS_PER_BLOCK),
             wrong_rate: false,
             lost: 0,
             undeliverable: 0,
@@ -190,6 +205,22 @@ impl Lv2Processor {
     /// The longest piece the plugin is run for.
     pub fn max_block_size(&self) -> usize {
         self.max_frames
+    }
+
+    /// What the plugin sent during the last call to
+    /// [`process_with`](Processor::process_with), on the frames of the
+    /// block it was sent on, in the order it was sent.
+    ///
+    /// LV2 has a plugin send MIDI 1.0, so a note comes with a velocity in 7
+    /// bits and no id, and pressure on one key as a note expression;
+    /// controllers, the wheel, programs and channel pressure are
+    /// [`EventKind::Midi`]. System messages are left out. At most
+    /// [`EVENTS_PER_BLOCK`] are kept for one block; more are dropped and
+    /// counted in [`Lv2Plugin::lost_events`](super::Lv2Plugin::lost_events).
+    /// What the plugin could not fit into its buffer it drops itself, and
+    /// no host can count. Real-time safe.
+    pub fn output_events(&self) -> &[Event] {
+        self.sent.as_slice()
     }
 
     /// Tells the plugin where every port's data is, with pointers taken
@@ -289,8 +320,23 @@ impl Lv2Processor {
         }
     }
 
+    /// Reads the MIDI the plugin wrote into its outputs during the piece
+    /// that starts `start` frames into the block and is `frames` long.
+    fn read_outputs(&mut self, start: usize, frames: usize) {
+        let urids = self.urids;
+        let outputs = self.atom_outputs.iter().zip(&self.layout.midi_outputs);
+        for (buffer, _) in outputs.filter(|(_, midi)| **midi) {
+            buffer.read_events(&urids, |frame, type_, body| {
+                if type_ == urids.midi_event {
+                    self.sent.midi(start, frames, frame, body);
+                }
+            });
+        }
+    }
+
     /// Passes the counts and the values on to the other half.
     fn publish(&mut self) {
+        self.lost += self.sent.take_lost();
         let shared = &self.shared;
         if self.lost > 0 {
             shared.lost_events.fetch_add(self.lost, Ordering::Relaxed);
@@ -317,6 +363,7 @@ impl Lv2Processor {
     }
 
     fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.sent.clear();
         self.take_from_main();
         let events = context.events.as_slice();
         if self.wrong_rate {
@@ -385,6 +432,7 @@ impl Lv2Processor {
                 // to the thread that holds this value.
                 unsafe { run(instance.handle, frames as u32) };
             }
+            self.read_outputs(start, frames);
             self.store(buffer, start, frames);
 
             start = end;

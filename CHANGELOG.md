@@ -324,6 +324,24 @@ break the API.
 
 ### Hosting
 
+- `manguebyte-host` reads the notes and MIDI that hosted LV2 and Audio
+  Unit plugins send: `Lv2Processor::output_events` reads the output atom
+  sequences that carry `midi:MidiEvent` after each run, and
+  `AuProcessor::output_events` what the unit sends through
+  `kAudioUnitProperty_MIDIOutputCallback`, registered when the unit offers
+  one; each event on its frame of the whole block, however the block is
+  cut, at most 4,096 per block, the rest counted in `lost_events`, and
+  nothing allocated while processing. MIDI 1.0 becomes framework events as
+  the CLAP and VST 3 hosts already make it (notes, poly pressure as note
+  pressure, the rest as `EventKind::Midi`). `Plugin::activate_processor`
+  gives an `any::AnyProcessor`, whose `output_events` hands over a hosted
+  plugin's events in one type for all four formats; `Plugin::activate`
+  is unchanged. `Lv2Library::from_entry` hosts an LV2 plugin linked into
+  the program, from its bundle's Turtle files. Tested through the real LV2 and AU wrappers in process, at
+  four block and piece patterns, with an overflowing plugin, and the same
+  plugin as CLAP, LV2 and AU giving the same events, and as VST 3 the
+  same but for note ids and 7-bit values (TECH_DEBT 82).
+
 - `manguebyte-host` opens the editors of the CLAP and VST 3 plugins it
   hosts (issue #5), through the same methods on `ClapPlugin` and
   `Vst3Plugin`: `open_editor` in a parent window (`editor::ParentWindow`,

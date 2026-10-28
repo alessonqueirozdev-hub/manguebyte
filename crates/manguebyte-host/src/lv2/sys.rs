@@ -176,6 +176,7 @@ pub const LV2_ATOM__Long: &CStr = c"http://lv2plug.in/ns/ext/atom#Long";
 pub const LV2_ATOM__Float: &CStr = c"http://lv2plug.in/ns/ext/atom#Float";
 pub const LV2_ATOM__Double: &CStr = c"http://lv2plug.in/ns/ext/atom#Double";
 pub const LV2_ATOM__frameTime: &CStr = c"http://lv2plug.in/ns/ext/atom#frameTime";
+pub const LV2_ATOM__beatTime: &CStr = c"http://lv2plug.in/ns/ext/atom#beatTime";
 
 pub const LV2_MIDI__MidiEvent: &CStr = c"http://lv2plug.in/ns/ext/midi#MidiEvent";
 

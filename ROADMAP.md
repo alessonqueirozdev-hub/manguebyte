@@ -84,8 +84,9 @@ Everything a standalone audio application needs, short of a user interface.
   default translation or as MPE, and sent through CLAP, VST 3, AU (its
   MIDI output callback, MIDI 1.0), LV2 (the notify port, MIDI 1.0) and the
   standalone runner. A `manguebyte-dsp` `Processor` cannot send events by
-  itself, and `manguebyte-host` does not read what a hosted LV2 plugin
-  sends
+  itself. `manguebyte-host` reads what a hosted plugin sends in all four
+  formats, through one `AnyProcessor::output_events` (MIDI 1.0 from LV2
+  and AU)
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions

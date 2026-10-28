@@ -1,5 +1,6 @@
 //! Writing the atoms a plugin reads: sequences of MIDI events, and the
-//! `time:Position` objects that tell it where the transport is.
+//! `time:Position` objects that tell it where the transport is; and
+//! reading the sequences a plugin writes.
 //!
 //! Written from the LV2 atom specification. Every atom is a header, its
 //! size and type, followed by a body; in a sequence each event's body is
@@ -83,6 +84,13 @@ impl AtomBuffer {
         self.words.as_mut_ptr().cast()
     }
 
+    fn bytes(&self) -> &[u8] {
+        let length = self.words.len() * 8;
+        // SAFETY: the words are `length` bytes of initialised memory, and
+        // every byte value is a valid `u8`.
+        unsafe { std::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), length) }
+    }
+
     fn bytes_mut(&mut self) -> &mut [u8] {
         let length = self.words.len() * 8;
         // SAFETY: the words are `length` bytes of initialised memory that
@@ -98,6 +106,47 @@ impl AtomBuffer {
         let bytes = self.bytes_mut();
         bytes[..4].copy_from_slice(&room.to_ne_bytes());
         bytes[4..8].copy_from_slice(&urids.chunk.to_ne_bytes());
+    }
+
+    /// Reads what a plugin wrote into an output readied with
+    /// [`prepare_output`](Self::prepare_output): calls `each` with the
+    /// frame, type and body of every event, in order, if the plugin wrote
+    /// a sequence stamped in frames.
+    ///
+    /// The plugin's bytes are not trusted. A buffer it left as it was given
+    /// (a chunk), or filled with another atom, or a sequence stamped in
+    /// beats, holds no events; a sequence that claims more bytes than the
+    /// buffer has is read as far as it lies within it, and an event whose
+    /// body runs past that ends it.
+    pub(crate) fn read_events(&self, urids: &Urids, mut each: impl FnMut(i64, u32, &[u8])) {
+        let bytes = self.bytes();
+        let word = |at: usize| {
+            u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        // An `AtomBuffer` always has room for an empty sequence.
+        if word(4) != urids.sequence {
+            return;
+        }
+        // LV2 has a unit of 0 mean the port's default, which is frames.
+        let unit = word(8);
+        if unit != urids.frame_time && unit != 0 {
+            return;
+        }
+        let end = (word(0) as usize).saturating_add(HEADER).min(bytes.len());
+        let mut at = 2 * HEADER;
+        while at + 2 * HEADER <= end {
+            let mut frame = [0u8; 8];
+            frame.copy_from_slice(&bytes[at..at + 8]);
+            let frame = i64::from_ne_bytes(frame);
+            let size = word(at + 8) as usize;
+            let type_ = word(at + 12);
+            let body = at + 2 * HEADER;
+            let Some(body_end) = body.checked_add(size).filter(|&body_end| body_end <= end) else {
+                return;
+            };
+            each(frame, type_, &bytes[body..body_end]);
+            at += (2 * HEADER + size).next_multiple_of(8);
+        }
     }
 
     /// Starts writing a sequence of events stamped in frames.
@@ -292,6 +341,50 @@ mod tests {
         let bytes = buffer.bytes_mut().to_vec();
         assert_eq!(word(&bytes, 0) as usize, bytes.len() - 8);
         assert_eq!(word(&bytes, 4), urids.chunk);
+    }
+
+    fn read(buffer: &AtomBuffer, urids: &Urids) -> Vec<(i64, u32, Vec<u8>)> {
+        let mut found = Vec::new();
+        buffer.read_events(urids, |frame, type_, body| {
+            found.push((frame, type_, body.to_vec()));
+        });
+        found
+    }
+
+    #[test]
+    fn a_sequence_written_is_read_back_and_a_bad_one_as_far_as_it_is_whole() {
+        let urids = Urids::new();
+        let mut buffer = AtomBuffer::new(64);
+        // Left as the host readied it: nothing.
+        buffer.prepare_output(&urids);
+        assert!(read(&buffer, &urids).is_empty());
+
+        {
+            let mut sequence = buffer.sequence(&urids);
+            assert!(sequence.midi(3, &[0x90, 60, 100], &urids));
+            assert!(sequence.midi(7, &[0xC0, 5], &urids));
+        }
+        let midi = urids.midi_event;
+        assert_eq!(
+            read(&buffer, &urids),
+            [(3, midi, vec![0x90, 60, 100]), (7, midi, vec![0xC0, 5])]
+        );
+
+        // A sequence that claims more than the buffer holds is read as far
+        // as the buffer goes.
+        buffer.bytes_mut()[..4].copy_from_slice(&u32::MAX.to_ne_bytes());
+        assert_eq!(read(&buffer, &urids).len(), 2);
+        // An event whose body runs past the sequence ends it.
+        buffer.bytes_mut()[..4].copy_from_slice(&(8u32 + 24 + 16).to_ne_bytes());
+        assert_eq!(read(&buffer, &urids).len(), 1);
+        // A sequence stamped in beats holds no frames.
+        buffer.bytes_mut()[..4].copy_from_slice(&(8u32 + 48).to_ne_bytes());
+        let beats = map(LV2_ATOM__beatTime);
+        buffer.bytes_mut()[8..12].copy_from_slice(&beats.to_ne_bytes());
+        assert!(read(&buffer, &urids).is_empty());
+        // A unit of 0 is the port's default: frames.
+        buffer.bytes_mut()[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        assert_eq!(read(&buffer, &urids).len(), 2);
     }
 
     #[test]

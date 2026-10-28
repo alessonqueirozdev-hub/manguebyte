@@ -217,6 +217,7 @@ impl ClapProcessor {
             input: Vec::with_capacity(EVENTS_PER_BLOCK),
             sink: Sink {
                 events: Vec::with_capacity(EVENTS_PER_BLOCK),
+                framework: Vec::with_capacity(EVENTS_PER_BLOCK),
                 to_main: setup.to_main,
                 params: setup.params,
                 base: 0,
@@ -255,6 +256,13 @@ impl ClapProcessor {
     /// Real-time safe.
     pub fn output_events(&self) -> &[OutputEvent] {
         &self.sink.events
+    }
+
+    /// The [`OutputKind::Event`]s of [`output_events`](Self::output_events),
+    /// as events, in the same order: kept apart while processing, so that
+    /// reading them allocates nothing and converts nothing.
+    pub(crate) fn framework_events(&self) -> &[Event] {
+        &self.sink.framework
     }
 
     /// How the last block went. Real-time safe.
@@ -299,7 +307,7 @@ impl ClapProcessor {
             return;
         };
         let previous = self.shared.take_audio_role();
-        self.sink.events.clear();
+        self.sink.clear();
         self.sink.base = 0;
         self.sink.frames = 1;
         self.input.clear();
@@ -436,7 +444,7 @@ impl ClapProcessor {
     }
 
     fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
-        self.sink.events.clear();
+        self.sink.clear();
         let events = context.events.as_slice();
         if self.wrong_rate {
             self.skip(buffer, events, ProcessFailure::SampleRateMismatch);
@@ -852,6 +860,10 @@ fn point(
 struct Sink {
     /// The events of the current call, for the caller on the audio thread.
     events: Vec<OutputEvent>,
+    /// Those of them the framework's own event type can say, as such, for
+    /// [`AnyProcessor`](crate::any::AnyProcessor). Never longer than
+    /// `events`, so never short of room when it has some.
+    framework: Vec<Event>,
     /// Parameter changes and gestures also go to the main thread.
     to_main: Producer<FromAudio>,
     /// The plugin's parameters, sorted by id. What the plugin reports about
@@ -904,7 +916,16 @@ impl Sink {
             .base
             .saturating_add(time.min(self.frames.saturating_sub(1)));
         self.events.push(OutputEvent { offset, kind });
+        if let OutputKind::Event(kind) = kind {
+            self.framework.push(Event { offset, kind });
+        }
         true
+    }
+
+    /// Forgets the last call's events.
+    fn clear(&mut self) {
+        self.events.clear();
+        self.framework.clear();
     }
 }
 
