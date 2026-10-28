@@ -1249,6 +1249,9 @@ fn from_vst3(event: crate::vst3::HostEvent) -> Option<Notice> {
         HostEvent::EditorRequested => {
             Notice::Message("the plugin asked for its editor, which this host does not show".into())
         }
+        // Only an editor opened through the VST 3 type itself asks for
+        // anything, and its requests go to whoever opened it.
+        HostEvent::Editor(_) => return None,
     })
 }
 

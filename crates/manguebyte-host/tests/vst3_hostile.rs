@@ -6,7 +6,9 @@
 //! objects, a component and a separate controller that talk through
 //! connection points and messages from the host. Its controller edits its
 //! own parameters through the host's component handler and asks for
-//! restarts; its processor writes parameter changes and notes back. And a
+//! restarts; its processor writes parameter changes and notes back. It has
+//! an editor that needs no real window, resizes, asks its frame for sizes
+//! and can refuse any step of being opened. And a
 //! script makes it misbehave: claim more classes and parameters than
 //! exist, answer with numbers that are not numbers, refuse to start, fail
 //! while processing, refuse to be set up or activated, have no controller.
@@ -38,6 +40,7 @@ use std::thread::ThreadId;
 use manguebyte_core::{AudioBuffer, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, Processor, Transport};
+use manguebyte_host::editor::{EditorRequest, EditorSize, ParentWindow, WindowApi};
 use manguebyte_host::vst3::vst3::Steinberg::Vst::{
     self as vst, IAttributeList, IAttributeListTrait, IAudioProcessor, IAudioProcessorTrait,
     IComponent, IComponentHandler, IComponentHandler2, IComponentHandler2Trait,
@@ -47,9 +50,10 @@ use manguebyte_host::vst3::vst3::Steinberg::Vst::{
     IParamValueQueueTrait, IParameterChangesTrait,
 };
 use manguebyte_host::vst3::vst3::Steinberg::{
-    FIDString, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, IPluginFactory,
-    IPluginFactoryTrait, TBool, TUID, kInvalidArgument, kNotImplemented, kResultFalse, kResultOk,
-    tresult,
+    FIDString, FUnknown, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView,
+    IPlugViewContentScaleSupport, IPlugViewContentScaleSupportTrait, IPlugViewTrait,
+    IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, TBool, TUID, ViewRect, kInvalidArgument,
+    kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult,
 };
 use manguebyte_host::vst3::vst3::{Class, ComPtr, ComRef, ComWrapper, Interface};
 use manguebyte_host::vst3::{
@@ -116,6 +120,15 @@ struct Script {
     refuse_activation: AtomicBool,
     report: AtomicBool,
     nan_values: AtomicBool,
+    /// Whether the controller makes an editor.
+    has_editor: AtomicBool,
+    /// Whether the editor may be resized.
+    resizable: AtomicBool,
+    /// The one call the editor refuses, if any: `"platform"`, `"setFrame"`,
+    /// `"attached"`, `"getSize"`, `"onSize"` or `"scale"`.
+    view_refuses: Mutex<Option<&'static str>>,
+    /// A size the editor asks its frame for from inside `attached`.
+    resize_when_attached: Mutex<Option<(i32, i32)>>,
 
     // --- What happened ---
     /// The life of the two objects, in order, on the thread it happened.
@@ -141,6 +154,10 @@ struct Script {
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     /// What came through the connection points.
     messages: Mutex<Vec<(String, i64)>>,
+    /// The frame the editor was last given, kept after it was taken back.
+    frame: Mutex<Option<ComPtr<IPlugFrame>>>,
+    /// What `resizeView` answered from inside `attached`.
+    resize_answer: Mutex<Option<tresult>>,
 }
 
 impl Script {
@@ -155,6 +172,10 @@ impl Script {
             refuse_activation: AtomicBool::new(false),
             report: AtomicBool::new(false),
             nan_values: AtomicBool::new(false),
+            has_editor: AtomicBool::new(true),
+            resizable: AtomicBool::new(true),
+            view_refuses: Mutex::new(None),
+            resize_when_attached: Mutex::new(None),
             log: Mutex::new(Vec::new()),
             class_info_calls: AtomicUsize::new(0),
             param_info_calls: AtomicUsize::new(0),
@@ -168,7 +189,22 @@ impl Script {
             controller_states: Mutex::new(Vec::new()),
             handler: Mutex::new(None),
             messages: Mutex::new(Vec::new()),
+            frame: Mutex::new(None),
+            resize_answer: Mutex::new(None),
         })
+    }
+
+    /// Whether the editor is to refuse `call`.
+    fn refuses(&self, call: &str) -> bool {
+        *self.view_refuses.lock().unwrap() == Some(call)
+    }
+
+    /// The entries of the log about the editor, in order.
+    fn view_log(&self) -> Vec<String> {
+        self.log()
+            .into_iter()
+            .filter(|what| what.starts_with("view"))
+            .collect()
     }
 
     fn note(&self, what: &str) {
@@ -745,11 +781,163 @@ impl IEditControllerTrait for Controller {
             unsafe { ComRef::from_raw(handler) }.map(|handler| handler.to_com_ptr());
         kResultOk
     }
-    unsafe fn createView(
-        &self,
-        _name: FIDString,
-    ) -> *mut manguebyte_host::vst3::vst3::Steinberg::IPlugView {
-        ptr::null_mut()
+    unsafe fn createView(&self, name: FIDString) -> *mut IPlugView {
+        let editor = !name.is_null() && unsafe { CStr::from_ptr(name) } == c"editor";
+        if !editor || !self.script.has_editor.load(Relaxed) {
+            return ptr::null_mut();
+        }
+        self.script.note("view created");
+        let view = ComWrapper::new(View {
+            script: Arc::clone(&self.script),
+            frame: Mutex::new(None),
+            this: Mutex::new(0),
+            size: Mutex::new((400, 300)),
+        });
+        let pointer = view.to_com_ptr::<IPlugView>().unwrap();
+        *view.this.lock().unwrap() = pointer.as_ptr().addr();
+        pointer.into_raw()
+    }
+}
+
+// --- The editor --------------------------------------------------------------
+
+/// The controller's editor. It lives in a "window" whose handle it never
+/// uses, so it runs on every system, and stands for a Win32 one: it says it
+/// supports `HWND` only. It is 400 by 300 to start with and, when it may be
+/// resized, takes any size from 200 by 100 to 1,000 by 800.
+struct View {
+    script: Arc<Script>,
+    frame: Mutex<Option<ComPtr<IPlugFrame>>>,
+    /// The view's own `IPlugView` pointer, for `resizeView`.
+    this: Mutex<usize>,
+    size: Mutex<(i32, i32)>,
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        self.script.note("view released");
+    }
+}
+
+impl Class for View {
+    type Interfaces = (IPlugView, IPlugViewContentScaleSupport);
+}
+
+impl IPlugViewTrait for View {
+    unsafe fn isPlatformTypeSupported(&self, kind: FIDString) -> tresult {
+        let hwnd = unsafe { CStr::from_ptr(kind) } == c"HWND";
+        if hwnd && !self.script.refuses("platform") {
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
+    unsafe fn attached(&self, parent: *mut c_void, _kind: FIDString) -> tresult {
+        self.script
+            .note(&format!("view attached to {:#x}", parent.addr()));
+        if self.script.refuses("attached") {
+            return kResultFalse;
+        }
+        let wanted = *self.script.resize_when_attached.lock().unwrap();
+        if let Some((width, height)) = wanted {
+            let frame = self.frame.lock().unwrap().clone().expect("a frame");
+            let this: *mut IPlugView = ptr::with_exposed_provenance_mut(*self.this.lock().unwrap());
+            let mut rect = ViewRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            let answer = unsafe { frame.resizeView(this, &mut rect) };
+            *self.script.resize_answer.lock().unwrap() = Some(answer);
+        }
+        kResultOk
+    }
+    unsafe fn removed(&self) -> tresult {
+        self.script.note("view removed");
+        kResultOk
+    }
+    unsafe fn onWheel(&self, _distance: f32) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyDown(&self, _key: u16, _code: i16, _modifiers: i16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyUp(&self, _key: u16, _code: i16, _modifiers: i16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn getSize(&self, rect: *mut ViewRect) -> tresult {
+        if self.script.refuses("getSize") || rect.is_null() {
+            return kResultFalse;
+        }
+        let (width, height) = *self.size.lock().unwrap();
+        unsafe {
+            rect.write(ViewRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            })
+        };
+        kResultOk
+    }
+    unsafe fn onSize(&self, rect: *mut ViewRect) -> tresult {
+        let rect = unsafe { *rect };
+        let size = (rect.right - rect.left, rect.bottom - rect.top);
+        self.script
+            .note(&format!("view onSize {}x{}", size.0, size.1));
+        if self.script.refuses("onSize") {
+            return kResultFalse;
+        }
+        *self.size.lock().unwrap() = size;
+        kResultOk
+    }
+    unsafe fn onFocus(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        let frame = unsafe { ComRef::from_raw(frame) }.map(|frame| frame.to_com_ptr());
+        self.script.note(if frame.is_some() {
+            "view frame given"
+        } else {
+            "view frame taken"
+        });
+        if let Some(frame) = &frame {
+            *self.script.frame.lock().unwrap() = Some(frame.clone());
+        }
+        *self.frame.lock().unwrap() = frame;
+        if self.script.refuses("setFrame") {
+            kResultFalse
+        } else {
+            kResultOk
+        }
+    }
+    unsafe fn canResize(&self) -> tresult {
+        if self.script.resizable.load(Relaxed) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
+    unsafe fn checkSizeConstraint(&self, rect: *mut ViewRect) -> tresult {
+        let rect = unsafe { &mut *rect };
+        let width = (rect.right - rect.left).clamp(200, 1_000);
+        let height = (rect.bottom - rect.top).clamp(100, 800);
+        self.script.note("view checkSizeConstraint");
+        rect.right = rect.left + width;
+        rect.bottom = rect.top + height;
+        kResultOk
+    }
+}
+
+impl IPlugViewContentScaleSupportTrait for View {
+    unsafe fn setContentScaleFactor(&self, factor: f32) -> tresult {
+        self.script.note(&format!("view scale {factor}"));
+        if self.script.refuses("scale") {
+            kResultFalse
+        } else {
+            kResultOk
+        }
     }
 }
 
@@ -1601,5 +1789,343 @@ fn the_module_outlives_every_half_of_every_plugin_made_from_it() {
             .filter(|what| *what == "component terminate")
             .count(),
         2
+    );
+}
+
+// --- The editor --------------------------------------------------------------
+
+/// A window of the kind the editor goes in. The editor never uses it.
+fn window() -> ParentWindow {
+    ParentWindow::win32(0x1234).unwrap()
+}
+
+/// Asks for a size through the frame the editor was last given, from
+/// outside any call of the host's, as the editor's own window would.
+fn resize_through_frame(script: &Script, width: i32, height: i32) -> tresult {
+    let frame = script.frame.lock().unwrap().clone().expect("a frame");
+    let mut rect = ViewRect {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    unsafe { frame.resizeView(ptr::null_mut(), &mut rect) }
+}
+
+#[test]
+fn an_editor_opens_resizes_and_closes_in_the_order_vst3_asks() {
+    let script = Script::new();
+    let mut plugin = fresh_plugin(&script);
+    assert!(plugin.has_editor());
+    assert!(!plugin.is_editor_open());
+    assert_eq!(plugin.editor_size(), None);
+    assert!(!plugin.can_resize_editor());
+    let size = EditorSize::new(10, 10);
+    assert_eq!(plugin.set_editor_size(size), Err(Vst3Error::EditorNotOpen));
+    assert_eq!(plugin.set_editor_scale(2.0), Err(Vst3Error::EditorNotOpen));
+    plugin.close_editor();
+
+    // The frame before the scale, the scale before the window, then the
+    // size is asked for.
+    assert_eq!(
+        plugin.open_editor(window(), Some(1.5)),
+        Ok(EditorSize::new(400, 300))
+    );
+    assert_eq!(
+        script.view_log(),
+        [
+            "view created",
+            "view frame given",
+            "view scale 1.5",
+            "view attached to 0x1234"
+        ]
+    );
+    assert!(plugin.is_editor_open());
+    assert_eq!(plugin.editor_size(), Some(EditorSize::new(400, 300)));
+    assert_eq!(
+        plugin.open_editor(window(), None),
+        Err(Vst3Error::EditorAlreadyOpen)
+    );
+
+    // A resizable editor is asked what it can take, and given that.
+    assert!(plugin.can_resize_editor());
+    assert_eq!(
+        plugin.set_editor_size(EditorSize::new(5_000, 50)),
+        Ok(EditorSize::new(1_000, 100))
+    );
+    assert_eq!(plugin.editor_size(), Some(EditorSize::new(1_000, 100)));
+    let log = script.view_log();
+    assert_eq!(
+        log[log.len() - 2..],
+        ["view checkSizeConstraint", "view onSize 1000x100"]
+    );
+
+    // Scales that are not positive numbers, in `f32` too, are refused
+    // before the editor sees them.
+    assert_eq!(plugin.set_editor_scale(2.0), Ok(()));
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e300, 1e-300] {
+        assert!(
+            matches!(
+                plugin.set_editor_scale(scale),
+                Err(Vst3Error::InvalidArgument(_))
+            ),
+            "{scale}"
+        );
+    }
+    assert_eq!(script.view_log().last().unwrap(), "view scale 2");
+
+    // Closed: removed, the frame taken back, released.
+    plugin.close_editor();
+    let log = script.view_log();
+    assert_eq!(
+        log[log.len() - 3..],
+        ["view removed", "view frame taken", "view released"]
+    );
+    assert!(!plugin.is_editor_open());
+    assert_eq!(plugin.editor_size(), None);
+    assert!(!plugin.can_resize_editor());
+    plugin.close_editor();
+    assert_eq!(script.view_log().len(), log.len(), "closed twice");
+    // The frame the plugin kept refuses everything now.
+    assert_eq!(resize_through_frame(&script, 500, 500), kResultFalse);
+    assert!(
+        !plugin
+            .pump()
+            .iter()
+            .any(|event| matches!(event, HostEvent::Editor(_)))
+    );
+
+    // Opened again with no scale, and dropped with the editor open: the
+    // editor goes first, then the controller and the component.
+    assert_eq!(
+        plugin.open_editor(window(), None),
+        Ok(EditorSize::new(400, 300))
+    );
+    assert!(
+        !script.view_log()[log.len()..]
+            .iter()
+            .any(|what| what.starts_with("view scale"))
+    );
+    drop(plugin);
+    let log = script.log();
+    let at = |what: &str| log.iter().rposition(|seen| seen == what).expect(what);
+    assert!(at("view removed") < at("view frame taken"));
+    assert!(at("view frame taken") < at("view released"));
+    assert!(at("view released") < at("controller terminate"));
+    assert!(at("view released") < at("component terminate"));
+}
+
+#[test]
+fn an_editor_that_cannot_open_leaves_nothing_behind() {
+    let script = Script::new();
+    let mut plugin = fresh_plugin(&script);
+    let cases: [(&str, &[&str]); 3] = [
+        ("setFrame", &["view frame given", "view frame taken"]),
+        (
+            "attached",
+            &[
+                "view frame given",
+                "view attached to 0x1234",
+                "view frame taken",
+            ],
+        ),
+        (
+            "getSize",
+            &[
+                "view frame given",
+                "view attached to 0x1234",
+                "view removed",
+                "view frame taken",
+            ],
+        ),
+    ];
+    for (call, between) in cases {
+        *script.view_refuses.lock().unwrap() = Some(call);
+        // The editor asks for something on the way, which has to go too.
+        *script.resize_when_attached.lock().unwrap() = Some((640, 480));
+        let before = script.view_log().len();
+        assert_eq!(
+            plugin.open_editor(window(), None),
+            Err(Vst3Error::EditorRefused(call))
+        );
+        let mut expected = vec!["view created"];
+        expected.extend_from_slice(between);
+        expected.push("view released");
+        assert_eq!(script.view_log()[before..], expected, "{call}");
+        assert!(!plugin.is_editor_open(), "{call}");
+        assert_eq!(plugin.editor_size(), None, "{call}");
+        assert_eq!(resize_through_frame(&script, 500, 500), kResultFalse);
+        assert!(
+            !plugin
+                .pump()
+                .iter()
+                .any(|event| matches!(event, HostEvent::Editor(_))),
+            "{call}"
+        );
+        assert_eq!(plugin.next_editor_timer(), None);
+        assert!(plugin.editor_fds().is_empty());
+    }
+    *script.resize_when_attached.lock().unwrap() = None;
+
+    // A window of a kind the editor cannot live in, as it says itself, or
+    // as it says of every kind but one.
+    *script.view_refuses.lock().unwrap() = Some("platform");
+    let before = script.view_log().len();
+    assert_eq!(
+        plugin.open_editor(window(), None),
+        Err(Vst3Error::PlatformUnsupported(WindowApi::Win32))
+    );
+    *script.view_refuses.lock().unwrap() = None;
+    assert_eq!(
+        plugin.open_editor(ParentWindow::x11(5).unwrap(), None),
+        Err(Vst3Error::PlatformUnsupported(WindowApi::X11))
+    );
+    assert_eq!(
+        script.view_log()[before..],
+        [
+            "view created",
+            "view released",
+            "view created",
+            "view released"
+        ]
+    );
+
+    // A scale that is no number is refused before anything is made.
+    let before = script.view_log().len();
+    assert!(matches!(
+        plugin.open_editor(window(), Some(f64::NAN)),
+        Err(Vst3Error::InvalidArgument(_))
+    ));
+    assert_eq!(script.view_log().len(), before);
+
+    // A controller with no editor, and a plugin with no controller.
+    script.has_editor.store(false, Relaxed);
+    assert_eq!(plugin.open_editor(window(), None), Err(Vst3Error::NoView));
+    script.has_editor.store(true, Relaxed);
+    let lonely = Script::new();
+    lonely.has_controller.store(false, Relaxed);
+    let mut alone = fresh_plugin(&lonely);
+    assert!(!alone.has_editor());
+    assert_eq!(
+        alone.open_editor(window(), None),
+        Err(Vst3Error::NoController)
+    );
+
+    // After all of that, the editor opens, and a refused scale does not
+    // keep it from opening.
+    *script.view_refuses.lock().unwrap() = Some("scale");
+    assert_eq!(
+        plugin.open_editor(window(), Some(2.0)),
+        Ok(EditorSize::new(400, 300))
+    );
+    assert_eq!(
+        plugin.set_editor_scale(1.0),
+        Err(Vst3Error::EditorRefused("setContentScaleFactor"))
+    );
+}
+
+#[test]
+fn what_the_editor_asks_for_comes_back_from_pump_and_is_answered_with_its_size() {
+    let script = Script::new();
+    let mut plugin = fresh_plugin(&script);
+    plugin.pump();
+
+    // Asked from inside `attached`: granted, and passed on. The editor
+    // keeps its size until the application gives it the new one.
+    *script.resize_when_attached.lock().unwrap() = Some((640, 480));
+    assert_eq!(
+        plugin.open_editor(window(), None),
+        Ok(EditorSize::new(400, 300))
+    );
+    assert_eq!(*script.resize_answer.lock().unwrap(), Some(kResultTrue));
+    let wanted = EditorSize::new(640, 480);
+    assert_eq!(
+        plugin.pump(),
+        [HostEvent::Editor(EditorRequest::Resize(wanted))]
+    );
+    assert_eq!(plugin.pump(), []);
+    assert_eq!(plugin.editor_size(), Some(EditorSize::new(400, 300)));
+    assert_eq!(plugin.set_editor_size(wanted), Ok(wanted));
+    assert_eq!(script.view_log().last().unwrap(), "view onSize 640x480");
+
+    // Asked from the editor's own window, twice before the application
+    // looks: only the latest counts.
+    assert_eq!(resize_through_frame(&script, 700, 500), kResultTrue);
+    assert_eq!(resize_through_frame(&script, 720, 520), kResultTrue);
+    assert_eq!(
+        plugin.pump(),
+        [HostEvent::Editor(EditorRequest::Resize(EditorSize::new(
+            720, 520
+        )))]
+    );
+    let mut inside_out = ViewRect {
+        left: 10,
+        top: 0,
+        right: 0,
+        bottom: 10,
+    };
+    let frame = script.frame.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        unsafe { frame.resizeView(ptr::null_mut(), &mut inside_out) },
+        kInvalidArgument
+    );
+
+    // From another thread, refused and remarked on.
+    let elsewhere = frame.clone();
+    std::thread::spawn(move || {
+        let mut rect = ViewRect {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        };
+        assert_eq!(
+            unsafe { elsewhere.resizeView(ptr::null_mut(), &mut rect) },
+            kResultFalse
+        );
+    })
+    .join()
+    .unwrap();
+    let events = plugin.pump();
+    assert!(
+        matches!(&events[..], [HostEvent::Remark(text)] if text.contains("editor's frame")),
+        "{events:?}"
+    );
+
+    // An editor of fixed size is given the size as it is, and may refuse
+    // it, keeping its own.
+    script.resizable.store(false, Relaxed);
+    assert!(!plugin.can_resize_editor());
+    let before = script.view_log().len();
+    assert_eq!(
+        plugin.set_editor_size(EditorSize::new(300, 200)),
+        Ok(EditorSize::new(300, 200))
+    );
+    assert_eq!(script.view_log()[before..], ["view onSize 300x200"]);
+    *script.view_refuses.lock().unwrap() = Some("onSize");
+    assert_eq!(
+        plugin.set_editor_size(EditorSize::new(320, 240)),
+        Err(Vst3Error::EditorRefused("onSize"))
+    );
+    assert_eq!(plugin.editor_size(), Some(EditorSize::new(300, 200)));
+    *script.view_refuses.lock().unwrap() = None;
+
+    // The plugin asks for its editor: met while it is open, passed on
+    // either way. Another view is refused.
+    let second = script.handler().cast::<IComponentHandler2>().unwrap();
+    unsafe {
+        assert_eq!(second.requestOpenEditor(c"editor".as_ptr()), kResultTrue);
+    }
+    assert_eq!(plugin.pump(), [HostEvent::EditorRequested]);
+    plugin.close_editor();
+    unsafe {
+        assert_eq!(second.requestOpenEditor(c"editor".as_ptr()), kResultFalse);
+        assert_eq!(second.requestOpenEditor(c"other".as_ptr()), kResultFalse);
+    }
+    let events = plugin.pump();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0], HostEvent::EditorRequested);
+    assert!(
+        matches!(&events[1], HostEvent::Remark(text) if text.contains("other than its editor"))
     );
 }
