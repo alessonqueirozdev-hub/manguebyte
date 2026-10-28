@@ -14,8 +14,8 @@ use super::plugin::Shared;
 use super::sys::AudioBuffer as AuBuffer;
 use super::sys::*;
 use super::transport::Answers;
-use super::{AuError, CARRIED_EVENTS, refused};
-use crate::delivery::advance;
+use super::{AuError, CARRIED_EVENTS, EVENTS_PER_BLOCK, refused};
+use crate::delivery::{Sent, advance};
 use crate::threads::guard;
 
 /// Everything [`AuProcessor::new`] needs.
@@ -43,6 +43,21 @@ struct Feed {
     /// One buffer per channel, per input element.
     elements: [Vec<Box<[f32]>>; 2],
     /// How many frames of each buffer the slice holds.
+    frames: usize,
+}
+
+/// Where the MIDI a unit sends during a render goes: its
+/// `kAudioUnitProperty_MIDIOutputCallback` writes here.
+///
+/// Like the [`Feed`], it lives on the heap at an address that does not
+/// move, which the unit holds as the callback's data. The processor writes
+/// it only between renders and the callback only during one, which Apple
+/// has a unit call it from, on the thread that renders.
+struct MidiSink {
+    sent: Sent,
+    /// Where the slice being rendered starts within the caller's block.
+    base: usize,
+    /// How long that slice is.
     frames: usize,
 }
 
@@ -98,6 +113,16 @@ struct Feed {
 /// An event at or beyond the end of a block is delivered on the first
 /// frame of the next; 1,024 can wait that way. A slice the unit fails to
 /// render is silent, and counted.
+///
+/// # What the unit sends
+///
+/// A unit that has `kAudioUnitProperty_MIDIOutputCallbackInfo` is given a
+/// `kAudioUnitProperty_MIDIOutputCallback` before it is initialised. The
+/// `MIDIPacketList`s it hands that callback while it renders, each
+/// packet's time stamp the frame of the render it falls on, are read into
+/// [`output_events`](Self::output_events), on their frames of the caller's
+/// block, however many slices the block was rendered in. Every MIDI output
+/// the unit names goes into the one list.
 pub struct AuProcessor {
     shared: Arc<Shared>,
     slots: Arc<[ParamSlot]>,
@@ -112,6 +137,10 @@ pub struct AuProcessor {
     /// words.
     list: Box<[u64]>,
     takes_midi: bool,
+    /// What the unit sends; see [`MidiSink`]. Freed when this value goes.
+    midi: *mut MidiSink,
+    /// Whether the unit took the MIDI output callback.
+    sends_midi: bool,
     carry: Vec<Event>,
     /// The frame of the next slice, counted from activation, for the time
     /// stamp.
@@ -126,8 +155,8 @@ pub struct AuProcessor {
 
 // SAFETY: the unit is shared with the other half through `Shared`, whose
 // calls are kept apart by Apple's conventions, which the two halves keep
-// to; the feed is owned memory only this value and the unit's render, on
-// this value's thread, reach.
+// to; the feed and the MIDI sink are owned memory only this value and the
+// unit's render, on this value's thread, reach.
 unsafe impl Send for AuProcessor {}
 
 /// The render callback of every input element.
@@ -195,6 +224,50 @@ unsafe extern "C" fn feed_input(
     })
 }
 
+/// The MIDI output callback: reads a `MIDIPacketList` the unit sent, laid
+/// out as CoreMIDI's headers declare it (see `MIDI_PACKET_LIST_PACKETS`),
+/// each packet stamped with its frame in the render.
+///
+/// # Safety
+///
+/// `user` must be the processor's [`MidiSink`], and `list` a whole
+/// `MIDIPacketList`, as `AUMIDIOutputCallback` gives them, during a render.
+unsafe extern "C" fn take_midi(
+    user: *mut c_void,
+    _timestamp: *const AudioTimeStamp,
+    _output: u32,
+    list: *const c_void,
+) -> OSStatus {
+    guard(kAudioUnitErr_CannotDoInCurrentContext, || {
+        let sink = user.cast::<MidiSink>();
+        if sink.is_null() || list.is_null() {
+            return paramErr;
+        }
+        // SAFETY: the processor's sink, which it does not touch while the
+        // unit renders, and the unit's list, whose packets are as long as
+        // they say.
+        unsafe {
+            let sink = &mut *sink;
+            let bytes = list.cast::<u8>();
+            let count = bytes.cast::<u32>().read_unaligned();
+            let mut at = MIDI_PACKET_LIST_PACKETS;
+            for _ in 0..count {
+                let packet = bytes.add(at);
+                let time = packet.cast::<u64>().read_unaligned();
+                let length = packet
+                    .add(MIDI_PACKET_LENGTH)
+                    .cast::<u16>()
+                    .read_unaligned() as usize;
+                let data = std::slice::from_raw_parts(packet.add(MIDI_PACKET_DATA), length);
+                let frame = i64::try_from(time).unwrap_or(i64::MAX);
+                sink.sent.midi(sink.base, sink.frames, frame, data);
+                at = (at + MIDI_PACKET_DATA + length).next_multiple_of(MIDI_PACKET_ALIGN);
+            }
+        }
+        noErr
+    })
+}
+
 impl AuProcessor {
     pub(crate) fn new(setup: Setup) -> Result<Self, AuError> {
         let slice = setup.slice.max(1);
@@ -207,8 +280,15 @@ impl AuProcessor {
             elements: [channels(setup.inputs[0]), channels(setup.inputs[1])],
             frames: 0,
         }));
+        let midi = Box::into_raw(Box::new(MidiSink {
+            sent: Sent::new(EVENTS_PER_BLOCK),
+            base: 0,
+            frames: 0,
+        }));
         let words = (AUDIO_BUFFER_LIST_BUFFERS + setup.outputs * size_of::<AuBuffer>()).div_ceil(8);
-        let processor = Self {
+        let mut processor = Self {
+            midi,
+            sends_midi: false,
             takes_midi: setup.shared.unit.takes_midi(),
             shared: setup.shared,
             slots: setup.slots,
@@ -246,6 +326,31 @@ impl AuProcessor {
                 )
                 .map_err(refused("an input's render callback"))?;
         }
+        // A unit that names MIDI outputs takes a callback for what it sends
+        // on them. One that refuses it sends nothing, which is no reason
+        // not to host it.
+        let unit = &processor.shared.unit;
+        if unit
+            .property_info(
+                kAudioUnitProperty_MIDIOutputCallbackInfo,
+                kAudioUnitScope_Global,
+                0,
+            )
+            .is_ok()
+        {
+            let callback = AUMIDIOutputCallbackStruct {
+                midiOutputCallback: Some(take_midi),
+                userData: midi.cast(),
+            };
+            processor.sends_midi = unit
+                .set(
+                    kAudioUnitProperty_MIDIOutputCallback,
+                    kAudioUnitScope_Global,
+                    0,
+                    &callback,
+                )
+                .is_ok();
+        }
         processor
             .shared
             .unit
@@ -266,6 +371,31 @@ impl AuProcessor {
     /// The longest slice the unit renders.
     pub fn max_block_size(&self) -> usize {
         self.slice
+    }
+
+    /// What the unit sent through its MIDI output callback during the last
+    /// call to [`process_with`](Processor::process_with), on the frames of
+    /// the block it was sent on, in the order it was sent.
+    ///
+    /// The callback carries MIDI 1.0, so a note comes with a velocity in 7
+    /// bits and no id, and pressure on one key as a note expression;
+    /// controllers, the wheel, programs and channel pressure are
+    /// [`EventKind::Midi`]. System messages are left out. At most
+    /// [`EVENTS_PER_BLOCK`](super::EVENTS_PER_BLOCK) are kept for one
+    /// block; more are dropped and counted in
+    /// [`AuPlugin::lost_events`](super::AuPlugin::lost_events). Empty for
+    /// a unit with no MIDI output. Real-time safe.
+    pub fn output_events(&self) -> &[Event] {
+        // SAFETY: the unit renders only within `process_with`, which takes
+        // `&mut self`, so nothing writes the sink while this borrow lasts.
+        unsafe { (*self.midi).sent.as_slice() }
+    }
+
+    /// The sink, between renders.
+    fn sink(&mut self) -> &mut MidiSink {
+        // SAFETY: the unit is not rendering, so nothing else reaches the
+        // sink; the reference lasts no longer than this borrow of `self`.
+        unsafe { &mut *self.midi }
     }
 
     /// Keeps events for the first frame of the next block.
@@ -294,6 +424,7 @@ impl AuProcessor {
 
     /// Passes the counts on to the other half.
     fn publish(&mut self) {
+        self.lost += self.sink().sent.take_lost();
         let shared = &self.shared;
         if self.lost > 0 {
             shared.lost_events.fetch_add(self.lost, Ordering::Relaxed);
@@ -441,6 +572,7 @@ impl AuProcessor {
     }
 
     fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.sink().sent.clear();
         let events = context.events.as_slice();
         if self.wrong_rate {
             buffer.clear();
@@ -483,6 +615,9 @@ impl AuProcessor {
             self.load(buffer, sidechain, start, frames);
             let answers = self.answers(&transport, frames);
             self.shared.transport.write(&answers);
+            let sink = self.sink();
+            sink.base = start;
+            sink.frames = frames;
             if !self.render_slice(buffer, start, frames) {
                 failed = true;
             }
@@ -552,6 +687,18 @@ impl Drop for AuProcessor {
                 );
             }
         }
+        if self.sends_midi {
+            let none = AUMIDIOutputCallbackStruct {
+                midiOutputCallback: None,
+                userData: ptr::null_mut(),
+            };
+            let _ = unit.set(
+                kAudioUnitProperty_MIDIOutputCallback,
+                kAudioUnitScope_Global,
+                0,
+                &none,
+            );
+        }
         // The transport of a stopped host, for a unit that asks later.
         self.shared.transport.write(&Answers {
             transport: Transport::STOPPED,
@@ -561,7 +708,13 @@ impl Drop for AuProcessor {
         // SAFETY: the feed came from `Box::into_raw`, and no unit holds it
         // any more.
         drop(unsafe { Box::from_raw(self.feed) });
+        // What did not fit in the last block is counted before the sink
+        // goes.
         self.publish();
+        // SAFETY: the sink came from `Box::into_raw`, and no unit holds it
+        // any more: the callback was taken out above, or the unit refused
+        // it.
+        drop(unsafe { Box::from_raw(self.midi) });
         self.shared.processor_alive.store(false, Ordering::Release);
     }
 }

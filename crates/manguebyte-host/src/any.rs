@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | [`Library`] | A loaded file and the plugins in it | [`ClapLibrary`], [`Vst3Module`], [`Lv2Library`] or [`AuLibrary`] |
 //! | [`Plugin`] | One plugin, on the main thread | [`ClapPlugin`], [`Vst3Plugin`], [`Lv2Plugin`] or [`AuPlugin`] |
-//! | `Box<dyn Processor<f32> + Send>` | The same plugin, on the audio thread | [`ClapProcessor`](crate::clap::ClapProcessor), [`Vst3Processor`](crate::vst3::Vst3Processor), [`Lv2Processor`](crate::lv2::Lv2Processor) or [`AuProcessor`](crate::au::AuProcessor) |
+//! | [`AnyProcessor`], or `Box<dyn Processor<f32> + Send>` | The same plugin, on the audio thread | [`ClapProcessor`], [`Vst3Processor`], [`Lv2Processor`] or [`AuProcessor`] |
 //!
 //! The thread rules are those of the formats' own modules: a [`Plugin`] is
 //! not `Send`, and its audio half is the only thing that processes.
@@ -85,26 +85,29 @@
 //!
 //! # Limits
 //!
-//! Only what both formats share is here. For the rest of a format, such as
+//! Only what the formats share is here. For the rest of a format, such as
 //! CLAP's note ports or VST 3's controller mappings, reach the format's own
-//! type through [`Library::as_clap`], [`Plugin::as_vst3_mut`] and their
-//! neighbours. Events a plugin reports while processing are read from the
-//! format's own processor type, which a box hides.
+//! type through [`Library::as_clap`], [`Plugin::as_vst3_mut`],
+//! [`AnyProcessor::as_clap`] and their neighbours. The events a plugin
+//! sends while processing are read through [`AnyProcessor::output_events`]
+//! in one type for every format; what only one format can say, such as
+//! CLAP's gestures, from that format's processor.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use manguebyte_core::ParamId;
-use manguebyte_dsp::Processor;
+use manguebyte_core::{AudioBuffer, ParamId};
+use manguebyte_dsp::event::Event;
+use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor};
 
 #[cfg(feature = "au")]
-use crate::au::{AuError, AuLibrary, AuPlugin};
+use crate::au::{AuError, AuLibrary, AuPlugin, AuProcessor};
 #[cfg(feature = "clap")]
-use crate::clap::{ClapError, ClapLibrary, ClapPlugin};
+use crate::clap::{ClapError, ClapLibrary, ClapPlugin, ClapProcessor};
 #[cfg(feature = "lv2")]
-use crate::lv2::{Lv2Error, Lv2Library, Lv2Plugin};
+use crate::lv2::{Lv2Error, Lv2Library, Lv2Plugin, Lv2Processor};
 #[cfg(feature = "vst3")]
-use crate::vst3::{ClassId, Vst3Error, Vst3Module, Vst3Plugin};
+use crate::vst3::{ClassId, Vst3Error, Vst3Module, Vst3Plugin, Vst3Processor};
 
 /// A plugin format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -996,6 +999,40 @@ impl Plugin {
         })
     }
 
+    /// Activates the plugin and returns its audio half as an
+    /// [`AnyProcessor`], which processes as the box from
+    /// [`activate`](Self::activate) does and also reads what the plugin
+    /// sends, and reaches the format's own processor.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host.
+    pub fn activate_processor(
+        &mut self,
+        sample_rate: f64,
+        max_block_size: usize,
+    ) -> Result<AnyProcessor, Error> {
+        let inner = match &mut self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => {
+                ProcessorInner::Clap(Box::new(plugin.activate(sample_rate, max_block_size)?))
+            }
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => {
+                ProcessorInner::Vst3(Box::new(plugin.activate(sample_rate, max_block_size)?))
+            }
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => {
+                ProcessorInner::Lv2(Box::new(plugin.activate(sample_rate, max_block_size)?))
+            }
+            #[cfg(feature = "au")]
+            PluginInner::Au(plugin) => {
+                ProcessorInner::Au(Box::new(plugin.activate(sample_rate, max_block_size)?))
+            }
+        };
+        Ok(AnyProcessor { inner })
+    }
+
     /// Deactivates the plugin, once its audio half has been dropped.
     ///
     /// # Errors
@@ -1127,6 +1164,230 @@ impl fmt::Debug for Plugin {
             .field("format", &self.entry.format)
             .field("id", &self.entry.id)
             .field("name", &self.entry.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A plugin of any format, as the audio thread deals with it: a
+/// [`Processor`], made by [`Plugin::activate_processor`].
+///
+/// It processes exactly as the format's own processor does, and so as the
+/// box [`Plugin::activate`] returns; the format's processor says how a
+/// block is laid out and what is real-time safe. What it adds is
+/// [`output_events`](Self::output_events), the events the plugin sent, in
+/// one type whatever the format, and a way to the format's processor for
+/// the rest.
+///
+/// ```
+/// fn is_a_processor<T: manguebyte_dsp::Processor<f32> + Send>() {}
+/// is_a_processor::<manguebyte_host::any::AnyProcessor>();
+/// ```
+pub struct AnyProcessor {
+    inner: ProcessorInner,
+}
+
+enum ProcessorInner {
+    #[cfg(feature = "clap")]
+    Clap(Box<ClapProcessor>),
+    #[cfg(feature = "vst3")]
+    Vst3(Box<Vst3Processor>),
+    #[cfg(feature = "lv2")]
+    Lv2(Box<Lv2Processor>),
+    #[cfg(feature = "au")]
+    Au(Box<AuProcessor>),
+}
+
+/// Runs the same expression on whichever processor `$inner` holds.
+macro_rules! each_processor {
+    ($inner:expr, $processor:ident => $work:expr) => {
+        match $inner {
+            #[cfg(feature = "clap")]
+            ProcessorInner::Clap($processor) => $work,
+            #[cfg(feature = "vst3")]
+            ProcessorInner::Vst3($processor) => $work,
+            #[cfg(feature = "lv2")]
+            ProcessorInner::Lv2($processor) => $work,
+            #[cfg(feature = "au")]
+            ProcessorInner::Au($processor) => $work,
+        }
+    };
+}
+
+impl AnyProcessor {
+    /// The plugin's format.
+    pub fn format(&self) -> Format {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            ProcessorInner::Clap(_) => Format::Clap,
+            #[cfg(feature = "vst3")]
+            ProcessorInner::Vst3(_) => Format::Vst3,
+            #[cfg(feature = "lv2")]
+            ProcessorInner::Lv2(_) => Format::Lv2,
+            #[cfg(feature = "au")]
+            ProcessorInner::Au(_) => Format::Au,
+        }
+    }
+
+    /// What the plugin sent during the last call to
+    /// [`process_with`](Processor::process_with), on the frames of the
+    /// block it was sent on, whatever the format. Real-time safe: nothing
+    /// is converted or allocated here.
+    ///
+    /// Each format says what it can:
+    ///
+    /// - CLAP: notes with their ids, note expression, MIDI, and the values
+    ///   the plugin gave its parameters, in the CLAP scale; the kinds of
+    ///   [`OutputKind::Event`](crate::clap::OutputKind::Event), in the
+    ///   order of [`ClapProcessor::output_events`], which also has what
+    ///   the framework's events cannot say, such as gestures and the end
+    ///   of a note.
+    /// - VST 3: what [`Vst3Processor::output_events`] has, parameter values
+    ///   normalized.
+    /// - LV2 and Audio Units: the MIDI 1.0 the plugin sent, as
+    ///   [`Lv2Processor::output_events`] and
+    ///   [`AuProcessor::output_events`] read it: notes with 7-bit
+    ///   velocities and no ids, pressure on one key as a note expression,
+    ///   and other messages as
+    ///   [`EventKind::Midi`](manguebyte_dsp::event::EventKind::Midi).
+    ///
+    /// A parameter value is in the format's scale, as everywhere in this
+    /// module (see [Values](self#values)). So a note effect sends the same
+    /// notes on the same frames in every format, up to what each format
+    /// carries: the velocity's precision and the note's id.
+    pub fn output_events(&self) -> &[Event] {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            ProcessorInner::Clap(processor) => processor.framework_events(),
+            #[cfg(feature = "vst3")]
+            ProcessorInner::Vst3(processor) => processor.output_events(),
+            #[cfg(feature = "lv2")]
+            ProcessorInner::Lv2(processor) => processor.output_events(),
+            #[cfg(feature = "au")]
+            ProcessorInner::Au(processor) => processor.output_events(),
+        }
+    }
+
+    /// The sample rate the plugin runs at.
+    pub fn sample_rate(&self) -> f64 {
+        each_processor!(&self.inner, processor => processor.sample_rate())
+    }
+
+    /// The longest piece of a block the plugin is handed in one call.
+    /// Longer blocks are processed in pieces.
+    pub fn max_block_size(&self) -> usize {
+        each_processor!(&self.inner, processor => processor.max_block_size())
+    }
+
+    /// The CLAP processor, if this is one.
+    #[cfg(feature = "clap")]
+    pub fn as_clap(&self) -> Option<&ClapProcessor> {
+        match &self.inner {
+            ProcessorInner::Clap(processor) => Some(&**processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The CLAP processor, if this is one, to change, such as to
+    /// [`flush`](ClapProcessor::flush) it.
+    #[cfg(feature = "clap")]
+    pub fn as_clap_mut(&mut self) -> Option<&mut ClapProcessor> {
+        match &mut self.inner {
+            ProcessorInner::Clap(processor) => Some(&mut **processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The VST 3 processor, if this is one.
+    #[cfg(feature = "vst3")]
+    pub fn as_vst3(&self) -> Option<&Vst3Processor> {
+        match &self.inner {
+            ProcessorInner::Vst3(processor) => Some(&**processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The VST 3 processor, if this is one, to change.
+    #[cfg(feature = "vst3")]
+    pub fn as_vst3_mut(&mut self) -> Option<&mut Vst3Processor> {
+        match &mut self.inner {
+            ProcessorInner::Vst3(processor) => Some(&mut **processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The LV2 processor, if this is one.
+    #[cfg(feature = "lv2")]
+    pub fn as_lv2(&self) -> Option<&Lv2Processor> {
+        match &self.inner {
+            ProcessorInner::Lv2(processor) => Some(&**processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The LV2 processor, if this is one, to change.
+    #[cfg(feature = "lv2")]
+    pub fn as_lv2_mut(&mut self) -> Option<&mut Lv2Processor> {
+        match &mut self.inner {
+            ProcessorInner::Lv2(processor) => Some(&mut **processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Audio Unit's processor, if this is one.
+    #[cfg(feature = "au")]
+    pub fn as_au(&self) -> Option<&AuProcessor> {
+        match &self.inner {
+            ProcessorInner::Au(processor) => Some(&**processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The Audio Unit's processor, if this is one, to change.
+    #[cfg(feature = "au")]
+    pub fn as_au_mut(&mut self) -> Option<&mut AuProcessor> {
+        match &mut self.inner {
+            ProcessorInner::Au(processor) => Some(&mut **processor),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+}
+
+impl Processor<f32> for AnyProcessor {
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        each_processor!(&mut self.inner, processor => processor.prepare(spec));
+    }
+
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
+        each_processor!(&mut self.inner, processor => processor.process(buffer));
+    }
+
+    fn process_with(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        each_processor!(&mut self.inner, processor => processor.process_with(buffer, context));
+    }
+
+    fn reset(&mut self) {
+        each_processor!(&mut self.inner, processor => processor.reset());
+    }
+
+    fn latency_samples(&self) -> usize {
+        each_processor!(&self.inner, processor => processor.latency_samples())
+    }
+}
+
+impl fmt::Debug for AnyProcessor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnyProcessor")
+            .field("format", &self.format())
+            .field("sample_rate", &self.sample_rate())
+            .field("max_block_size", &self.max_block_size())
             .finish_non_exhaustive()
     }
 }

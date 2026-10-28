@@ -129,6 +129,9 @@ pub(crate) struct Layout {
     pub(crate) events_take_time: bool,
     pub(crate) atom_inputs: Vec<u32>,
     pub(crate) atom_outputs: Vec<u32>,
+    /// For each atom output, whether it says it carries `midi:MidiEvent`,
+    /// and so is read after every call of `run`.
+    pub(crate) midi_outputs: Vec<bool>,
     pub(crate) atom_bytes: usize,
     /// Ports of a kind this host does not know, which may stay unconnected.
     pub(crate) unconnected: Vec<u32>,
@@ -175,7 +178,10 @@ impl Layout {
                     }
                 }
                 (PortKind::Atom, Direction::Input) => layout.atom_inputs.push(index),
-                (PortKind::Atom, Direction::Output) => layout.atom_outputs.push(index),
+                (PortKind::Atom, Direction::Output) => {
+                    layout.atom_outputs.push(index);
+                    layout.midi_outputs.push(port.supports_midi);
+                }
                 _ => {
                     if !port.properties.connection_optional {
                         return Err(Lv2Error::Unsupported(

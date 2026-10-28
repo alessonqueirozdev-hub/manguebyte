@@ -1,6 +1,6 @@
 //! Loading an LV2 bundle: its description and the libraries it brings.
 
-use std::ffi::{OsString, c_char};
+use std::ffi::{OsString, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,12 +15,27 @@ const ENTRY_SYMBOL: &[u8] = b"lv2_descriptor\0";
 /// Most descriptors read from one library while looking for a plugin.
 const MAX_DESCRIPTORS: u32 = 4_096;
 
-/// One loaded library and its entry point.
+/// A function that does what a library's `lv2_descriptor` does: returns
+/// the `LV2_Descriptor` of its plugin number `index`, or null past the
+/// last, for [`Lv2Library::from_entry`].
+pub type Lv2Entry = unsafe extern "C" fn(index: u32) -> *const c_void;
+
+/// Where a library's descriptors come from.
+#[derive(Clone, Copy)]
+enum Entry {
+    /// The `lv2_descriptor` of a loaded library.
+    Loaded(LV2_Descriptor_Function),
+    /// A function of this process.
+    Given(Lv2Entry),
+}
+
+/// One library and its entry point.
 struct Binary {
     path: PathBuf,
-    entry: LV2_Descriptor_Function,
-    /// Kept loaded for as long as anything holds the bundle.
-    _library: libloading::Library,
+    entry: Entry,
+    /// Kept loaded for as long as anything holds the bundle; none for an
+    /// entry point of this process.
+    _library: Option<libloading::Library>,
 }
 
 pub(crate) struct Inner {
@@ -30,7 +45,8 @@ pub(crate) struct Inner {
 }
 
 // SAFETY: the entry points belong to libraries that stay loaded for as
-// long as this value exists. LV2's discovery functions, `lv2_descriptor`
+// long as this value exists, or are functions of this process that the
+// caller of `from_entry` keeps callable. LV2's discovery functions, `lv2_descriptor`
 // among them, may be called from any thread.
 unsafe impl Send for Inner {}
 // SAFETY: as above.
@@ -100,7 +116,55 @@ impl Lv2Library {
         })
     }
 
-    /// The bundle folder, as it was given to [`load`](Self::load).
+    /// Reads the bundle folder `path` and takes every plugin it describes
+    /// from `entry`, a function of this process, instead of loading the
+    /// library the bundle names; that library must still exist, since the
+    /// bundle is read as [`read_bundle`](super::read_bundle) reads it, but
+    /// nothing in it is run.
+    ///
+    /// This is for a plugin linked into the program, such as one a test
+    /// hosts through the framework's own LV2 wrapper, as
+    /// [`ClapLibrary::from_entry`](crate::clap::ClapLibrary::from_entry)
+    /// and [`AuLibrary::from_factory`](crate::au::AuLibrary::from_factory)
+    /// are for the other formats.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`read_bundle`](super::read_bundle).
+    ///
+    /// # Safety
+    ///
+    /// `entry` must do what an `lv2_descriptor` does, for the plugins of
+    /// this bundle: return null or a descriptor whose functions, and the
+    /// plugins they create, follow the LV2 specification, and stay
+    /// callable for as long as anything holds the library or a plugin made
+    /// from it. This host checks what they return, but it has to call
+    /// them. Every safe function of the library and of its plugins relies
+    /// on these terms.
+    pub unsafe fn from_entry(path: impl AsRef<Path>, entry: Lv2Entry) -> Result<Self, Lv2Error> {
+        let path = path.as_ref();
+        let plugins = read_bundle(path)?;
+        let mut binaries: Vec<Binary> = Vec::new();
+        for plugin in &plugins {
+            if binaries.iter().all(|binary| binary.path != plugin.binary) {
+                binaries.push(Binary {
+                    path: plugin.binary.clone(),
+                    entry: Entry::Given(entry),
+                    _library: None,
+                });
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(Inner {
+                path: path.to_owned(),
+                plugins,
+                binaries,
+            }),
+        })
+    }
+
+    /// The bundle folder, as it was given to [`load`](Self::load) or
+    /// [`from_entry`](Self::from_entry).
     pub fn path(&self) -> &Path {
         &self.inner.path
     }
@@ -161,9 +225,15 @@ impl Lv2Library {
             .iter()
             .find(|binary| binary.path == plugin.binary)?;
         for index in 0..MAX_DESCRIPTORS {
-            // SAFETY: the library's own entry point, which per the terms of
-            // `load` returns a descriptor or null for any index.
-            let descriptor = unsafe { (binary.entry)(index) };
+            // SAFETY: the library's own entry point, or the function that
+            // stands for it, which per the terms of `load` and `from_entry`
+            // returns a descriptor or null for any index.
+            let descriptor = unsafe {
+                match binary.entry {
+                    Entry::Loaded(entry) => entry(index),
+                    Entry::Given(entry) => entry(index).cast::<LV2_Descriptor>(),
+                }
+            };
             if descriptor.is_null() {
                 return None;
             }
@@ -228,7 +298,7 @@ unsafe fn open(binary: &Path) -> Result<Binary, Lv2Error> {
     };
     Ok(Binary {
         path: binary.to_owned(),
-        entry,
-        _library: library,
+        entry: Entry::Loaded(entry),
+        _library: Some(library),
     })
 }
