@@ -324,6 +324,25 @@ break the API.
 
 ### Hosting
 
+- `manguebyte-host` opens the editors of the CLAP and VST 3 plugins it
+  hosts (issue #5), through the same methods on `ClapPlugin` and
+  `Vst3Plugin`: `open_editor` in a parent window (`editor::ParentWindow`,
+  the type a plugin made with the framework receives), `editor_size`,
+  `set_editor_size`, `set_editor_scale`, `close_editor`. What an editor
+  asks for comes back from `pump` as `HostEvent::Editor` (a new size, to
+  be shown or hidden, closed), and `pump` also fires the timers the editor
+  registered; `next_editor_timer` says when they are next due, and
+  `editor_fds` and `editor_fd_ready` hand the file descriptors it watches
+  to the application's loop. CLAP: the host's `gui`, `timer-support` and
+  `posix-fd-support`; VST 3: `IPlugView` with an `IPlugFrame`, content
+  scale and, on X11 systems, `IRunLoop`. Dropping a plugin closes its
+  editor first. The example plugins' editors are opened, resized,
+  rescaled and closed in real Win32 windows, and a knob dragged in each
+  format reaches the hosted processor; fake plugins check the order of
+  calls, failures part-way through opening, calls from inside callbacks
+  and from other threads. Not yet on macOS and Linux in real windows, and
+  not for LV2 or AU (TECH_DEBT 95).
+
 - `manguebyte-host` hosts Audio Units, version 2 (issue #4), in a new
   `au` module behind a feature of the same name, on by default.
   `au::components` lists what the system's registry holds

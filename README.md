@@ -154,8 +154,10 @@ DAWs and browsers are not tried. The browser engine and the sampler are
 tested natively and in Node.js, not yet in a browser's audio thread under
 load. Also missing: the AUv3 and AAX formats; encoding Opus speech (SILK
 and hybrid frames; CELT is written); Universal MIDI Packet output on
-Windows; the editors of hosted plugins. Hosting Audio Units through AudioToolbox runs only in the
-macOS job of continuous integration, not yet against a vendor's unit.
+Windows; the editors of hosted LV2 and AU plugins, and those of hosted
+CLAP and VST 3 plugins on macOS and Linux (on Windows they open, in tests).
+Hosting Audio Units through AudioToolbox runs only in the macOS job of
+continuous integration, not yet against a vendor's unit.
 
 ## Quick start
 

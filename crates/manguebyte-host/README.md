@@ -28,9 +28,19 @@ macOS job of continuous integration, against the installed components.
 `scan` finds the plugins installed on a system and lists each CLAP and
 VST 3 file, and each unit of an AU bundle, in a process of its own with a
 time limit, so one that crashes or hangs is reported and the host goes
-on, with a cache of what it found. Not yet: the editors of hosted
-plugins, reading the notes and MIDI a hosted plugin sends, Audio Units
-version 3 as such, and runs against plugins from other vendors.
+on, with a cache of what it found.
+
+The editors of CLAP and VST 3 plugins open inside a window the
+application owns, through the same methods for both formats: open in a
+parent window, resize, rescale, close. What an editor asks for (a new
+size, to be shown or hidden) comes back from `pump`, which also runs its
+timers, and an edit made in it reaches the hosted processor. This is
+tested in real Win32 windows; on macOS and Linux no editor has been
+opened in a real window yet.
+
+Not yet: the editors of LV2 and AU plugins, reading the notes and MIDI a
+hosted plugin sends, Audio Units version 3 as such, and runs against
+plugins from other vendors.
 
 Documentation: <https://docs.rs/manguebyte-host>
 

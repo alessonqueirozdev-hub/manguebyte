@@ -214,7 +214,7 @@ impl FdWatches {
     /// the new interest is empty.
     // Only CLAP's `posix-fd-support` changes a watch; VST 3 has no call
     // for it, so a build that hosts VST 3 alone has no use for this.
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "clap"), allow(dead_code))]
     pub(crate) fn modify(&mut self, fd: i32, interest: FdInterest) -> bool {
         if interest.is_empty() {
             return false;

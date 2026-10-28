@@ -405,7 +405,8 @@ that created the plugin; the types do not check that it is the program's
 main thread. At most 4,096 events per call; the rest are counted. No
 modulation is sent to VST 3 plugins. Tested with the framework's own
 plugins and deliberately misbehaving test plugins, not yet with plugins
-from other vendors; no editors of hosted plugins. Scanning lists CLAP and
+from other vendors; the editors of hosted CLAP and VST 3 plugins open in
+tests on Windows only, and no LV2 or AU editor is hosted. Scanning lists CLAP and
 VST 3 files out of process and LV2 bundles from their Turtle files, and has
 not met plugins from other vendors either.
 
@@ -686,8 +687,10 @@ it has, and Manguebyte does not:
   well as Windows (Manguebyte's editors open on Windows only so far);
 - the AUv3 and AAX plugin formats, and Audio Units checked in real hosts
   (Manguebyte's AUv2 wrapper has only its own tests and `auval` in CI);
-- the editors of hosted plugins (Manguebyte hosts CLAP, VST 3, LV2 and
-  Audio Unit plugins, without their editors, and scans for them);
+- the editors of hosted plugins on every system and in every format
+  (Manguebyte hosts CLAP, VST 3, LV2 and Audio Unit plugins and scans for
+  them, but opens only CLAP and VST 3 editors, and only on Windows so
+  far);
 - SIMD wrappers and lookup tables among its DSP utilities;
 - iOS and Android (Manguebyte's audio and device crates are built for both
   in CI, but not run on a device);

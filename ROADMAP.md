@@ -347,7 +347,16 @@ our own, and nothing claimed before its test exists.
   AudioToolbox in the macOS CI job, where the scanner also reports a unit
   that crashes and one that hangs. No AUv3 as such, editors or factory
   presets (TECH_DEBT 93)
-- ⬜ Hosted plugins' editors
+- 🚧 Hosted plugins' editors (issue #5): CLAP's `gui` (embedded),
+  `timer-support` and `posix-fd-support`, and VST 3's `IPlugView` with
+  `IPlugFrame`, content scale and, on X11 systems, `IRunLoop`, behind the
+  same methods on `ClapPlugin` and `Vst3Plugin`: open in a parent window,
+  size, scale, close, and the editor's requests and timers through
+  `pump`. The example plugins' editors are opened, resized, rescaled and
+  closed in real Win32 windows, and a knob dragged in each format reaches
+  the hosted processor. Not yet opened in a real window on macOS or Linux,
+  where the framework's own editors do not open; no LV2 or AU editors
+  (TECH_DEBT 95)
 - ✅ Transport, tempo map and timeline primitives: a tempo map with steps,
   linear ramps and time signatures, exact conversions between frames,
   seconds, quarter notes and bars, beats and ticks, and a real-time
