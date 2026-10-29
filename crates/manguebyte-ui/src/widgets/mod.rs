@@ -13,6 +13,7 @@
 //! | [`ImageView`] | [`Image`](crate::Role::Image) | an image, fitted to its rectangle, sharp at any scale it has a version for | nothing |
 //! | [`ListView`] | [`List`](crate::Role::List), its rows [`ListItem`](crate::Role::ListItem) | rows the application keeps, only those in sight | the selection, by clicks, the keys and typing; rows dragged out and dropped in |
 //! | [`ScrollView`] | [`ScrollView`](crate::Role::ScrollView) | one child larger than itself, through a viewport, with scroll bars | the offset, by the wheel, the bars and the keys |
+//! | [`PianoKeyboard`] | [`Group`](crate::Role::Group), its keys [`Button`](crate::Role::Button)s | keys over a [`KeySpan`], those held and those the application lights, and key ranges | notes, polled as [`NoteEvent`]s, from presses, glissandi, the computer's letters and assistive technology |
 //! | [`WaveformView`] | [`Group`](crate::Role::Group), its markers [`Slider`](crate::Role::Slider)s | a sample's channels, drawn from a [`Waveform`]'s summary, markers, a selection and a playhead | the markers (within their rules, onto zero crossings if asked), the selection and the zoom, by dragging, the wheel and the keys |
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
@@ -37,6 +38,8 @@ mod canvas;
 mod combo;
 mod container;
 mod image;
+mod keyboard;
+mod keys;
 mod knob;
 mod label;
 mod list;
@@ -53,6 +56,8 @@ pub use canvas::{Canvas, CanvasCx, canvas};
 pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
 pub use image::{Fit, ImageView, image};
+pub use keyboard::{KeyRange, KeyboardState, NoteEvent, PianoKeyboard, piano_keyboard};
+pub use keys::{KeySpan, is_black, note_name, note_name_portuguese};
 pub use knob::{Knob, knob};
 pub use label::{Label, label};
 pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view};

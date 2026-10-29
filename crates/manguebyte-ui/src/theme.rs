@@ -42,6 +42,10 @@ pub struct Palette {
     pub meter: Color,
     /// A meter's level above its warning mark.
     pub meter_warning: Color,
+    /// The white keys of a piano keyboard.
+    pub key_white: Color,
+    /// The black keys of a piano keyboard, and text drawn on white keys.
+    pub key_black: Color,
 }
 
 /// Lengths, in logical pixels.
@@ -137,6 +141,8 @@ impl Theme {
                 focus: Color::hex(0x5CA8FF),
                 meter: Color::hex(0x41D27A),
                 meter_warning: Color::hex(0xFF4D4D),
+                key_white: Color::hex(0xDADCE0),
+                key_black: Color::hex(0x101216),
             },
             sizes: Sizes {
                 spacing: 8.0,
@@ -187,6 +193,8 @@ impl Theme {
                 focus: Color::hex(0x1F6FEB),
                 meter: Color::hex(0x1E9E52),
                 meter_warning: Color::hex(0xD62828),
+                key_white: Color::hex(0xFFFFFF),
+                key_black: Color::hex(0x2A2D34),
             },
             ..dark
         }

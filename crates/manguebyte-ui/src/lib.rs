@@ -202,3 +202,7 @@ pub use widgets::{
     WaveformEvent, WaveformState, WaveformView, ZOOM_STEP, canvas, combo, image, knob, label,
     list_view, meter, scroll_view, slider, text_field, toggle, waveform_view,
 };
+pub use widgets::{
+    KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, is_black, note_name,
+    note_name_portuguese, piano_keyboard,
+};
