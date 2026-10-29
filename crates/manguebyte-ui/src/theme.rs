@@ -77,6 +77,13 @@ pub struct Sizes {
     /// How many times further it moves for the same change while Shift is
     /// held.
     pub fine_factor: f32,
+    /// The thickness of a scroll bar, and the room a scroll view keeps for
+    /// one.
+    pub scroll_bar: f32,
+    /// How far one notch of the wheel, or an arrow key, scrolls a view.
+    pub scroll_line: f32,
+    /// The height of a row of a list.
+    pub list_row: f32,
 }
 
 /// Corner radii, in logical pixels.
@@ -146,6 +153,9 @@ impl Theme {
                 focus_ring: 1.5,
                 drag_range: 200.0,
                 fine_factor: 10.0,
+                scroll_bar: 10.0,
+                scroll_line: 40.0,
+                list_row: 24.0,
             },
             corners: Corners {
                 small: 2.0,

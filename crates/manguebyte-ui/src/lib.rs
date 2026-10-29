@@ -44,6 +44,22 @@
 //!   interface over everything else, opened by a widget with
 //!   [`EventCx::open_menu`] or at a point with [`EventCx::open_menu_at`],
 //!   and the [`combo`] box that picks a parameter's value from one.
+//! - **[Scrolling](scroll)**: a [`scroll_view`] shows one child larger
+//!   than itself through a viewport, with scroll bars, the wheel and a
+//!   touchpad's finer steps, the keys, nested views that hand the wheel
+//!   on at their edges, Tab scrolling to what it focuses, and an offset
+//!   the application reads and sets through a [`State`]. Only what can be
+//!   seen is drawn or can be pressed.
+//! - **Lists** ([`list_view`]): rows the application keeps through
+//!   [`ListData`], only those in sight drawn and described, with single
+//!   and multiple selection, the keyboard, typing to find a row, and
+//!   activation, all polled from a [`ListState`].
+//! - **[Drag and drop](drag)** inside the interface: a widget starts a
+//!   drag with a [`DragPayload`] of the application's own type, targets
+//!   accept or refuse it by type and place, the root draws a ghost over
+//!   everything and scrolls views whose edge the pointer is near, and
+//!   Escape or a release where nothing accepts cancels. Lists reorder and
+//!   move rows this way.
 //! - **Hover and tooltips**: the widget under the pointer hears it
 //!   ([`Widget::hover_changed`]), and a view given a
 //!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
@@ -146,11 +162,13 @@
 pub mod access;
 pub mod clipboard;
 mod damage;
+pub mod drag;
 pub mod event;
 pub mod layout;
 pub mod menu;
 mod param;
 mod root;
+pub mod scroll;
 pub mod source;
 pub mod testing;
 mod theme;
@@ -159,19 +177,22 @@ mod view;
 mod widget;
 pub mod widgets;
 
-pub use access::{AccessEntry, AccessNode, Action, Actions, Role};
+pub use access::{AccessEntry, AccessItem, AccessNode, Action, Actions, Role};
 pub use clipboard::{Clipboard, MemoryClipboard};
 pub use damage::MAX_DAMAGE;
+pub use drag::{DragEvent, DragOutcome, DragPayload};
 pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, MenuEvent, Modifiers};
 pub use menu::{Menu, MenuItem};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
+pub use scroll::ScrollMetrics;
 pub use source::{AtomicSource, Source, State, Watch};
 pub use theme::{Corners, Palette, Sizes, Theme, Typography};
 pub use tree::NodeId;
 pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, ComboBox, Container, Knob, Label, Meter, Slider, TextField, Toggle, canvas,
-    combo, knob, label, meter, slider, text_field, toggle,
+    Canvas, CanvasCx, ComboBox, Container, Knob, Label, ListData, ListEvent, ListState, ListView,
+    Meter, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, canvas, combo, knob,
+    label, list_view, meter, scroll_view, slider, text_field, toggle,
 };

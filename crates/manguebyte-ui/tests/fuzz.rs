@@ -347,7 +347,10 @@ fn hostile_layout_trees_never_panic() {
                         manguebyte_ui::layout::Arrange::Row,
                         manguebyte_ui::layout::Arrange::Column,
                         manguebyte_ui::layout::Arrange::Stack,
-                    ][random.below(4) as usize],
+                        manguebyte_ui::layout::Arrange::Scroll { x: true, y: false },
+                        manguebyte_ui::layout::Arrange::Scroll { x: false, y: true },
+                        manguebyte_ui::layout::Arrange::Scroll { x: true, y: true },
+                    ][random.below(7) as usize],
                     padding: Insets::new(
                         random.number(10.0),
                         random.number(10.0),

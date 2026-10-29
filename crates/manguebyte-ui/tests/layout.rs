@@ -473,7 +473,7 @@ fn every_layout_keeps_children_inside_in_order_and_on_device_pixels() {
                         Arrange::Column => {
                             assert!(before.bottom() <= i64::from(device.y), "case {case}")
                         }
-                        Arrange::Stack | Arrange::Leaf => {}
+                        Arrange::Stack | Arrange::Leaf | Arrange::Scroll { .. } => {}
                     }
                 }
                 previous = Some(device);

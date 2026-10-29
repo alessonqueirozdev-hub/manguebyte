@@ -3,7 +3,8 @@
 
 use manguebyte_gfx::{IRect, Rect, Scene};
 
-use crate::layout::LayoutNode;
+use crate::layout::{Arrange, LayoutNode};
+use crate::scroll::ScrollMetrics;
 use crate::view::View;
 use crate::widget::Widget;
 
@@ -51,6 +52,14 @@ pub(crate) struct Node {
     pub(crate) paint: bool,
     /// It asked to be measured again.
     pub(crate) measure: bool,
+    /// The index after the last widget inside it: its subtree is
+    /// `id .. end`, in tree order.
+    pub(crate) end: usize,
+    /// Where the scroll views it is inside let it be seen, in logical and
+    /// device pixels: `None` outside any.
+    pub(crate) clip: Option<(Rect, IRect)>,
+    /// For a node laid out as a scroll node, where it is scrolled.
+    pub(crate) scroll: Option<ScrollMetrics>,
 }
 
 /// Every widget, in tree order, with the layout tree beside it.
@@ -111,6 +120,16 @@ impl Tree {
             painted: None,
             paint: true,
             measure: true,
+            end: 0,
+            clip: None,
+            scroll: match style.arrange {
+                Arrange::Scroll { x, y } => Some(ScrollMetrics {
+                    x,
+                    y,
+                    ..ScrollMetrics::default()
+                }),
+                _ => None,
+            },
         });
         self.layout
             .push(LayoutNode::new(style, Default::default(), Vec::new()));
@@ -118,6 +137,7 @@ impl Tree {
             let child = self.add(child, Some(id));
             self.layout[id.index()].children.push(child.index());
         }
+        self.nodes[id.index()].end = self.nodes.len();
         id
     }
 

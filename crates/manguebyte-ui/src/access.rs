@@ -58,6 +58,16 @@ pub enum Role {
     Separator,
     /// Help text shown near the pointer: its name is the text.
     Tooltip,
+    /// A view that shows part of something larger and scrolls over it:
+    /// its value is how far it is scrolled.
+    ScrollView,
+    /// A list of rows to choose from, some of which may be selected.
+    List,
+    /// One row of a list: it says whether it is selected.
+    ListItem,
+    /// What is being dragged, drawn under the pointer: its name is the
+    /// description the drag was given.
+    DragItem,
 }
 
 /// The range of a widget's numeric value.
@@ -92,6 +102,9 @@ pub struct AccessState {
     /// For something that opens a menu (a combo box, an item with a
     /// submenu), whether the menu is open.
     pub expanded: Option<bool>,
+    /// For something that can be selected, such as a row of a list,
+    /// whether it is.
+    pub selected: Option<bool>,
 }
 
 /// Which [`Action`]s a widget accepts.
@@ -248,6 +261,13 @@ impl AccessNode {
         self
     }
 
+    /// The same node, selected or not.
+    #[must_use]
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.state.selected = Some(selected);
+        self
+    }
+
     /// The same node, which cannot be used now.
     #[must_use]
     pub fn disabled(mut self) -> Self {
@@ -263,12 +283,37 @@ impl AccessNode {
     }
 }
 
-/// One widget in the accessibility tree of a [`Root`](crate::Root).
+/// A part of a widget that assistive technology sees as a node of its own
+/// although it is not a widget: a row of a list, of which only the rows
+/// shown exist (see [`Widget::access_items`](crate::Widget::access_items)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessItem {
+    /// What the widget calls it, such as the row's index. The widget is
+    /// asked for actions on it by this key.
+    pub key: usize,
+    /// How it describes itself.
+    pub node: AccessNode,
+    /// Where it is, in logical pixels.
+    pub bounds: Rect,
+}
+
+impl AccessItem {
+    /// An item `key`, described by `node`, at `bounds`.
+    pub fn new(key: usize, node: AccessNode, bounds: Rect) -> Self {
+        AccessItem { key, node, bounds }
+    }
+}
+
+/// One widget, or one item of a widget, in the accessibility tree of a
+/// [`Root`](crate::Root).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessEntry {
-    /// The widget.
+    /// The widget, or for an item the widget it belongs to.
     pub id: NodeId,
-    /// The widget that contains it, if any.
+    /// For an item ([`AccessItem`]), its key; `None` for the widget
+    /// itself.
+    pub item: Option<usize>,
+    /// The widget that contains it, if any: for an item, its widget.
     pub parent: Option<NodeId>,
     /// How it describes itself, with the state the root knows filled in.
     pub node: AccessNode,
@@ -393,6 +438,8 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
 /// - every text input has its text as its value and takes the focus;
 /// - every combo box has its value as text, can be pressed to open, and
 ///   says whether it is open;
+/// - every list and scroll view has a name, and every list item says
+///   whether it is selected;
 /// - no two widgets with a name share their role and name within the same
 ///   named group (groups with no name only arrange their children, and a
 ///   screen reader does not tell them apart);
@@ -462,6 +509,18 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
                 node.name
             ));
         }
+        if node.role == Role::ListItem && node.state.selected.is_none() {
+            return Some(format!(
+                "list item {:?} does not say whether it is selected",
+                node.name
+            ));
+        }
+        if matches!(node.role, Role::List | Role::ScrollView) && node.name.trim().is_empty() {
+            return Some(format!(
+                "{:?} {:?} has no name, so a screen reader cannot say what it shows",
+                node.role, entry.id
+            ));
+        }
     }
     if let Some(problem) = shared_names(entries) {
         return Some(problem);
@@ -476,9 +535,11 @@ fn shared_names(entries: &[AccessEntry]) -> Option<String> {
     // each entry. Parents come before their children.
     let mut group: Vec<Option<usize>> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let parent = entry
-            .parent
-            .and_then(|parent| entries.iter().position(|other| other.id == parent));
+        let parent = entry.parent.and_then(|parent| {
+            entries
+                .iter()
+                .position(|other| other.id == parent && other.item.is_none())
+        });
         let nearest = parent.and_then(|parent| {
             if entries[parent].node.name.trim().is_empty() {
                 group.get(parent).copied().flatten()
@@ -528,6 +589,7 @@ mod tests {
     fn entry(id: usize, parent: Option<usize>, node: AccessNode) -> AccessEntry {
         AccessEntry {
             id: NodeId::from_index(id),
+            item: None,
             parent: parent.map(NodeId::from_index),
             node,
             bounds: Rect::default(),
@@ -555,6 +617,32 @@ mod tests {
             AccessNode::new(Role::Switch, "Bypass").with_checked(false),
         );
         assert_eq!(problem(&[fine]), None);
+    }
+
+    #[test]
+    fn a_list_and_a_scroll_view_have_names_and_rows_say_whether_they_are_selected() {
+        let list = entry(0, None, AccessNode::new(Role::List, ""));
+        assert!(problem(&[list]).is_some_and(|p| p.contains("no name")));
+        let view = entry(0, None, AccessNode::new(Role::ScrollView, " "));
+        assert!(problem(&[view]).is_some_and(|p| p.contains("no name")));
+        let list = entry(0, None, AccessNode::new(Role::List, "Samples"));
+        let mut row = entry(0, Some(0), AccessNode::new(Role::ListItem, "Kick"));
+        row.item = Some(3);
+        assert!(
+            problem(&[list.clone(), row.clone()])
+                .is_some_and(|p| p.contains("\"Kick\"") && p.contains("selected"))
+        );
+        row.node = row.node.with_selected(false);
+        assert_eq!(problem(&[list.clone(), row.clone()]), None);
+        // Two rows of one list with the same name cannot be told apart; in
+        // two lists they can.
+        let mut twin = row.clone();
+        twin.item = Some(4);
+        assert!(problem(&[list.clone(), row.clone(), twin.clone()]).is_some());
+        let other = entry(1, None, AccessNode::new(Role::List, "Takes"));
+        twin.id = NodeId::from_index(1);
+        twin.parent = Some(NodeId::from_index(1));
+        assert_eq!(problem(&[list, row, other, twin]), None);
     }
 
     #[test]

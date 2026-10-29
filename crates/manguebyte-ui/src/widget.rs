@@ -5,11 +5,13 @@ use std::time::Duration;
 use manguebyte_gfx::{Point, Rect, Scene, Size};
 use manguebyte_plugin::editor::EditorContext;
 
-use crate::access::{AccessNode, Action};
+use crate::access::{AccessItem, AccessNode, Action};
 use crate::clipboard::Clipboard;
+use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Event, Handled};
 use crate::menu::Menu;
 use crate::root::{Anchor, MenuRequest};
+use crate::scroll::ScrollMetrics;
 use crate::theme::Theme;
 use crate::tree::NodeId;
 
@@ -171,6 +173,35 @@ pub trait Widget: 'static {
         let _ = cx;
         None
     }
+
+    /// Takes part in a drag (see [`crate::drag`]): as a possible target,
+    /// [`DragEvent::Over`] is accepted with [`Handled::Yes`], and
+    /// [`DragEvent::Drop`] taken the same way; the widget that started the
+    /// drag hears [`DragEvent::Ended`]. Refuses everything unless
+    /// overridden.
+    fn drag(&mut self, cx: &mut EventCx<'_>, event: &DragEvent<'_>) -> Handled {
+        let _ = (cx, event);
+        Handled::No
+    }
+
+    /// Adds the parts of the widget that assistive technology should see
+    /// as nodes of their own to `items`, such as the rows of a list that
+    /// are shown, each after the widget in the accessibility tree and
+    /// inside it (see [`AccessItem`]). Nothing unless overridden: most
+    /// widgets are one node.
+    fn access_items(&self, cx: &AccessCx<'_>, items: &mut Vec<AccessItem>) {
+        let _ = (cx, items);
+    }
+
+    /// Carries out `action` on the item with `key` (see
+    /// [`access_items`](Widget::access_items)), which the item's node
+    /// allows (the root checks), and returns whether it did. For
+    /// [`Action::Focus`] the root gives the widget itself the focus first.
+    /// Does nothing unless overridden.
+    fn act_item(&mut self, cx: &mut EventCx<'_>, key: usize, action: Action) -> bool {
+        let _ = (cx, key, action);
+        false
+    }
 }
 
 /// What a widget asked for during a call; the root acts on it afterwards.
@@ -184,12 +215,17 @@ pub(crate) struct Requests {
     pub(crate) focus: bool,
     /// A menu to open, hung from the widget or a point.
     pub(crate) menu: Option<MenuRequest>,
+    /// Where a scroll node asked to be scrolled to.
+    pub(crate) scroll: Option<Point>,
+    /// A drag to start.
+    pub(crate) drag: Option<DragPayload>,
 }
 
 /// What [`Widget::update`] is given.
 pub struct UpdateCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) now: Duration,
     pub(crate) elapsed: Duration,
@@ -240,6 +276,20 @@ impl UpdateCx<'_> {
     pub fn request_frame(&mut self) {
         self.requests.frame = true;
     }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
+
+    /// Scrolls the widget, a scroll node, so that `offset` is at the
+    /// viewport's top-left corner: kept within the content and rounded to
+    /// whole device pixels, before this frame is laid out. Does nothing for
+    /// a widget that does not scroll.
+    pub fn scroll_to(&mut self, offset: Point) {
+        self.requests.scroll = Some(offset);
+    }
 }
 
 /// What [`Widget::measure`] is given.
@@ -264,6 +314,7 @@ impl MeasureCx<'_> {
 pub struct PaintCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) focused: bool,
     pub(crate) hovered: bool,
@@ -304,12 +355,19 @@ impl PaintCx<'_> {
     pub fn now(&self) -> Duration {
         self.now
     }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
 }
 
 /// What [`Widget::access`] is given.
 pub struct AccessCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) focused: bool,
 }
 
@@ -329,12 +387,19 @@ impl AccessCx<'_> {
     pub fn is_focused(&self) -> bool {
         self.focused
     }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
 }
 
 /// What [`Widget::event`] and [`Widget::act`] are given.
 pub struct EventCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) focused: bool,
     pub(crate) captured: bool,
@@ -442,5 +507,31 @@ impl EventCx<'_> {
             menu,
             anchor: Anchor::Point(at),
         });
+    }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
+
+    /// Scrolls the widget, a scroll node, so that `offset` is at the
+    /// viewport's top-left corner: kept within the content and rounded to
+    /// whole device pixels, and laid out on the next frame. Does nothing
+    /// for a widget that does not scroll.
+    pub fn scroll_to(&mut self, offset: Point) {
+        self.requests.scroll = Some(offset);
+    }
+
+    /// Starts dragging `payload` (see [`crate::drag`]), if a button is
+    /// held and no drag runs already: from when the widget returns, the
+    /// root has the pointer, draws the payload's description under it,
+    /// and offers the payload to the widgets it passes over. The widget
+    /// no longer holds the pointer, and hears how the drag ended as
+    /// [`DragEvent::Ended`]. A widget usually starts a drag once the
+    /// pointer has moved a few pixels with the button held, so that a
+    /// click stays a click.
+    pub fn start_drag(&mut self, payload: DragPayload) {
+        self.requests.drag = Some(payload);
     }
 }

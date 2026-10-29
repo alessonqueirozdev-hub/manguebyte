@@ -71,6 +71,9 @@ use crate::view::IntoView;
 pub struct Found {
     /// The widget, for [`Root`] methods that take one.
     pub id: NodeId,
+    /// For an item of a widget, such as a row of a list, its key (see
+    /// [`AccessItem`](crate::AccessItem)); `None` for a widget.
+    pub item: Option<usize>,
     /// How it describes itself.
     pub node: AccessNode,
     /// Where it is, in logical pixels.
@@ -83,6 +86,7 @@ impl Found {
     fn from_entry(entry: AccessEntry) -> Found {
         Found {
             id: entry.id,
+            item: entry.item,
             node: entry.node,
             bounds: entry.bounds,
             device: entry.device,
@@ -399,6 +403,8 @@ impl Harness {
     /// - every text input has its text as its value and takes the focus;
     /// - every combo box has its value as text, can be pressed to open,
     ///   and says whether it is open;
+    /// - every list and scroll view has a name, and every list item says
+    ///   whether it is selected;
     /// - no two widgets with a name share their role and name within the
     ///   same named group, so a screen reader, and
     ///   [`get`](Harness::get), can tell them apart;
@@ -419,7 +425,10 @@ impl Harness {
 
     /// Asks the widget for `action`, as assistive technology does.
     pub fn act(&mut self, found: &Found, action: Action) -> bool {
-        self.root.act(found.id, action)
+        match found.item {
+            Some(key) => self.root.act_item(found.id, key, action),
+            None => self.root.act(found.id, action),
+        }
     }
 
     // Input.
@@ -501,6 +510,17 @@ impl Harness {
         self.send(Event::Wheel {
             at,
             delta: Point::new(0.0, notches),
+            modifiers: self.modifiers,
+        })
+    }
+
+    /// Scrolls by `delta` notches with the pointer at `at`: fractions of a
+    /// notch, as a touchpad gives, and sideways (`x` above 0 is to the
+    /// right) as well as up and down.
+    pub fn wheel_by(&mut self, at: Point, delta: Point) -> bool {
+        self.send(Event::Wheel {
+            at,
+            delta,
             modifiers: self.modifiers,
         })
     }

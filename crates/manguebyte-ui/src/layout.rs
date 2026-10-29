@@ -25,6 +25,14 @@
 //!   each other), a child is placed by its alignment: stretched to the
 //!   room there is, or at its natural size against the start, the centre
 //!   or the end. Its minimum and maximum always hold.
+//! - A **scroll** node shows its children through a viewport: its
+//!   rectangle less its padding and the room for its scroll bars (see
+//!   [`Arrange::Scroll`] and [`scroll_viewport`]). Along an axis it scrolls
+//!   on, each child is as long as its natural size or the viewport,
+//!   whichever is longer; along an axis it does not, as long as the
+//!   viewport. Children start at the viewport's top-left corner: moving
+//!   them by the scroll offset and clipping them to the viewport is the
+//!   [`Root`](crate::Root)'s work, not layout's.
 //!
 //! Finally every edge is snapped to the nearest device pixel at the scale
 //! given, so that edges stay sharp at any scale and two neighbours that
@@ -126,6 +134,19 @@ pub enum Arrange {
     Column,
     /// On top of each other, each placed in the whole area.
     Stack,
+    /// Through a viewport that scrolls on the axes set to `true`, as a
+    /// [`scroll_view`](crate::scroll_view) does. The node's content size
+    /// ([`LayoutNode::content`]) is the room kept for its scroll bars: its
+    /// width at the right edge when it scrolls up and down, its height at
+    /// the bottom edge when it scrolls sideways. The room is kept whether
+    /// or not the children overflow, so that they do not move when they
+    /// grow past the viewport.
+    Scroll {
+        /// It scrolls sideways.
+        x: bool,
+        /// It scrolls up and down.
+        y: bool,
+    },
 }
 
 /// Where a child sits across a row or column, or on either axis of a
@@ -548,7 +569,7 @@ fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) 
                 width = width.max(size.width);
                 height += size.height;
             }
-            Arrange::Stack => {
+            Arrange::Stack | Arrange::Scroll { .. } => {
                 width = width.max(size.width);
                 height = height.max(size.height);
             }
@@ -573,6 +594,13 @@ fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) 
             width + padding.left + padding.right,
             height + padding.top + padding.bottom,
         ),
+        Arrange::Scroll { x, y } => {
+            let (bar_x, bar_y) = bars(node, x, y);
+            (
+                width + bar_y + padding.left + padding.right,
+                height + bar_x + padding.top + padding.bottom,
+            )
+        }
     };
     Size::new(
         clamp(length(width), min.width, max.width),
@@ -611,6 +639,23 @@ fn arrange(
     let children = || order.kids(index).iter().copied();
     match style.arrange {
         Arrange::Leaf => {}
+        Arrange::Scroll { x, y } => {
+            let viewport = viewport_of(&nodes[index], inner, x, y);
+            for child in children() {
+                let size = natural[child];
+                let width = if x {
+                    size.width.max(viewport.width)
+                } else {
+                    viewport.width
+                };
+                let height = if y {
+                    size.height.max(viewport.height)
+                } else {
+                    viewport.height
+                };
+                rects[child] = Rect::new(viewport.x, viewport.y, width, height);
+            }
+        }
         Arrange::Stack => {
             for child in children() {
                 let child_style = &nodes[child].style;
@@ -700,6 +745,94 @@ fn arrange(
                 let end = at + main;
                 at = end + gap;
             }
+        }
+    }
+}
+
+/// The room a scroll node keeps for its bars: the height of the
+/// horizontal one and the width of the vertical one, 0 for an axis it does
+/// not scroll on.
+fn bars(node: &LayoutNode, x: bool, y: bool) -> (f32, f32) {
+    let bar_x = if x { length(node.content.height) } else { 0.0 };
+    let bar_y = if y { length(node.content.width) } else { 0.0 };
+    (bar_x, bar_y)
+}
+
+/// The viewport of a scroll node whose rectangle less its padding is
+/// `inner`.
+fn viewport_of(node: &LayoutNode, inner: Rect, x: bool, y: bool) -> Rect {
+    let (bar_x, bar_y) = bars(node, x, y);
+    Rect::new(
+        inner.x,
+        inner.y,
+        length(inner.width - bar_y),
+        length(inner.height - bar_x),
+    )
+}
+
+/// The viewport of `node`, a scroll node placed at `placed`: the part of
+/// its rectangle its children show through, less its padding and the room
+/// for its bars, snapped to device pixels at `scale` as [`solve`] snaps.
+/// `None` if the node does not scroll.
+///
+/// ```
+/// use manguebyte_gfx::{Rect, Size};
+/// use manguebyte_ui::layout::{Arrange, Insets, LayoutNode, Style, scroll_viewport, solve};
+///
+/// // A view 100 by 60 that scrolls up and down, with 10 for its bar and 4
+/// // of padding, over a child 200 tall.
+/// let style = Style { arrange: Arrange::Scroll { x: false, y: true }, ..Style::leaf() }
+///     .with_padding(Insets::all(4.0));
+/// let nodes = vec![
+///     LayoutNode::new(style, Size::new(10.0, 10.0), vec![1]),
+///     LayoutNode::leaf(Style::leaf(), Size::new(50.0, 200.0)),
+/// ];
+/// let placed = solve(&nodes, 0, Rect::new(0.0, 0.0, 100.0, 60.0), 1.0);
+/// let viewport = scroll_viewport(&nodes[0], placed[0], 1.0).expect("it scrolls");
+/// assert_eq!(viewport.rect, Rect::new(4.0, 4.0, 82.0, 52.0));
+/// // The child is as wide as the viewport and as tall as it wants.
+/// assert_eq!(placed[1].rect, Rect::new(4.0, 4.0, 82.0, 200.0));
+/// ```
+pub fn scroll_viewport(node: &LayoutNode, placed: Placement, scale: f32) -> Option<Placement> {
+    let Arrange::Scroll { x, y } = node.style.arrange else {
+        return None;
+    };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let inner = placed.inset(node.style.padding, scale).rect;
+    Some(snap(viewport_of(node, inner, x, y), scale))
+}
+
+impl Placement {
+    /// The placement of the device rectangle `device` at `scale`, with
+    /// the same rectangle in logical pixels beside it, as [`solve`] gives
+    /// them. A scale that is not a positive finite number counts as 1.
+    ///
+    /// ```
+    /// use manguebyte_gfx::{IRect, Rect};
+    /// use manguebyte_ui::layout::Placement;
+    ///
+    /// let placed = Placement::from_device(IRect::new(3, 4, 10, 6), 2.0);
+    /// assert_eq!(placed.rect, Rect::new(1.5, 2.0, 5.0, 3.0));
+    /// ```
+    pub fn from_device(device: IRect, scale: f32) -> Placement {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            f64::from(scale)
+        } else {
+            1.0
+        };
+        let logical = |pixels: f64| (pixels / scale) as f32;
+        Placement {
+            rect: Rect::new(
+                logical(f64::from(device.x)),
+                logical(f64::from(device.y)),
+                logical(f64::from(device.width)),
+                logical(f64::from(device.height)),
+            ),
+            device,
         }
     }
 }
@@ -825,17 +958,8 @@ fn snap(rect: Rect, scale: f32) -> Placement {
     let y0 = edge(rect.y);
     let x1 = edge(rect.x + rect.width).max(x0);
     let y1 = edge(rect.y + rect.height).max(y0);
-    let device = IRect::from_edges(x0, y0, x1, y1);
-    let logical = |pixels: f64| (pixels / scale) as f32;
-    Placement {
-        rect: Rect::new(
-            logical(f64::from(x0)),
-            logical(f64::from(y0)),
-            logical(f64::from(device.width)),
-            logical(f64::from(device.height)),
-        ),
-        device,
-    }
+    // `scale` came from an `f32`, so it goes back exactly.
+    Placement::from_device(IRect::from_edges(x0, y0, x1, y1), scale as f32)
 }
 
 #[cfg(test)]

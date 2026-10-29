@@ -119,7 +119,7 @@ impl Root {
         if tip.node.is_some() {
             return false;
         }
-        if self.menus.is_some() || self.capture.is_some() {
+        if self.menus.is_some() || self.capture.is_some() || self.drag.is_some() {
             return true;
         }
         if self.now.saturating_sub(tip.since) < TOOLTIP_DELAY {
