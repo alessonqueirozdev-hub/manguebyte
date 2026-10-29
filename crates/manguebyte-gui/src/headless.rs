@@ -8,7 +8,9 @@ use std::time::Duration;
 use manguebyte_gfx::{Pixmap, Point};
 use manguebyte_plugin::editor::{Key, KeyEvent, Modifiers};
 use manguebyte_ui::{AccessEntry, Role};
-use manguebyte_window::{Button, Headless, PhysicalPoint, PhysicalSize, RawInput};
+use manguebyte_window::{
+    Button, DragData, Handled as WindowHandled, Headless, PhysicalPoint, PhysicalSize, RawInput,
+};
 
 use crate::open::{Clock, FRAME_PERIOD_MS, Shared};
 
@@ -193,6 +195,28 @@ impl HeadlessEditor {
         let scale = self.layout().map_or(1.0, |(_, scale)| f64::from(scale));
         let device = |v: f32| (f64::from(v) * scale).round() as i32;
         PhysicalPoint::new(device(at.x), device(at.y))
+    }
+
+    /// Drags `data` from another program onto the editor at `at`, in
+    /// logical pixels, and returns whether a widget takes it there: never
+    /// when the editor's window takes no drops.
+    pub fn drag_enter(&self, at: Point, data: DragData) -> bool {
+        self.window.drag_enter(self.device(at), data) == WindowHandled::Yes
+    }
+
+    /// Moves the drag to `at`; returns whether a widget takes it there.
+    pub fn drag_over(&self, at: Point) -> bool {
+        self.window.drag_over(self.device(at)) == WindowHandled::Yes
+    }
+
+    /// Drops the drag at `at`; returns whether a widget took it.
+    pub fn drop_at(&self, at: Point) -> bool {
+        self.window.drop_at(self.device(at)) == WindowHandled::Yes
+    }
+
+    /// The drag leaves the editor, or is cancelled.
+    pub fn drag_leave(&self) {
+        self.window.drag_leave();
     }
 
     /// Presses the main button at `at`, in logical pixels.

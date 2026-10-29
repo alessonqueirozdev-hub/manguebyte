@@ -71,6 +71,20 @@
 //! and refuses with
 //! [`EditorError::Unsupported`](manguebyte_plugin::editor::EditorError::Unsupported).
 //!
+//! # Application windows
+//!
+//! A standalone program, or a plugin run as one, shows its interface in a
+//! window of its own: [`Editor::open_in_app`] opens an editor in a window
+//! of a `manguebyte_window::App`, and [`open_app_window`] opens any view.
+//! Both return an [`AppEditor`], which runs the same glue with no host:
+//! gestures set the parameters given, the window follows its monitor's
+//! scale, a close request closes it unless the application says otherwise
+//! ([`AppEditor::on_close_request`]), files dropped on it reach the widget
+//! under the pointer as drags carrying a `DropData`, and the system's file
+//! dialogs are a call away ([`AppEditor::dialogs`]). `App::run` runs the
+//! loop. An editor inside a host takes drops too when built
+//! [`with_file_drops`](Editor::with_file_drops). See ADR 0010.
+//!
 //! # Headless mode, for tests
 //!
 //! The `headless` cargo feature, which test code enables, adds
@@ -92,6 +106,7 @@
 
 #![forbid(unsafe_code)]
 
+mod app;
 mod editor;
 #[cfg(feature = "headless")]
 mod headless;
@@ -100,6 +115,7 @@ mod open;
 #[cfg(all(test, windows))]
 mod win32_tests;
 
+pub use app::{AppEditor, open_app_window};
 pub use editor::Editor;
 #[cfg(feature = "headless")]
 pub use headless::HeadlessEditor;

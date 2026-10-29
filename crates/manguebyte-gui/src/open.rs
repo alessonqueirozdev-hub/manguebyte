@@ -99,7 +99,17 @@ pub(crate) struct Shared {
     /// frame, with where they came from and what the interface said, so
     /// that the same keystroke arriving both ways is taken once.
     recent: RefCell<Vec<(Path, Typed, Handled)>>,
+    /// Whether the window is an application's: the system sizes it for a
+    /// new monitor itself, and it hears close requests.
+    pub(crate) app: bool,
+    /// What a close request does: closes the window unless this says no.
+    pub(crate) close_request: RefCell<Option<CloseRequest>>,
+    /// What the drag over the window carries, for the interface.
+    dropping: RefCell<Option<ui::DropData>>,
 }
+
+/// What an application decides on a close request: true to close.
+pub(crate) type CloseRequest = Box<dyn FnMut(&WindowCx<'_>) -> bool>;
 
 /// Which way a key reached the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,7 +214,7 @@ fn physical(size: HostSize) -> PhysicalSize {
     PhysicalSize::new(size.width, size.height)
 }
 
-fn editor_error(error: WindowError) -> EditorError {
+pub(crate) fn editor_error(error: WindowError) -> EditorError {
     match error {
         WindowError::Unsupported(api) => EditorError::Unsupported(api),
         other => EditorError::Platform(other.to_string()),
@@ -212,6 +222,98 @@ fn editor_error(error: WindowError) -> EditorError {
 }
 
 impl Shared {
+    /// What an editor of `base` size within `rules` shares with its window,
+    /// before either is made: nothing drawn until it is let go (`hold`).
+    pub(crate) fn new(
+        context: EditorContext,
+        base: HostSize,
+        rules: Resize,
+        scale: Option<f64>,
+        clock: Clock,
+        app: bool,
+    ) -> Rc<Shared> {
+        Rc::new(Shared {
+            root: RefCell::new(None),
+            clock,
+            context,
+            base,
+            rules,
+            host_scale: Cell::new(scale),
+            scale_seen: Cell::new(scale.unwrap_or(1.0)),
+            reported_closed: Cell::new(false),
+            hold: Cell::new(true),
+            stale: Cell::new(false),
+            frames: Cell::new(0),
+            presented: Cell::new(0),
+            painted: Cell::new(0),
+            layouts: Cell::new(0),
+            typing: Cell::new(false),
+            recent: RefCell::new(Vec::with_capacity(RECENT)),
+            app,
+            close_request: RefCell::new(None),
+            dropping: RefCell::new(None),
+        })
+    }
+
+    /// Lets the frames go, after the window and the root are made.
+    pub(crate) fn release(&self) {
+        self.hold.set(false);
+    }
+
+    /// The person asked to close the application window: it closes unless
+    /// the application's answer says no.
+    fn close_requested(&self, window: &WindowCx<'_>) {
+        let decide = self.close_request.borrow_mut().take();
+        let close = match decide {
+            Some(mut decide) => {
+                let close = decide(window);
+                let mut slot = self.close_request.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(decide);
+                }
+                close
+            }
+            None => true,
+        };
+        if close {
+            window.close();
+        }
+    }
+
+    /// Gives a drag from another program to the interface.
+    fn file_drop(&self, window: &WindowCx<'_>, event: Event) -> Handled {
+        let at = |pointer: manguebyte_window::PointerEvent| pointer.position;
+        let drop = match event {
+            Event::DragEnter(pointer) => {
+                *self.dropping.borrow_mut() = window.drag_data().map(|data| {
+                    let dropped = ui::DropData::files(data.files.iter().cloned());
+                    match &data.text {
+                        Some(text) => dropped.with_text(text.clone()),
+                        None => dropped,
+                    }
+                });
+                ui::FileDrop::Enter { at: at(pointer) }
+            }
+            Event::DragOver(pointer) => ui::FileDrop::Over { at: at(pointer) },
+            Event::Drop(pointer) => ui::FileDrop::Drop { at: at(pointer) },
+            _ => ui::FileDrop::Leave,
+        };
+        let data = self.dropping.borrow().clone().unwrap_or_default();
+        if matches!(drop, ui::FileDrop::Leave | ui::FileDrop::Drop { .. }) {
+            *self.dropping.borrow_mut() = None;
+        }
+        let handled = self.guarded(window, || {
+            let Ok(mut slot) = self.root.try_borrow_mut() else {
+                return Handled::No;
+            };
+            match slot.as_mut().map(|root| root.file_drop(drop, &data)) {
+                Some(ui::Handled::Yes) => Handled::Yes,
+                _ => Handled::No,
+            }
+        });
+        handled.unwrap_or(Handled::No)
+    }
+
     /// Brings the root to the window's size and scale.
     fn sync(root: &mut Root, window: &WindowCx<'_>) {
         let scale = window.scale() as f32;
@@ -404,7 +506,9 @@ impl Shared {
     /// The system's scale changed and the host gave none: the editor asks
     /// for its size at the new scale.
     fn follow_system_scale(&self, window: &WindowCx<'_>, old: f64, scale: f64) {
-        if self.host_scale.get().is_some() || self.is_closed() {
+        // An application's window takes the size the system suggests for
+        // its new monitor by itself.
+        if self.app || self.host_scale.get().is_some() || self.is_closed() {
             return;
         }
         let current = host_size(window.size());
@@ -426,8 +530,16 @@ fn caret_in_device(root: &Root) -> Option<IRect> {
 }
 
 /// What the window calls with every event.
-struct Glue {
+pub(crate) struct Glue {
     shared: Rc<Shared>,
+}
+
+impl Glue {
+    pub(crate) fn new(shared: &Rc<Shared>) -> Glue {
+        Glue {
+            shared: Rc::clone(shared),
+        }
+    }
 }
 
 /// A window event as the interface receives it, if it has a meaning there.
@@ -503,6 +615,13 @@ impl WindowHandler for Glue {
             Event::Closed => {
                 shared.give_up();
                 Handled::Yes
+            }
+            Event::CloseRequested => {
+                shared.close_requested(window);
+                Handled::Yes
+            }
+            Event::DragEnter(_) | Event::DragOver(_) | Event::DragLeave | Event::Drop(_) => {
+                shared.file_drop(window, event)
             }
             Event::Key { key, .. } => shared.deliver_typed(window, Path::Window, Typed::Key(key)),
             Event::Text(c) => shared.deliver_typed(window, Path::Window, Typed::Text(c)),
@@ -656,6 +775,21 @@ impl fmt::Debug for Opened {
     }
 }
 
+/// Builds the interface of `view` for `window`, on `context`, in `theme`,
+/// copying to and pasting from the system's clipboard through the window.
+pub(crate) fn attach_root(
+    shared: &Shared,
+    window: &Window,
+    view: ui::View,
+    theme: ui::Theme,
+    context: EditorContext,
+) {
+    let root = Root::new(view, window.logical_size(), window.scale() as f32, context)
+        .with_theme(theme)
+        .with_clipboard(Rc::new(WindowClipboard(window.clipboard())));
+    *shared.root.borrow_mut() = Some(root);
+}
+
 /// Opens `spec` inside `parent` with `backend`.
 pub(crate) fn open_with(
     spec: &Editor,
@@ -687,26 +821,9 @@ pub(crate) fn open_window(
         Backend::Native => Clock::Real(Instant::now()),
         Backend::Headless => Clock::Manual(Cell::new(Duration::ZERO)),
     };
-    let shared = Rc::new(Shared {
-        root: RefCell::new(None),
-        clock,
-        context: context.clone(),
-        base: spec.size,
-        rules: spec.resize,
-        host_scale: Cell::new(scale),
-        scale_seen: Cell::new(scale.unwrap_or(1.0)),
-        reported_closed: Cell::new(false),
-        // Until it opens, nothing is drawn: the first frame timer tick draws
-        // everything.
-        hold: Cell::new(true),
-        stale: Cell::new(false),
-        frames: Cell::new(0),
-        presented: Cell::new(0),
-        painted: Cell::new(0),
-        layouts: Cell::new(0),
-        typing: Cell::new(false),
-        recent: RefCell::new(Vec::with_capacity(RECENT)),
-    });
+    // Until it opens, nothing is drawn: the first frame timer tick draws
+    // everything.
+    let shared = Shared::new(context.clone(), spec.size, spec.resize, scale, clock, false);
     // Hidden, and with no frame timer, until the host shows it: CLAP's
     // `show`, or the VST 3 wrapper once `attached` succeeded. Both reach the
     // editor as `set_visible(true)`, which starts the timer.
@@ -714,9 +831,10 @@ pub(crate) fn open_window(
     if let Some(scale) = scale {
         options = options.with_scale(scale);
     }
-    let glue = Glue {
-        shared: Rc::clone(&shared),
-    };
+    if spec.accepts_drops {
+        options = options.with_file_drops();
+    }
+    let glue = Glue::new(&shared);
     #[cfg_attr(not(feature = "headless"), allow(unused_variables))]
     let (window, headless) = match backend {
         Backend::Native => (
@@ -728,15 +846,7 @@ pub(crate) fn open_window(
             (window, Some(headless))
         }
     };
-    let root = Root::new(
-        (spec.view)(),
-        window.logical_size(),
-        window.scale() as f32,
-        context,
-    )
-    .with_theme(spec.theme)
-    .with_clipboard(Rc::new(WindowClipboard(window.clipboard())));
-    *shared.root.borrow_mut() = Some(root);
+    attach_root(&shared, &window, (spec.view)(), spec.theme, context);
 
     // An editor given no scale uses the system's, and asks for its size at
     // that scale.

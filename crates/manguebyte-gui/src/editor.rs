@@ -112,6 +112,7 @@ pub struct Editor {
     pub(crate) resize: Resize,
     pub(crate) theme: Theme,
     pub(crate) view: BuildView,
+    pub(crate) accepts_drops: bool,
     #[cfg(feature = "headless")]
     pub(crate) on_headless: Option<HeadlessHook>,
 }
@@ -129,6 +130,7 @@ impl Editor {
             resize: Resize::Fixed,
             theme: Theme::default(),
             view: Arc::new(move || view().into_view()),
+            accepts_drops: false,
             #[cfg(feature = "headless")]
             on_headless: None,
         }
@@ -146,6 +148,21 @@ impl Editor {
     #[must_use]
     pub fn with_theme(mut self, theme: Theme) -> Editor {
         self.theme = theme;
+        self
+    }
+
+    /// The same editor, taking files and text dragged onto its window from
+    /// other programs, which its widgets hear as drags whose payload is a
+    /// [`DropData`](manguebyte_ui::DropData) (see
+    /// [`Root::file_drop`](manguebyte_ui::Root::file_drop)). Off by
+    /// default: inside a host, a window that takes drops hides the host's
+    /// own drop target under it, and on Win32 it takes them only where the
+    /// host's main thread has OLE, which the editor never initialises for
+    /// it. An application window ([`open_in_app`](Self::open_in_app))
+    /// always takes them.
+    #[must_use]
+    pub fn with_file_drops(mut self) -> Editor {
+        self.accepts_drops = true;
         self
     }
 

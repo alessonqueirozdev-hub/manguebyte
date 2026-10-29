@@ -176,6 +176,7 @@ fn a_child_window_never_hears_a_close_request_and_has_no_title() {
 fn the_title_can_change() {
     let (app, _test) = App::headless();
     let (window, _) = logged(&app, options("Untitled", 10.0, 10.0));
+    assert!(window.headless_controller().is_some());
     assert!(window.is_app_window());
     window.set_title("Kit 1 \u{2014} Parabolic").expect("open");
     assert_eq!(window.title().as_deref(), Some("Kit 1 \u{2014} Parabolic"));

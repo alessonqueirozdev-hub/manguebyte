@@ -1494,6 +1494,13 @@ impl Window {
         crate::Dialogs::new(&self.inner)
     }
 
+    /// The controller of a headless window, such as one a headless
+    /// [`App`](crate::App) opened, or `None` for a system window.
+    pub fn headless_controller(&self) -> Option<Headless> {
+        matches!(self.inner.platform, Platform::Headless(_))
+            .then(|| Headless::new(Rc::downgrade(&self.inner)))
+    }
+
     /// Whether the handler panicked. The window then delivers nothing more;
     /// its owner should drop it.
     pub fn is_poisoned(&self) -> bool {

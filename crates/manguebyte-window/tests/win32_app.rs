@@ -101,6 +101,7 @@ fn an_app_window_is_a_framed_top_level_window_of_its_logical_size() {
     );
     assert_eq!(testing::is_resizable(hwnd), Some(true));
     assert!(window.is_app_window());
+    assert!(window.headless_controller().is_none());
     // Made and sized quietly: the handler heard nothing yet.
     assert!(
         take(&log)

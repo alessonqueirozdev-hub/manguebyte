@@ -14,6 +14,9 @@ homepage.workspace = true
 [dependencies]
 # Geometry and pixmaps: what the interface draws and the window presents.
 manguebyte-gfx.workspace = true
+# The parameters an application window's gestures set, as a standalone
+# program's host would.
+manguebyte-params.workspace = true
 # The editor contract this crate implements (`manguebyte_plugin::editor`).
 manguebyte-plugin.workspace = true
 # The widget tree, its frames and its input.
@@ -39,7 +42,6 @@ manguebyte-window = { workspace = true, features = ["testing"] }
 manguebyte-clap.workspace = true
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
-manguebyte-params.workspace = true
 manguebyte-vst3.workspace = true
 
 [lints]
