@@ -388,6 +388,45 @@ fn an_editor_without_a_headless_hook_opens_in_the_systems_window() {
 }
 
 #[test]
+fn an_idle_editor_presents_nothing_and_a_hover_presents_only_while_it_moves() {
+    let params = params();
+    let open = open(
+        &spec(&params, &Arc::default(), &Arc::default()),
+        &params,
+        Some(2.0),
+    );
+    open.ui.tick();
+    // Many timer ticks with nothing happening: frames poll, and draw and
+    // present nothing. The frame timer is the only timer.
+    let (frames, presented) = open.ui.frames();
+    let work = open.ui.work();
+    for _ in 0..600 {
+        open.ui.tick();
+    }
+    assert_eq!(open.ui.frames(), (frames + 600, presented));
+    assert_eq!(open.ui.work(), work);
+    assert_eq!(open.ui.window().timers(), [(TimerId(1), FRAME_PERIOD_MS)]);
+    // The pointer comes over the knob: its hover eases in over the theme's
+    // fast duration, presenting a frame each tick until it settles, and
+    // nothing after.
+    let knob = open.ui.find(Role::Slider, "Gain").expect("a knob");
+    open.ui.move_to(knob.bounds.center());
+    let (_, before) = open.ui.frames();
+    for _ in 0..30 {
+        open.ui.tick();
+    }
+    let (_, after) = open.ui.frames();
+    let moving = after - before;
+    assert!((4..=9).contains(&moving), "{moving} frames presented");
+    for _ in 0..60 {
+        open.ui.tick();
+    }
+    assert_eq!(open.ui.frames().1, after);
+    drop(open.editor);
+    drop(open.link);
+}
+
+#[test]
 fn closing_leaves_no_window_timer_or_gesture_behind() {
     let params = params();
     let open = open(

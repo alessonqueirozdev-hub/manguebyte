@@ -11,6 +11,7 @@ use super::{
 };
 use crate::access::{AccessNode, Action, Role};
 use crate::event::{Event, Handled};
+use crate::motion::Lerp;
 use crate::param::ParamHandle;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
@@ -182,10 +183,15 @@ impl Widget for Knob {
         let center = Point::new(rect.x + rect.width * 0.5, top + room * 0.5);
         let value = self.adjust.binding.shown().clamp(0.0, 1.0) as f32;
         if radius > 0.0 {
+            // The track brightens a little as the pointer comes over.
+            let track = theme
+                .palette
+                .track
+                .lerp(theme.palette.text_muted, 0.35 * cx.hover());
             scene.stroke(
                 Arc::new(center, radius, START, SWEEP),
                 Stroke::round(ring),
-                theme.palette.track,
+                track,
             );
             if value > 0.0 {
                 scene.stroke(

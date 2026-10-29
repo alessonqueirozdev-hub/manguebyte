@@ -142,17 +142,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS, DLGC_WANTTAB, DefWindowProcW, DestroyCaret,
     DestroyWindow, GetClassInfoExW, GetClientRect, GetParent, GetSystemMetrics,
     GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer, LoadCursorW, MINMAXINFO,
-    RegisterClassExW, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, SW_SHOWNA,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos,
-    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_TIMER_MINIMUM, UnregisterClassW,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DPICHANGED_AFTERPARENT,
-    WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_PRINTCLIENT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_VISIBLE,
+    RegisterClassExW, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SPI_GETCLIENTAREAANIMATION,
+    SW_HIDE, SW_SHOW, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SendMessageW, SetCaretPos, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    SystemParametersInfoW, USER_TIMER_MINIMUM, UnregisterClassW, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETDLGCODE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT, WM_RBUTTONDBLCLK,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::app::{AppInner, AppWindowOptions, Frame, device_size};
@@ -385,6 +385,25 @@ pub(crate) fn check_parent(hwnd: HWND) -> Result<(), WindowError> {
         ));
     }
     Ok(())
+}
+
+/// Whether the system lets programs animate their windows' contents: the
+/// "Animation effects" setting (Settings, Accessibility, Visual effects),
+/// read as `SPI_GETCLIENTAREAANIMATION`. True if it cannot be read.
+pub(crate) fn client_area_animation() -> bool {
+    let mut enabled: i32 = 1;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through the
+    // pointer, which points at a live i32 for the length of the call; no
+    // flag asks the system to write or broadcast the setting.
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            (&raw mut enabled).cast::<c_void>(),
+            0,
+        )
+    };
+    read == 0 || enabled != 0
 }
 
 /// Looks up `GetDpiForWindow` in user32, which is loaded in every process

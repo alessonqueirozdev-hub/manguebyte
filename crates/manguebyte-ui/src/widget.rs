@@ -10,6 +10,7 @@ use crate::clipboard::Clipboard;
 use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Event, Handled};
 use crate::menu::Menu;
+use crate::motion::{Animated, Lerp, Motion};
 use crate::root::{Anchor, MenuRequest};
 use crate::scroll::ScrollMetrics;
 use crate::theme::Theme;
@@ -224,6 +225,7 @@ pub(crate) struct Requests {
 /// What [`Widget::update`] is given.
 pub struct UpdateCx<'a> {
     pub(crate) theme: &'a Theme,
+    pub(crate) motion: Motion,
     pub(crate) rect: Rect,
     pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
@@ -257,6 +259,63 @@ impl UpdateCx<'_> {
     /// How long since the previous frame; zero on the first.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    /// The motion tokens in effect: the theme's, with every transition a
+    /// jump when the theme or the system turns motion off.
+    pub fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// Moves `value` on to this frame's time; while it changes the widget
+    /// is drawn again, and while it runs the root keeps frames coming.
+    /// Returns whether it changed.
+    ///
+    /// ```
+    /// use manguebyte_gfx::{Color, Rect, Scene, Size};
+    /// use manguebyte_ui::access::{AccessNode, Role};
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{AccessCx, Animated, MeasureCx, PaintCx, UpdateCx, Widget};
+    ///
+    /// /// A light that fades in once.
+    /// struct Fade(Animated<f32>);
+    ///
+    /// impl Widget for Fade {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Image, "Fade")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::new(10.0, 10.0)
+    ///     }
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         let (now, base) = (cx.now(), cx.motion().base());
+    ///         self.0.transition(1.0, now, base);
+    ///         cx.animate(&mut self.0);
+    ///     }
+    ///     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
+    ///         scene.fill(cx.rect(), Color::WHITE.with_opacity(self.0.value()));
+    ///     }
+    /// }
+    ///
+    /// let mut ui = Harness::new(Fade(Animated::new(0.0)), Size::new(10.0, 10.0), 1.0);
+    /// ui.set_motion(true);
+    /// assert!(ui.frame().animating);
+    /// ui.advance_ms(100);
+    /// assert!(ui.frame().animating);
+    /// ui.advance_ms(100);
+    /// // Settled: no more frames wanted, nothing drawn.
+    /// assert!(!ui.frame().animating);
+    /// assert_eq!(ui.frame().damaged, 0);
+    /// ```
+    pub fn animate<T: Lerp>(&mut self, value: &mut Animated<T>) -> bool {
+        let changed = value.tick(self.now);
+        if changed {
+            self.requests.paint = true;
+        }
+        if value.is_running() {
+            self.requests.frame = true;
+        }
+        changed
     }
 
     /// Asks for [`Widget::paint`] to be called this frame.
@@ -319,6 +378,8 @@ pub struct PaintCx<'a> {
     pub(crate) focused: bool,
     pub(crate) hovered: bool,
     pub(crate) now: Duration,
+    /// The root's amounts for the widget: hover, press, focus ring.
+    pub(crate) amounts: (f32, f32, f32),
 }
 
 impl PaintCx<'_> {
@@ -349,6 +410,26 @@ impl PaintCx<'_> {
     /// [`Widget::hover_changed`]).
     pub fn is_hovered(&self) -> bool {
         self.hovered
+    }
+
+    /// How far the hover has come in, from 0 (not hovered) to 1, eased over
+    /// the theme's [`fast`](Motion::fast) duration: what a widget blends its
+    /// hover look by.
+    pub fn hover(&self) -> f32 {
+        self.amounts.0
+    }
+
+    /// How far a press on the widget has come in, from 0 to 1: the pointer
+    /// went down on it and has not been let go.
+    pub fn press(&self) -> f32 {
+        self.amounts.1
+    }
+
+    /// How far the focus ring has come in, from 0 to 1. It comes in only
+    /// while the widget has the focus and the focus should be shown (see
+    /// [`Root::focus_visible`](crate::Root::focus_visible)).
+    pub fn focus_ring(&self) -> f32 {
+        self.amounts.2
     }
 
     /// The time of this frame.
@@ -398,6 +479,7 @@ impl AccessCx<'_> {
 /// What [`Widget::event`] and [`Widget::act`] are given.
 pub struct EventCx<'a> {
     pub(crate) theme: &'a Theme,
+    pub(crate) motion: Motion,
     pub(crate) rect: Rect,
     pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
@@ -430,6 +512,11 @@ impl EventCx<'_> {
     /// The time of the last frame.
     pub fn now(&self) -> Duration {
         self.now
+    }
+
+    /// The motion tokens in effect (see [`UpdateCx::motion`]).
+    pub fn motion(&self) -> Motion {
+        self.motion
     }
 
     /// Whether the widget has the keyboard focus.

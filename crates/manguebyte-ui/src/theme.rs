@@ -18,6 +18,8 @@
 
 use manguebyte_gfx::{Color, TextStyle};
 
+use crate::motion::Motion;
+
 /// The colours of an interface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
@@ -124,6 +126,8 @@ pub struct Theme {
     pub corners: Corners,
     /// Text styles.
     pub typography: Typography,
+    /// How long changes take and how they ease, and whether they animate.
+    pub motion: Motion,
 }
 
 impl Theme {
@@ -175,6 +179,7 @@ impl Theme {
                     .with_max_lines(1),
                 title: TextStyle::new(16.0).with_weight(600.0).with_max_lines(1),
             },
+            motion: Motion::STANDARD,
         }
     }
 

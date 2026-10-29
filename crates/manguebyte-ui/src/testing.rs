@@ -190,7 +190,14 @@ impl Harness {
         let (context, link) = EditorContext::attach(host.clone());
         let clipboard = Rc::new(MemoryClipboard::new());
         Harness {
-            root: Root::new(view, size, scale, context).with_clipboard(clipboard.clone()),
+            root: {
+                let mut root =
+                    Root::new(view, size, scale, context).with_clipboard(clipboard.clone());
+                // A frame after an input shows where it ends, as tests of
+                // what is drawn expect; tests of motion turn it on.
+                root.set_system_motion(false);
+                root
+            },
             link: Some(link),
             host,
             clipboard,
@@ -207,6 +214,14 @@ impl Harness {
     /// Draws the interface in `theme` from the next frame on.
     pub fn set_theme(&mut self, theme: Theme) {
         self.root.set_theme(theme);
+    }
+
+    /// Lets the interface animate (`true`) or not. A harness starts with
+    /// motion off, as if the system asked for less of it, so that every
+    /// transition jumps and one frame after an input shows its end; a test
+    /// of motion turns it on and drives the clock.
+    pub fn set_motion(&mut self, enabled: bool) {
+        self.root.set_system_motion(enabled);
     }
 
     /// The interface.

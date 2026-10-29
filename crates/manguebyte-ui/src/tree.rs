@@ -4,6 +4,7 @@
 use manguebyte_gfx::{IRect, Rect, Scene};
 
 use crate::layout::{Arrange, LayoutNode};
+use crate::motion::NodeMotion;
 use crate::scroll::ScrollMetrics;
 use crate::view::View;
 use crate::widget::Widget;
@@ -60,6 +61,8 @@ pub(crate) struct Node {
     pub(crate) clip: Option<(Rect, IRect)>,
     /// For a node laid out as a scroll node, where it is scrolled.
     pub(crate) scroll: Option<ScrollMetrics>,
+    /// How far its hover, press and focus ring have come in.
+    pub(crate) motion: NodeMotion,
 }
 
 /// Every widget, in tree order, with the layout tree beside it.
@@ -130,6 +133,7 @@ impl Tree {
                 }),
                 _ => None,
             },
+            motion: NodeMotion::new(),
         });
         self.layout
             .push(LayoutNode::new(style, Default::default(), Vec::new()));

@@ -784,9 +784,15 @@ pub(crate) fn attach_root(
     theme: ui::Theme,
     context: EditorContext,
 ) {
-    let root = Root::new(view, window.logical_size(), window.scale() as f32, context)
+    let mut root = Root::new(view, window.logical_size(), window.scale() as f32, context)
         .with_theme(theme)
         .with_clipboard(Rc::new(WindowClipboard(window.clipboard())));
+    // People who asked the system for less motion get none: transitions
+    // jump. A headless window, on a test's clock, keeps the theme's, so
+    // that what it draws does not depend on the machine.
+    if matches!(shared.clock, Clock::Real(_)) {
+        root.set_system_motion(manguebyte_window::system_motion());
+    }
     *shared.root.borrow_mut() = Some(root);
 }
 

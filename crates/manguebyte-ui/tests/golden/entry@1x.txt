@@ -23,7 +23,7 @@ clip rect(10 96 70 41) {
   stroke path(nonzero M 64 122.759766 L 68 126.759766 L 72 122.759766) width 1.5 cap round join round solid(#9aa0aaff)
 }
 clip rect(88 96 62 80) {
-  stroke arc(119 136.60498 20 2.3561945 4.712389) width 4 cap round join round solid(#3a3f4aff)
+  stroke arc(119 136.60498 20 2.3561945 4.712389) width 4 cap round join round solid(#5c616cff)
   stroke arc(119 136.60498 20 2.3561945 2.668736) width 4 cap round join round solid(#ff7a00ff)
   stroke path(nonzero M 120.53739 131.8472 L 123.91965 121.3801) width 2 cap round join round solid(#e8e8e8ff)
   text "Cutoff" size 12 weight 500 opsz 14 solid(#e8e8e8ff) [13 101.07031 109.625, 216 109.87109 109.625, 211 117.08984 109.625, 187 121.05664 109.625, 148 128.30469 109.625, 148 132.37695 109.625]

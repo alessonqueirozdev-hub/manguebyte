@@ -4,7 +4,7 @@ text "Filter" size 16 weight 600 opsz 16 solid(#1c1f24ff) [31 12 29.820313, 158 
 fill rounded_rect(304 15 32 18 radii 9 9 9 9) solid(#e86a00ff)
 fill circle(327 24 7) solid(#23262dff)
 text "Bypass" size 12 weight 500 opsz 14 solid(#1c1f24ff) [12 342 28.365234, 232 349.88086 28.365234, 198 356.7832 28.365234, 115 364.31836 28.365234, 204 371.1328 28.365234, 204 377.5957 28.365234]
-stroke arc(43 102.60498 20 2.3561945 4.712389) width 4 cap round join round solid(#d0d4dbff)
+stroke arc(43 102.60498 20 2.3561945 4.712389) width 4 cap round join round solid(#a8aeb6ff)
 stroke arc(43 102.60498 20 2.3561945 3.3755941) width 4 cap round join round solid(#e86a00ff)
 stroke path(nonzero M 47.25897 99.985596 L 56.6287 94.22294) width 2 cap round join round solid(#23262dff)
 text "Cutoff" size 12 weight 500 opsz 14 solid(#1c1f24ff) [13 25.070313 57.625, 216 33.871094 57.625, 211 41.089844 57.625, 187 45.05664 57.625, 148 52.304688 57.625, 148 56.376953 57.625]

@@ -77,6 +77,12 @@
 //!   assistive technology too.
 //! - **[`Theme`]**: colours, sizes, radii and type as typed data, with no
 //!   inheritance.
+//! - **[Motion](motion)**: [`Animated`] values that ease to a new target
+//!   on the frame clock, the theme's duration tokens, and hover, press
+//!   and focus amounts the root animates for every widget. Only what moves
+//!   is drawn again, and frames stop asking for more once everything has
+//!   settled; with motion turned off (the theme or the system) changes
+//!   jump.
 //! - **[Accessibility](access)**: roles, names, values, ranges, states and
 //!   actions, keyboard focus in tree order, [`Root::act`] for requests
 //!   from assistive technology, and a check of the tree and the theme's
@@ -176,6 +182,7 @@ pub mod drag;
 pub mod event;
 pub mod layout;
 pub mod menu;
+pub mod motion;
 mod param;
 mod root;
 pub mod scroll;
@@ -195,6 +202,7 @@ pub use event::{
     Button, Composition, DropData, Event, FileDrop, Handled, Key, KeyEvent, MenuEvent, Modifiers,
 };
 pub use menu::{Menu, MenuItem};
+pub use motion::{Animated, Easing, Motion, Transition};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
 pub use scroll::ScrollMetrics;

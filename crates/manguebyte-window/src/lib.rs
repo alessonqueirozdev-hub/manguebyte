@@ -133,3 +133,24 @@ pub use headless::Headless;
 pub use manguebyte_gfx::{IRect, Pixmap};
 pub use manguebyte_plugin::editor::{ParentWindow, WindowApi};
 pub use window::{Window, WindowCx, WindowError, WindowOptions};
+
+/// Whether the person lets interfaces animate: false when they asked the
+/// system for less motion. On Windows this is the "Animation effects"
+/// setting (`SPI_GETCLIENTAREAANIMATION`); elsewhere, and when it cannot
+/// be read, it is true. It is read when called, so a window that opens
+/// after the setting changes follows it.
+///
+/// ```
+/// // Either answer is fine: it is the machine's setting.
+/// let _animate: bool = manguebyte_window::system_motion();
+/// ```
+pub fn system_motion() -> bool {
+    #[cfg(windows)]
+    {
+        win32::client_area_animation()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}

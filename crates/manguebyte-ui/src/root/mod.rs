@@ -21,6 +21,7 @@ use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::damage::{MAX_DAMAGE, tidy};
 use crate::event::{Event, Handled, Key, MenuEvent};
 use crate::layout::{self, Placement};
+use crate::motion::Motion;
 use crate::scroll::{ScrollMetrics, snap};
 use crate::theme::Theme;
 use crate::tree::{NodeId, Tree};
@@ -38,7 +39,9 @@ pub struct Frame<'a> {
     /// device pixels.
     pub pixels: &'a Pixmap,
     /// Whether something is moving on its own and wants another frame
-    /// soon, such as a meter still falling.
+    /// soon, such as a meter still falling or a transition still running.
+    /// False once everything has settled: a window may then stop asking
+    /// for frames for motion's sake.
     pub animating: bool,
     /// How many widgets recorded a scene that differs from the one they
     /// had (every widget, when everything is drawn again).
@@ -169,6 +172,16 @@ pub struct Root {
     /// Set while a widget hears that it gained or lost the focus: what it
     /// asks for the focus then is not done, so that focus cannot bounce.
     notifying: bool,
+    /// Whether the system lets interfaces animate (see
+    /// [`Root::set_system_motion`]).
+    system_motion: bool,
+    /// The widget a press went down on, until it is let go.
+    pressed_on: Option<NodeId>,
+    /// Whether the focus is shown: after the keyboard was used, not after
+    /// a press.
+    focus_visible: bool,
+    /// Whether the last frame had something still moving.
+    animating: bool,
     needs_layout: bool,
     /// Every widget is drawn again, over the whole buffer, next frame.
     full: bool,
@@ -297,6 +310,10 @@ impl Root {
             tip_quiet: None,
             drag: None,
             notifying: false,
+            system_motion: true,
+            pressed_on: None,
+            focus_visible: false,
+            animating: false,
             needs_layout: true,
             full: true,
             now: Duration::ZERO,
@@ -321,6 +338,39 @@ impl Root {
     /// The theme.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Follows the system's setting for motion: `false` when the person
+    /// asked the system for less of it (on Windows, client area animations
+    /// turned off), which makes every transition a jump whatever the
+    /// theme says. A window layer sets it when it opens the interface.
+    pub fn set_system_motion(&mut self, enabled: bool) {
+        self.system_motion = enabled;
+    }
+
+    /// The motion tokens in effect: the theme's, turned off if the theme or
+    /// the system turns motion off.
+    pub fn motion(&self) -> Motion {
+        if self.system_motion {
+            self.theme.motion
+        } else {
+            self.theme.motion.reduced()
+        }
+    }
+
+    /// Whether the widget with the focus shows it, as `:focus-visible`
+    /// does on the web: after the keyboard was used (Tab, the arrows, any
+    /// key) or assistive technology moved the focus, and not after a press
+    /// of the pointer, which hides it again. The focus itself, and what
+    /// assistive technology is told about it, does not change.
+    pub fn focus_visible(&self) -> bool {
+        self.focus_visible
+    }
+
+    /// Whether the last frame had a transition or another animation still
+    /// running (see [`Frame::animating`]).
+    pub fn is_animating(&self) -> bool {
+        self.animating
     }
 
     /// The size, in logical pixels.
@@ -675,6 +725,7 @@ impl Root {
             return false;
         }
         if action == Action::Focus {
+            self.focus_visible = true;
             self.set_focus(Some(id));
             self.reveal(id);
             return true;
@@ -693,6 +744,7 @@ impl Root {
         match id {
             Some(id) if !self.focusable(id) => false,
             _ => {
+                self.focus_visible |= id.is_some();
                 self.set_focus(id);
                 if let Some(id) = id {
                     self.reveal(id);
@@ -762,9 +814,11 @@ impl Root {
         call: impl FnOnce(&mut dyn Widget, &mut EventCx<'_>) -> R,
     ) -> R {
         let mut requests = Requests::default();
+        let motion = self.motion();
         let node = &mut self.tree.nodes[id.index()];
         let mut cx = EventCx {
             theme: &self.theme,
+            motion,
             rect: node.content,
             scroll: node.scroll,
             scale: self.scale,
@@ -907,10 +961,20 @@ impl Root {
             self.pointer = Some(at);
         }
         match event {
-            Event::PointerDown { .. } => self.pressed = true,
+            Event::PointerDown { at, .. } => {
+                self.pressed = true;
+                // A press hides the focus ring, as on the web.
+                self.focus_visible = false;
+                self.pressed_on = Some(at)
+                    .filter(|at| at.is_finite())
+                    .and_then(|at| self.hit_main(at));
+            }
             Event::PointerUp { .. } | Event::PointerCancel | Event::Focus(false) => {
                 self.pressed = false;
+                self.pressed_on = None;
             }
+            // Using the keyboard shows it.
+            Event::Key(key) if key.pressed => self.focus_visible = true,
             _ => {}
         }
         if self.drag.is_some() {
@@ -1037,10 +1101,22 @@ impl Root {
         self.now = now;
 
         let mut animating = false;
-        for node in &mut self.tree.nodes {
+        let motion = self.motion();
+        let (hover, pressed_on) = (self.hover, self.pressed_on);
+        let focus = self.focus.filter(|_| self.focus_visible);
+        for (index, node) in self.tree.nodes.iter_mut().enumerate() {
+            // The hover, press and focus ring, eased.
+            let id = Some(NodeId::from_index(index));
+            let states = (hover == id, pressed_on == id, focus == id);
+            let (moved, running) = node.motion.follow(states, now, &motion);
+            if moved {
+                node.paint = true;
+            }
+            animating |= running;
             let mut requests = Requests::default();
             let mut cx = UpdateCx {
                 theme: &self.theme,
+                motion,
                 rect: node.content,
                 scroll: node.scroll,
                 scale: self.scale,
@@ -1079,6 +1155,7 @@ impl Root {
         if !self.damage.is_empty() {
             self.render();
         }
+        self.animating = animating;
         Frame {
             damage: &self.damage,
             pixels: &self.pixels,
@@ -1229,6 +1306,11 @@ impl Root {
                 focused: self.focus == Some(NodeId::from_index(index)),
                 hovered: self.hover == Some(NodeId::from_index(index)),
                 now: self.now,
+                amounts: (
+                    node.motion.hover.value(),
+                    node.motion.press.value(),
+                    node.motion.focus.value(),
+                ),
             };
             // Where the widget may draw: its rectangle, and inside a scroll
             // view only what the view lets be seen. A widget scrolled out
