@@ -197,6 +197,8 @@ pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub use widgets::{
     Canvas, CanvasCx, ComboBox, Container, Fit, ImageView, Knob, Label, ListData, ListEvent,
-    ListState, ListView, Meter, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle,
-    canvas, combo, image, knob, label, list_view, meter, scroll_view, slider, text_field, toggle,
+    ListState, ListView, MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder,
+    Meter, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform,
+    WaveformEvent, WaveformState, WaveformView, ZOOM_STEP, canvas, combo, image, knob, label,
+    list_view, meter, scroll_view, slider, text_field, toggle, waveform_view,
 };

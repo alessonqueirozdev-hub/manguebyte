@@ -13,6 +13,7 @@
 //! | [`ImageView`] | [`Image`](crate::Role::Image) | an image, fitted to its rectangle, sharp at any scale it has a version for | nothing |
 //! | [`ListView`] | [`List`](crate::Role::List), its rows [`ListItem`](crate::Role::ListItem) | rows the application keeps, only those in sight | the selection, by clicks, the keys and typing; rows dragged out and dropped in |
 //! | [`ScrollView`] | [`ScrollView`](crate::Role::ScrollView) | one child larger than itself, through a viewport, with scroll bars | the offset, by the wheel, the bars and the keys |
+//! | [`WaveformView`] | [`Group`](crate::Role::Group), its markers [`Slider`](crate::Role::Slider)s | a sample's channels, drawn from a [`Waveform`]'s summary, markers, a selection and a playhead | the markers (within their rules, onto zero crossings if asked), the selection and the zoom, by dragging, the wheel and the keys |
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
 //! [`stack`](crate::stack), [`panel`](crate::panel)) are
@@ -45,6 +46,8 @@ mod slider;
 mod text_edit;
 mod text_field;
 mod toggle;
+mod wave_data;
+mod waveform;
 
 pub use canvas::{Canvas, CanvasCx, canvas};
 pub use combo::{ComboBox, MAX_CHOICES, combo};
@@ -58,6 +61,11 @@ pub use scroll_view::{ScrollView, ScrollViewBuilder, scroll_view};
 pub use slider::{Slider, slider};
 pub use text_field::{TextField, text_field};
 pub use toggle::{Toggle, toggle};
+pub use wave_data::{MAX_ZERO_SEARCH, Waveform};
+pub use waveform::{
+    MAX_PIXELS_PER_FRAME, Marker, MarkerKind, MarkerOrder, WaveformEvent, WaveformState,
+    WaveformView, ZOOM_STEP, waveform_view,
+};
 
 use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};
 
@@ -136,6 +144,60 @@ pub(crate) fn focus_ring(scene: &mut Scene, rect: Rect, theme: &Theme) {
         RoundedRect::new(ring, theme.corners.medium),
         Stroke::round(width),
         theme.palette.focus,
+    );
+}
+
+/// `x`, in logical pixels, moved to the nearest edge between device
+/// pixels at `scale`, so that what starts there starts sharp.
+pub(crate) fn snap_px(x: f32, scale: f32) -> f32 {
+    if scale > 0.0 && scale.is_finite() && x.is_finite() {
+        (x * scale).round() / scale
+    } else {
+        x
+    }
+}
+
+/// `count` whole device pixels at `scale`, in logical pixels: a line that
+/// is that many pixels wide at every scale.
+pub(crate) fn device_px(count: f32, scale: f32) -> f32 {
+    if scale > 0.0 && scale.is_finite() {
+        count / scale
+    } else {
+        count
+    }
+}
+
+/// A vertical line `pixels` device pixels wide from `top` to `bottom`,
+/// starting at the device pixel edge nearest `x`.
+pub(crate) fn vline(
+    scene: &mut Scene,
+    x: f32,
+    (top, bottom): (f32, f32),
+    pixels: f32,
+    scale: f32,
+    color: Color,
+) {
+    let x = snap_px(x, scale);
+    scene.fill(
+        Rect::new(x, top, device_px(pixels, scale), (bottom - top).max(0.0)),
+        color,
+    );
+}
+
+/// A horizontal line `pixels` device pixels tall from `left` to `right`,
+/// starting at the device pixel edge nearest `y`.
+pub(crate) fn hline(
+    scene: &mut Scene,
+    y: f32,
+    (left, right): (f32, f32),
+    pixels: f32,
+    scale: f32,
+    color: Color,
+) {
+    let y = snap_px(y, scale);
+    scene.fill(
+        Rect::new(left, y, (right - left).max(0.0), device_px(pixels, scale)),
+        color,
     );
 }
 
