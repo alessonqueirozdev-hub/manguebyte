@@ -99,6 +99,19 @@ pub fn render(
     events: &[(usize, EventKind)],
     blocks: &[usize],
 ) -> Vec<Vec<f32>> {
+    render_with(sampler, channels, frames, events, &[], blocks)
+}
+
+/// Like [`render`], with controller changes `(frame, controller, value)`
+/// set through `Sampler::set_controller`, each on its absolute frame.
+pub fn render_with(
+    sampler: &mut Sampler<f32>,
+    channels: usize,
+    frames: usize,
+    events: &[(usize, EventKind)],
+    changes: &[(usize, u16, f32)],
+    blocks: &[usize],
+) -> Vec<Vec<f32>> {
     let mut out = vec![Vec::with_capacity(frames); channels];
     let largest = blocks.iter().copied().max().unwrap_or(1).max(1);
     let mut buffer = AudioBuffer::<f32>::new(channels, largest);
@@ -116,6 +129,11 @@ pub fn render(
                     kind,
                 })
                 .unwrap();
+            }
+        }
+        for &(at, number, value) in changes {
+            if at >= position && at < position + size {
+                sampler.set_controller(number, value, (at - position) as u32);
             }
         }
         buffer.set_num_frames(size);

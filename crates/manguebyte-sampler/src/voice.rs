@@ -31,6 +31,9 @@ pub const MAX_LAYERS: usize = 8;
 /// - `polyphony` is ignored (the synth's voice count is the limit);
 /// - `trigger=first` regions always play and `trigger=legato` never do;
 /// - the pitch wheel range is the synth's, not `bend_up` and `bend_down`;
+/// - controllers stay at their initial values (`set_ccN`, `set_hdccN`):
+///   a voice sees no controller messages, so `<opcode>_onccN` modulates
+///   with those values only;
 /// - the instrument cannot be swapped while playing: build a new synth
 ///   off the audio thread instead.
 ///
@@ -181,7 +184,7 @@ impl SamplerVoice {
                 }
             };
             let layer = &mut self.layers[slot];
-            if layer.start(instrument, &start) {
+            if layer.start(instrument, &start, &*instrument.controller_defaults, 0) {
                 layer.set_volume(self.volume);
                 layer.set_pan(self.pan);
                 layer.set_tuning(self.tuning);
@@ -246,8 +249,9 @@ impl<S: Sample> Voice<S> for SamplerVoice {
     }
 
     fn render(&mut self, buffer: &mut AudioBuffer<S>) {
+        let defaults = &*self.instrument.controller_defaults;
         for layer in &mut self.layers {
-            layer.render(&self.instrument, self.interpolation, buffer);
+            layer.render(&self.instrument, self.interpolation, buffer, defaults, 0);
         }
         self.held_frames = self.held_frames.wrapping_add(buffer.num_frames() as u64);
     }

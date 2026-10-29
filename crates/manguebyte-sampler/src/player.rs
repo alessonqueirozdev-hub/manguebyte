@@ -3,8 +3,13 @@
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::NoteRef;
 
+use crate::controllers::Controls;
 use crate::envelope::Envelope;
-use crate::instrument::{Instrument, SampleData, Zone};
+use crate::filter::VoiceFilter;
+use crate::instrument::{
+    AMPEG, CUTOFF, FILEG, FILEG_DEPTH, Instrument, MODULATES_AMPEG, MODULATES_FILEG,
+    MODULATES_GAIN, MODULATES_PITCH, PITCH, RESONANCE, SampleData, Sums, Zone, stages,
+};
 use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
 use crate::region::OffMode;
 
@@ -12,6 +17,12 @@ use crate::region::OffMode;
 /// in `off_mode=fast`, by a polyphony limit or by voice stealing. The SFZ
 /// format describes `off_mode=fast` as a 6 ms fade.
 pub(crate) const FAST_FADE_SECONDS: f64 = 0.006;
+
+/// Frames between the updates of what moves while a voice plays: its
+/// filter's cutoff and resonance, and what controllers modulate. Gains and
+/// the filter's settings glide in a straight line from one update to the
+/// next; the pitch steps.
+pub(crate) const TICK: u32 = 16;
 
 /// One in fixed-point positions: 32 bits of fraction.
 const ONE: u64 = 1 << 32;
@@ -105,17 +116,42 @@ pub(crate) struct Player {
     /// Frames the fade lasts, and frames of it left.
     fade_frames: u64,
     fade_left: u64,
-    base_gain: f64,
+    /// The gains of the note's velocity and of `rt_decay`.
+    velocity_gain: f64,
+    attenuation: f64,
+    /// The region's `volume` and `amplitude`, as controllers modulate them.
+    region_gain: f64,
+    /// The region's pan, as controllers modulate it, -1 to 1.
     pan: f64,
     expression_volume: f64,
     expression_pan: f64,
     gain_left: f64,
     gain_right: f64,
+    /// What is added to the gains per frame while they glide, and the
+    /// frames of glide left.
+    gain_step_left: f64,
+    gain_step_right: f64,
+    gain_gliding: u32,
     base_cents: f64,
     bend_cents: f64,
     expression_cents: f64,
+    /// Cents controllers add.
+    modulation_cents: f64,
     rate_ratio: f64,
     stereo: bool,
+    /// The key that chose the region, and the velocity, 0 to 1.
+    key: u8,
+    velocity: f64,
+    sample_rate: f64,
+    /// Whether the region has a filter or modulations to update.
+    ticking: bool,
+    /// The next update is the first, which jumps instead of gliding.
+    first_tick: bool,
+    /// Frames to the next update.
+    tick_left: u32,
+    filtered: bool,
+    filter: VoiceFilter,
+    filter_envelope: Envelope,
 }
 
 impl Player {
@@ -140,22 +176,44 @@ impl Player {
         fade_from: 1.0,
         fade_frames: 1,
         fade_left: 0,
-        base_gain: 0.0,
+        velocity_gain: 0.0,
+        attenuation: 0.0,
+        region_gain: 0.0,
         pan: 0.0,
         expression_volume: 1.0,
         expression_pan: 0.0,
         gain_left: 0.0,
         gain_right: 0.0,
+        gain_step_left: 0.0,
+        gain_step_right: 0.0,
+        gain_gliding: 0,
         base_cents: 0.0,
         bend_cents: 0.0,
         expression_cents: 0.0,
+        modulation_cents: 0.0,
         rate_ratio: 1.0,
         stereo: false,
+        key: 0,
+        velocity: 0.0,
+        sample_rate: 48_000.0,
+        ticking: false,
+        first_tick: false,
+        tick_left: 0,
+        filtered: false,
+        filter: VoiceFilter::IDLE,
+        filter_envelope: Envelope::IDLE,
     };
 
-    /// Starts playing a region. Returns `false`, leaving the player idle,
-    /// when the region has nothing to play.
-    pub(crate) fn start(&mut self, instrument: &Instrument, start: &Start) -> bool {
+    /// Starts playing a region, with the controllers in `controls` as they
+    /// are at frame `now`. Returns `false`, leaving the player idle, when
+    /// the region has nothing to play.
+    pub(crate) fn start<C: Controls + ?Sized>(
+        &mut self,
+        instrument: &Instrument,
+        start: &Start,
+        controls: &C,
+        now: u64,
+    ) -> bool {
         *self = Self::IDLE;
         let Some(zone) = instrument.zones.get(start.zone) else {
             return false;
@@ -185,19 +243,102 @@ impl Player {
         // A region started by a release has no key to hold its loop, so it
         // plays through once.
         self.looping = zone.lp.is_some() && !start.release_trigger;
-        self.envelope = Envelope::new(&zone.envelope, velocity, start.sample_rate);
-        self.base_gain =
-            zone.gain * velocity_gain * 10f64.powf(-start.attenuation_db.max(0.0) / 20.0);
+        let sums = zone.sums(controls, now);
+        self.envelope = Envelope::new(
+            &zone.envelope,
+            velocity,
+            start.sample_rate,
+            stages(&sums, AMPEG),
+        );
+        self.velocity_gain = velocity_gain;
+        self.attenuation = 10f64.powf(-start.attenuation_db.max(0.0) / 20.0);
+        self.region_gain = zone.gain;
         self.pan = zone.pan;
         self.base_cents = (f64::from(start.key) - zone.keycenter) * zone.keytrack + zone.detune;
         self.bend_cents = start.bend.cents(zone);
         self.rate_ratio = sample.rate / start.sample_rate.max(1.0);
         self.stereo = sample.right.is_some();
+        self.key = start.key;
+        self.velocity = velocity;
+        self.sample_rate = start.sample_rate;
+        self.ticking = zone.ticks();
+        self.first_tick = true;
+        self.tick_left = 0;
+        if let Some(filter) = &zone.filter {
+            self.filtered = true;
+            self.filter = VoiceFilter::new(filter.kind);
+            self.filter_envelope = Envelope::new(
+                &filter.envelope,
+                velocity,
+                start.sample_rate,
+                stages(&sums, FILEG),
+            );
+        }
         self.position = zone.offset << 32;
         self.wrap(zone);
+        self.modulate(zone, &sums, 0.0, 0);
         self.update_pitch();
         self.update_gain();
         true
+    }
+
+    /// Takes what controllers add, `sums`, and the filter envelope's level:
+    /// at once when `glide` is 0, and otherwise gliding to it over `glide`
+    /// frames.
+    fn modulate(&mut self, zone: &Zone, sums: &Sums, filter_level: f64, glide: u32) {
+        if zone.modulates & MODULATES_GAIN != 0 {
+            self.region_gain = zone.gain_with(sums);
+            self.pan = zone.pan_with(sums);
+            if glide == 0 {
+                self.update_gain();
+            } else {
+                let (left, right) = self.gains();
+                let frames = f64::from(glide);
+                self.gain_step_left = (left - self.gain_left) / frames;
+                self.gain_step_right = (right - self.gain_right) / frames;
+                self.gain_gliding = glide;
+            }
+        }
+        if zone.modulates & MODULATES_PITCH != 0 {
+            self.modulation_cents = sums[PITCH];
+            self.update_pitch();
+        }
+        if zone.modulates & MODULATES_AMPEG != 0 {
+            self.envelope.set_shift(stages(sums, AMPEG));
+        }
+        if let Some(filter) = &zone.filter {
+            if zone.modulates & MODULATES_FILEG != 0 {
+                self.filter_envelope.set_shift(stages(sums, FILEG));
+            }
+            let depth = filter.depth + filter.vel2depth * self.velocity + sums[FILEG_DEPTH];
+            let cents = filter.keytrack * (f64::from(self.key) - filter.keycenter)
+                + filter.veltrack * self.velocity
+                + depth * filter_level
+                + sums[CUTOFF];
+            let cutoff = filter.cutoff * 2f64.powf(cents / 1_200.0);
+            let resonance = filter.resonance + sums[RESONANCE];
+            let tuning = self.filter.tuning(cutoff, resonance, self.sample_rate);
+            self.filter.glide(tuning, glide);
+        }
+    }
+
+    /// The update due on this frame, with the controllers as they are on
+    /// it.
+    fn tick<C: Controls + ?Sized>(
+        &mut self,
+        zone: &Zone,
+        controls: &C,
+        frame: u64,
+        filter_level: f64,
+    ) {
+        let sums = zone.sums(controls, frame);
+        let glide = if core::mem::take(&mut self.first_tick) {
+            0
+        } else {
+            TICK
+        };
+        self.modulate(zone, &sums, filter_level, glide);
+        self.tick_left = TICK;
     }
 
     /// The key came up (and the pedal, if it was down).
@@ -210,6 +351,7 @@ impl Player {
             return;
         }
         self.envelope.release();
+        self.filter_envelope.release();
         self.end_sustain(zone);
     }
 
@@ -257,6 +399,7 @@ impl Player {
             OffMode::Normal => {
                 self.hold = Hold::Released;
                 self.envelope.release();
+                self.filter_envelope.release();
                 self.end_sustain(zone);
             }
         }
@@ -295,7 +438,7 @@ impl Player {
 
     /// The gain the voice has now, for choosing which to cut.
     pub(crate) fn loudness(&self) -> f64 {
-        self.envelope.level() * self.fade() * self.base_gain
+        self.envelope.level() * self.fade() * self.base_gain()
     }
 
     /// Whether the envelope is in its release, or the voice is fading.
@@ -329,26 +472,40 @@ impl Player {
     }
 
     fn update_pitch(&mut self) {
-        let cents = self.base_cents + self.bend_cents + self.expression_cents;
+        let cents =
+            self.base_cents + self.bend_cents + self.expression_cents + self.modulation_cents;
         let ratio = (2f64.powf(cents / 1_200.0) * self.rate_ratio).clamp(1.0 / 65_536.0, 256.0);
         let ratio = if ratio.is_finite() { ratio } else { 1.0 };
         self.step = (ratio * ONE as f64).round() as u64;
         self.step_frames = self.step as f64 / ONE as f64;
     }
 
+    /// Sets the gains at once, ending any glide.
     fn update_gain(&mut self) {
-        let gain = self.base_gain * self.expression_volume;
+        (self.gain_left, self.gain_right) = self.gains();
+        self.gain_gliding = 0;
+    }
+
+    /// The gain of the region and the note, before expression and pan.
+    fn base_gain(&self) -> f64 {
+        self.region_gain * self.velocity_gain * self.attenuation
+    }
+
+    /// The gain of each side the settings call for.
+    fn gains(&self) -> (f64, f64) {
+        let gain = self.base_gain() * self.expression_volume;
         let pan = (self.pan + self.expression_pan).clamp(-1.0, 1.0);
         if self.stereo {
             // A stereo sample is balanced: one side is turned down.
-            self.gain_left = gain * (1.0 - pan).min(1.0);
-            self.gain_right = gain * (1.0 + pan).min(1.0);
+            (gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0))
         } else {
             // A mono sample is placed with a constant-power law that leaves
             // each side at unity in the centre.
             let angle = (pan + 1.0) * core::f64::consts::FRAC_PI_4;
-            self.gain_left = gain * core::f64::consts::SQRT_2 * angle.cos();
-            self.gain_right = gain * core::f64::consts::SQRT_2 * angle.sin();
+            (
+                gain * core::f64::consts::SQRT_2 * angle.cos(),
+                gain * core::f64::consts::SQRT_2 * angle.sin(),
+            )
         }
     }
 
@@ -384,47 +541,64 @@ impl Player {
         }
     }
 
-    /// Adds the voice's sound to `buffer`. Stops the voice, on the exact
-    /// frame, when its sound ends.
-    pub(crate) fn render<S: Sample>(
+    /// Adds the voice's sound to `buffer`, whose first frame is frame
+    /// `clock` of the controllers in `controls`. Stops the voice, on the
+    /// exact frame, when its sound ends.
+    pub(crate) fn render<S: Sample, C: Controls + ?Sized>(
         &mut self,
         instrument: &Instrument,
         interpolation: Interpolation,
         buffer: &mut AudioBuffer<S>,
+        controls: &C,
+        clock: u64,
     ) {
         if !self.active {
             return;
         }
         let frames = buffer.num_frames();
+        let at = (controls, clock);
         match buffer.num_channels() {
-            0 => self.run(instrument, interpolation, frames, |_, _, _| {}),
+            0 => self.run(instrument, interpolation, frames, at, |_, _, _| {}),
             1 => {
                 let out = buffer.channel_mut(0);
-                self.run(instrument, interpolation, frames, |frame, left, right| {
-                    if let Some(sample) = out.get_mut(frame) {
-                        *sample += S::from_f64(0.5 * (left + right));
-                    }
-                });
+                self.run(
+                    instrument,
+                    interpolation,
+                    frames,
+                    at,
+                    |frame, left, right| {
+                        if let Some(sample) = out.get_mut(frame) {
+                            *sample += S::from_f64(0.5 * (left + right));
+                        }
+                    },
+                );
             }
             _ => {
                 let (out_left, out_right) = buffer.channel_pair_mut(0, 1);
-                self.run(instrument, interpolation, frames, |frame, left, right| {
-                    if let Some(sample) = out_left.get_mut(frame) {
-                        *sample += S::from_f64(left);
-                    }
-                    if let Some(sample) = out_right.get_mut(frame) {
-                        *sample += S::from_f64(right);
-                    }
-                });
+                self.run(
+                    instrument,
+                    interpolation,
+                    frames,
+                    at,
+                    |frame, left, right| {
+                        if let Some(sample) = out_left.get_mut(frame) {
+                            *sample += S::from_f64(left);
+                        }
+                        if let Some(sample) = out_right.get_mut(frame) {
+                            *sample += S::from_f64(right);
+                        }
+                    },
+                );
             }
         }
     }
 
-    fn run(
+    fn run<C: Controls + ?Sized>(
         &mut self,
         instrument: &Instrument,
         interpolation: Interpolation,
         frames: usize,
+        (controls, clock): (&C, u64),
         mut emit: impl FnMut(usize, f64, f64),
     ) {
         let Some(zone) = instrument.zones.get(self.zone) else {
@@ -446,6 +620,22 @@ impl Player {
             if self.envelope.is_done() {
                 self.stop();
                 return;
+            }
+            if self.ticking {
+                let filter_level = if self.filtered {
+                    self.filter_envelope.next()
+                } else {
+                    0.0
+                };
+                if self.tick_left == 0 {
+                    self.tick(zone, controls, clock + frame as u64, filter_level);
+                }
+                self.tick_left -= 1;
+                if self.gain_gliding > 0 {
+                    self.gain_gliding -= 1;
+                    self.gain_left += self.gain_step_left;
+                    self.gain_right += self.gain_step_right;
+                }
             }
             let mut gain = level;
             if self.dying {
@@ -482,7 +672,10 @@ impl Player {
                 self.try_leave_loop(zone, sample, first, count);
             }
             self.just_wrapped = false;
-            let (left, right) = self.gather(zone, sample, first, &weights[..count]);
+            let (mut left, mut right) = self.gather(zone, sample, first, &weights[..count]);
+            if self.filtered {
+                (left, right) = self.filter.process(left, right, self.stereo);
+            }
             emit(
                 frame,
                 left * gain * self.gain_left,

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::controllers::MAX_CONTROLLERS;
 use crate::sfz::{Location, Opcode, SfzError, SfzErrorKind, Warning, WarningKind, parse_number};
 
 /// When a region plays (`trigger`).
@@ -62,6 +63,190 @@ pub enum KeyCenter {
     FromSample,
 }
 
+/// The response of a region's filter (`fil_type`).
+///
+/// Every type is the bilinear transform, with the cutoff prewarped, of an
+/// analogue Butterworth filter: at `resonance=0` the low-passes and
+/// high-passes are 3 dB down at the cutoff, and their slopes are 6 dB per
+/// octave per pole. The 2-, 4- and 6-pole types are cascades of one, two
+/// and three state-variable sections; `resonance` raises the gain at the
+/// cutoff by its decibels, shared out evenly between the sections. The
+/// one-pole types have no resonance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FilterType {
+    /// One-pole low-pass, 6 dB per octave (`lpf_1p`).
+    Lowpass1,
+    /// One-pole high-pass, 6 dB per octave (`hpf_1p`).
+    Highpass1,
+    /// Two-pole low-pass, 12 dB per octave (`lpf_2p`, the default, and
+    /// `lpf_2p_sv`).
+    Lowpass2,
+    /// Two-pole high-pass, 12 dB per octave (`hpf_2p`, `hpf_2p_sv`).
+    Highpass2,
+    /// Two-pole band-pass, unity gain at the cutoff (`bpf_2p`,
+    /// `bpf_2p_sv`).
+    Bandpass2,
+    /// Two-pole band-reject (`brf_2p`, `brf_2p_sv`).
+    Bandreject2,
+    /// Four-pole low-pass, 24 dB per octave (`lpf_4p`).
+    Lowpass4,
+    /// Four-pole high-pass, 24 dB per octave (`hpf_4p`).
+    Highpass4,
+    /// Six-pole low-pass, 36 dB per octave (`lpf_6p`).
+    Lowpass6,
+    /// Six-pole high-pass, 36 dB per octave (`hpf_6p`).
+    Highpass6,
+}
+
+impl FilterType {
+    /// The type a `fil_type` value names, if this sampler plays it.
+    pub fn from_sfz(name: &str) -> Option<Self> {
+        Some(match name {
+            "lpf_1p" => Self::Lowpass1,
+            "hpf_1p" => Self::Highpass1,
+            "lpf_2p" | "lpf_2p_sv" => Self::Lowpass2,
+            "hpf_2p" | "hpf_2p_sv" => Self::Highpass2,
+            "bpf_2p" | "bpf_2p_sv" => Self::Bandpass2,
+            "brf_2p" | "brf_2p_sv" => Self::Bandreject2,
+            "lpf_4p" => Self::Lowpass4,
+            "hpf_4p" => Self::Highpass4,
+            "lpf_6p" => Self::Lowpass6,
+            "hpf_6p" => Self::Highpass6,
+            _ => return None,
+        })
+    }
+}
+
+/// A stage of an envelope, as a controller modulates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnvelopeStage {
+    /// `_delay`, in seconds.
+    Delay,
+    /// `_start`, in percent.
+    Start,
+    /// `_attack`, in seconds.
+    Attack,
+    /// `_hold`, in seconds.
+    Hold,
+    /// `_decay`, in seconds.
+    Decay,
+    /// `_sustain`, in percent.
+    Sustain,
+    /// `_release`, in seconds.
+    Release,
+}
+
+impl EnvelopeStage {
+    /// How many there are.
+    pub(crate) const COUNT: usize = 7;
+
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "delay" => Self::Delay,
+            "start" => Self::Start,
+            "attack" => Self::Attack,
+            "hold" => Self::Hold,
+            "decay" => Self::Decay,
+            "sustain" => Self::Sustain,
+            "release" => Self::Release,
+            _ => return None,
+        })
+    }
+}
+
+/// What a controller modulates: the `<opcode>` of `<opcode>_onccN`.
+///
+/// A modulation adds its depth times the controller's value (0 to 1) to
+/// the opcode, in the opcode's own unit, and several on one opcode add up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ModulationTarget {
+    /// `amplitude`, in percent (`amplitude_onccN`).
+    Amplitude,
+    /// `volume`, in decibels (`volume_onccN`, also `gain_onccN`).
+    Volume,
+    /// `pan`, in percent (`pan_onccN`).
+    Pan,
+    /// The pitch, in cents (`tune_onccN`, also `pitch_onccN`).
+    Pitch,
+    /// The filter's cutoff, in cents (`cutoff_onccN`).
+    Cutoff,
+    /// The filter's resonance, in decibels (`resonance_onccN`).
+    Resonance,
+    /// A stage of the amplitude envelope (`ampeg_attack_onccN` and the
+    /// others), in seconds or percent.
+    Ampeg(EnvelopeStage),
+    /// A stage of the filter envelope (`fileg_attack_onccN` and the
+    /// others), in seconds or percent.
+    Fileg(EnvelopeStage),
+    /// The filter envelope's depth, in cents (`fileg_depth_onccN`).
+    FilegDepth,
+}
+
+impl ModulationTarget {
+    /// The target and the range of its depth, from an opcode name with its
+    /// controller suffix taken off.
+    fn from_base(base: &str) -> Option<(Self, f64, f64)> {
+        let stage = |prefix: &str| EnvelopeStage::from_name(base.strip_prefix(prefix)?);
+        Some(match base {
+            "amplitude" => (Self::Amplitude, -100.0, 100.0),
+            "volume" | "gain" => (Self::Volume, -144.0, 48.0),
+            "pan" => (Self::Pan, -200.0, 200.0),
+            "tune" | "pitch" => (Self::Pitch, -9_600.0, 9_600.0),
+            "cutoff" => (Self::Cutoff, -9_600.0, 9_600.0),
+            "resonance" => (Self::Resonance, -40.0, 40.0),
+            "fileg_depth" => (Self::FilegDepth, -12_000.0, 12_000.0),
+            _ => {
+                if let Some(stage) = stage("ampeg_").or_else(|| stage("amp_")) {
+                    (Self::Ampeg(stage), -100.0, 100.0)
+                } else {
+                    (Self::Fileg(stage("fileg_")?), -100.0, 100.0)
+                }
+            }
+        })
+    }
+}
+
+/// One controller modulating one opcode of a region (`<opcode>_onccN`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Modulation {
+    /// The opcode modulated.
+    pub target: ModulationTarget,
+    /// The controller, below [`MAX_CONTROLLERS`].
+    pub controller: u16,
+    /// What the controller adds at its full value, in the opcode's unit.
+    pub depth: f64,
+}
+
+/// Reads an opcode name as a modulation by a controller: `<opcode>_onccN`,
+/// `<opcode>_ccN`, or, for envelope stages, SFZ 1's `<opcode>ccN`. Returns
+/// the target, the controller number (which may be too large) and the
+/// range of the depth.
+fn modulation_name(name: &str) -> Option<(ModulationTarget, u64, f64, f64)> {
+    let digits = name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    let (prefix, number) = name.split_at(name.len() - digits);
+    if number.is_empty() || number.len() > 6 {
+        return None;
+    }
+    let number: u64 = number.parse().ok()?;
+    let base = if let Some(base) = prefix.strip_suffix("_oncc") {
+        base
+    } else if let Some(base) = prefix.strip_suffix("_cc") {
+        base
+    } else {
+        // SFZ 1 wrote envelope modulations without the underscore, as in
+        // `ampeg_attackcc1`.
+        let base = prefix.strip_suffix("cc")?;
+        if !(base.starts_with("ampeg_") || base.starts_with("fileg_")) {
+            return None;
+        }
+        base
+    };
+    let (target, low, high) = ModulationTarget::from_base(base)?;
+    Some((target, number, low, high))
+}
+
 /// The amplitude envelope of a region (`ampeg_*`): delay, attack, hold,
 /// decay, sustain and release. Times in seconds, levels in percent.
 ///
@@ -118,6 +303,27 @@ impl Default for EnvelopeSpec {
             vel2release: 0.0,
         }
     }
+}
+
+impl EnvelopeSpec {
+    /// The filter envelope's defaults (`fileg_*`): every stage at 0, the
+    /// sustain level included, so that an envelope given only a depth
+    /// leaves the cutoff where it is after its first sample.
+    pub const FILTER_DEFAULT: Self = Self {
+        delay: 0.0,
+        start: 0.0,
+        attack: 0.0,
+        hold: 0.0,
+        decay: 0.0,
+        sustain: 0.0,
+        release: 0.0,
+        vel2delay: 0.0,
+        vel2attack: 0.0,
+        vel2hold: 0.0,
+        vel2decay: 0.0,
+        vel2sustain: 0.0,
+        vel2release: 0.0,
+    };
 }
 
 /// One region of an instrument: a sample, the notes and velocities it
@@ -215,6 +421,32 @@ pub struct Region {
     pub bend_up: f64,
     /// Cents of pitch at the bottom of the pitch wheel (usually negative).
     pub bend_down: f64,
+    /// The filter's response. `None` for a `fil_type` this sampler does not
+    /// play: the region then plays unfiltered, with a warning.
+    pub fil_type: Option<FilterType>,
+    /// The filter's cutoff in hertz. `None`, the default, leaves the region
+    /// unfiltered, as the format says.
+    pub cutoff: Option<f64>,
+    /// Decibels by which the filter's gain at the cutoff is raised, 0 to 40.
+    pub resonance: f64,
+    /// Cents the cutoff moves per key away from `fil_keycenter`.
+    pub fil_keytrack: f64,
+    /// The key at which `fil_keytrack` leaves the cutoff alone.
+    pub fil_keycenter: u8,
+    /// Cents the cutoff moves at velocity 127, and in proportion below it.
+    pub fil_veltrack: f64,
+    /// The filter envelope (`fileg_*`): its level, 0 to 1, times
+    /// `fileg_depth` is the cents it moves the cutoff by.
+    pub fileg: EnvelopeSpec,
+    /// Cents the filter envelope moves the cutoff at its full level.
+    pub fileg_depth: f64,
+    /// Cents added to `fileg_depth` at velocity 127, and in proportion
+    /// below it.
+    pub fileg_vel2depth: f64,
+    /// Opcodes modulated by controllers (`<opcode>_onccN`), one entry per
+    /// opcode and controller; a later one for the same pair replaces the
+    /// earlier, as a region's opcodes replace those it inherits.
+    pub modulations: Vec<Modulation>,
     /// Opcodes the sampler does not play, as written. Inherited ones share
     /// their text with every region that inherits them.
     pub unknown: Vec<Opcode>,
@@ -264,6 +496,16 @@ impl Region {
             polyphony: None,
             bend_up: 200.0,
             bend_down: -200.0,
+            fil_type: Some(FilterType::Lowpass2),
+            cutoff: None,
+            resonance: 0.0,
+            fil_keytrack: 0.0,
+            fil_keycenter: 60,
+            fil_veltrack: 0.0,
+            fileg: EnvelopeSpec::FILTER_DEFAULT,
+            fileg_depth: 0.0,
+            fileg_vel2depth: 0.0,
+            modulations: Vec::new(),
             unknown: Vec::new(),
             group_set: false,
             polyphony_header: 0,
@@ -405,18 +647,63 @@ impl Region {
             "polyphony" => self.polyphony = Some(value.number(1.0, 256.0)? as u32),
             "bend_up" | "bendup" => self.bend_up = value.number(-9_600.0, 9_600.0)?,
             "bend_down" | "benddown" => self.bend_down = value.number(-9_600.0, 9_600.0)?,
-            _ => {
-                warnings.push(Warning {
-                    location: opcode.location.clone(),
-                    kind: WarningKind::UnknownOpcode {
-                        name: Arc::clone(&opcode.name),
-                        value: Arc::clone(&opcode.value),
-                    },
-                });
-                self.unknown.push(opcode.clone());
+            "fil_type" | "filtype" => {
+                self.fil_type = FilterType::from_sfz(&opcode.value);
+                if self.fil_type.is_none() {
+                    self.keep_unknown(opcode, warnings);
+                }
             }
+            "cutoff" => self.cutoff = Some(value.number(0.0, 100_000.0)?),
+            "resonance" => self.resonance = value.number(0.0, 40.0)?,
+            "fil_keytrack" => self.fil_keytrack = value.number(0.0, 1_200.0)?,
+            "fil_keycenter" => self.fil_keycenter = value.key()?,
+            "fil_veltrack" => self.fil_veltrack = value.number(-9_600.0, 9_600.0)?,
+            "fileg_delay" => self.fileg.delay = value.number(0.0, 100.0)?,
+            "fileg_start" => self.fileg.start = value.number(0.0, 100.0)?,
+            "fileg_attack" => self.fileg.attack = value.number(0.0, 100.0)?,
+            "fileg_hold" => self.fileg.hold = value.number(0.0, 100.0)?,
+            "fileg_decay" => self.fileg.decay = value.number(0.0, 100.0)?,
+            "fileg_sustain" => self.fileg.sustain = value.number(0.0, 100.0)?,
+            "fileg_release" => self.fileg.release = value.number(0.0, 100.0)?,
+            "fileg_depth" => self.fileg_depth = value.number(-12_000.0, 12_000.0)?,
+            "fileg_vel2delay" => self.fileg.vel2delay = value.number(-100.0, 100.0)?,
+            "fileg_vel2attack" => self.fileg.vel2attack = value.number(-100.0, 100.0)?,
+            "fileg_vel2hold" => self.fileg.vel2hold = value.number(-100.0, 100.0)?,
+            "fileg_vel2decay" => self.fileg.vel2decay = value.number(-100.0, 100.0)?,
+            "fileg_vel2sustain" => self.fileg.vel2sustain = value.number(-100.0, 100.0)?,
+            "fileg_vel2release" => self.fileg.vel2release = value.number(-100.0, 100.0)?,
+            "fileg_vel2depth" => self.fileg_vel2depth = value.number(-12_000.0, 12_000.0)?,
+            name => match modulation_name(name) {
+                Some((target, controller, low, high)) if controller < MAX_CONTROLLERS as u64 => {
+                    let modulation = Modulation {
+                        target,
+                        controller: controller as u16,
+                        depth: value.number(low, high)?,
+                    };
+                    let same = |m: &&mut Modulation| {
+                        m.target == target && m.controller == modulation.controller
+                    };
+                    match self.modulations.iter_mut().find(same) {
+                        Some(earlier) => *earlier = modulation,
+                        None => self.modulations.push(modulation),
+                    }
+                }
+                _ => self.keep_unknown(opcode, warnings),
+            },
         }
         Ok(())
+    }
+
+    /// Keeps an opcode the sampler does not play, with a warning.
+    fn keep_unknown(&mut self, opcode: &Opcode, warnings: &mut Vec<Warning>) {
+        warnings.push(Warning {
+            location: opcode.location.clone(),
+            kind: WarningKind::UnknownOpcode {
+                name: Arc::clone(&opcode.name),
+                value: Arc::clone(&opcode.value),
+            },
+        });
+        self.unknown.push(opcode.clone());
     }
 }
 
@@ -576,6 +863,48 @@ mod tests {
             (r.polyphony, r.bend_up, r.bend_down),
             (Some(3), 1200.0, -100.0)
         );
+    }
+
+    #[test]
+    fn filter_opcodes_are_read() {
+        let text = "<region> sample=s.wav fil_type=hpf_4p cutoff=800 resonance=6
+            fil_keytrack=25 fil_keycenter=c5 fil_veltrack=-300 fileg_delay=0.1 fileg_start=5
+            fileg_attack=0.2 fileg_hold=0.3 fileg_decay=0.4 fileg_sustain=60 fileg_release=0.7
+            fileg_depth=-1200 fileg_vel2depth=600 fileg_vel2attack=0.05";
+        let sfz = Sfz::parse(text).unwrap();
+        assert!(sfz.warnings.is_empty(), "{:?}", sfz.warnings);
+        let r = &sfz.regions[0];
+        assert_eq!(
+            (r.fil_type, r.cutoff, r.resonance),
+            (Some(FilterType::Highpass4), Some(800.0), 6.0)
+        );
+        assert_eq!(
+            (r.fil_keytrack, r.fil_keycenter, r.fil_veltrack),
+            (25.0, 72, -300.0)
+        );
+        let e = r.fileg;
+        assert_eq!(
+            (
+                e.delay, e.start, e.attack, e.hold, e.decay, e.sustain, e.release
+            ),
+            (0.1, 5.0, 0.2, 0.3, 0.4, 60.0, 0.7)
+        );
+        assert_eq!(
+            (r.fileg_depth, r.fileg_vel2depth, e.vel2attack),
+            (-1200.0, 600.0, 0.05)
+        );
+        // Without them, no filter, and an envelope that does nothing.
+        let plain = &Sfz::parse("<region> sample=s.wav").unwrap().regions[0];
+        assert_eq!(
+            (plain.cutoff, plain.fil_type),
+            (None, Some(FilterType::Lowpass2))
+        );
+        assert_eq!(plain.fileg, EnvelopeSpec::FILTER_DEFAULT);
+        // A type not played is kept and reported.
+        let sfz = Sfz::parse("<region> sample=s.wav fil_type=comb cutoff=100").unwrap();
+        assert_eq!(sfz.regions[0].fil_type, None);
+        assert_eq!(&*sfz.regions[0].unknown[0].name, "fil_type");
+        assert_eq!(sfz.warnings.len(), 1);
     }
 
     #[test]

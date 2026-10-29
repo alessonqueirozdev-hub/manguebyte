@@ -58,7 +58,8 @@
 //! `<curve>`, `<effect>`, `<midi>` and `<sample>` are reported and their
 //! contents ignored. Directives: `#define $NAME value` and
 //! `#include "file"` (with a source). In `<control>`: `default_path`,
-//! `note_offset` and `octave_offset` (both shift incoming notes).
+//! `note_offset` and `octave_offset` (both shift incoming notes), and
+//! `set_ccN`, `set_hdccN` and `label_ccN` (see [Controllers](#controllers)).
 //!
 //! | Opcodes | What they do here |
 //! |---|---|
@@ -74,6 +75,10 @@
 //! | `loop_mode`, `loop_start`, `loop_end`, `loop_crossfade` | `no_loop`, `one_shot`, `loop_continuous`, `loop_sustain`. Without them a WAV file's `smpl` loop is used, continuously. Loop points are read through the loop by the interpolator, so the join adds nothing; `loop_crossfade` fades the loop's last frames into those before its start, linearly in amplitude. A released `loop_sustain` leaves its loop at the first frame that reads the same with the loop as without it, so the release never clicks, even inside the crossfade. |
 //! | `ampeg_delay`, `ampeg_start`, `ampeg_attack`, `ampeg_hold`, `ampeg_decay`, `ampeg_sustain`, `ampeg_release`, `ampeg_vel2*` | The amplitude envelope: a straight-line attack, a decay straight in decibels, and a release that falls 90 dB in its time. |
 //! | `group`, `off_by`, `off_mode`, `off_time`, `polyphony` | Choke groups and voice limits. `polyphony` counts the voices of the region's `group` when a `group` opcode applies to it, and otherwise those of the regions under the header where it is written. |
+//! | `cutoff`, `fil_type` (also `filtype`), `resonance` | The filter, on only when `cutoff` (in hertz) is given. Types played: `lpf_1p`, `hpf_1p`, `lpf_2p` (the default), `hpf_2p`, `bpf_2p`, `brf_2p` (with their `_sv` spellings), `lpf_4p`, `hpf_4p`, `lpf_6p`, `hpf_6p`; see [`FilterType`]. Any other type is reported and the region plays unfiltered. `resonance` (0 to 40 dB) raises the gain at the cutoff by its decibels; the one-pole types have none. |
+//! | `fil_keytrack`, `fil_keycenter`, `fil_veltrack` | Cents the cutoff moves per key from `fil_keycenter` (60 by default), and at velocity 127 (in proportion below it). |
+//! | `fileg_delay`, `fileg_start`, `fileg_attack`, `fileg_hold`, `fileg_decay`, `fileg_sustain`, `fileg_release`, `fileg_vel2*`, `fileg_depth`, `fileg_vel2depth` | The filter envelope, shaped as the amplitude envelope is (every stage 0 by default, the sustain included), moving the cutoff by its level times `fileg_depth` cents, plus `fileg_vel2depth` at velocity 127. It is released with the key. |
+//! | `<opcode>_onccN` (also `<opcode>_ccN`, and SFZ 1's `ampeg_<stage>ccN`) | Controller `N` (0 to 511) modulates `amplitude` (percent), `volume` or `gain` (dB), `pan` (percent), `tune` or `pitch` (cents), `cutoff` (cents), `resonance` (dB), `fileg_depth` (cents), and each stage of `ampeg_*` (also `amp_*`) and `fileg_*` (seconds or percent): see [Controllers](#controllers). |
 //!
 //! Every other opcode is kept in [`Region::unknown`] and reported as a
 //! [`Warning`]; values outside an opcode's range are clamped with a
@@ -89,6 +94,60 @@
 //! directory with a [`FileSource`]; a [`MemorySource`] finds such a path
 //! under the same name, `../` included.
 //!
+//! # Controllers
+//!
+//! A [`Sampler`] keeps [`MAX_CONTROLLERS`] controllers, each with a value
+//! from 0 to 1, shared by every MIDI channel. Controllers 0 to 119 take
+//! the value of MIDI control-change messages (divided by 127); every
+//! controller, those from 128 to 511 included, takes the values a plugin
+//! sets with [`Sampler::set_controller`], on the frame it names, without
+//! a MIDI message. No MIDI message reaches a controller above 127 (SFZ 2's
+//! extended controllers), so a plugin that binds its parameters there
+//! never collides with a musician's controllers. SFZ 2 gives 128 to 143
+//! meanings of their own (pitch wheel, aftertouch, velocity and others),
+//! which this sampler does not compute: they hold whatever is set, so a
+//! plugin's own parameters are best put from 256 up.
+//!
+//! Each controller starts at its `set_ccN` value (0 to 127, divided by
+//! 127) or `set_hdccN` value (0 to 1), or at 0. A change, from either
+//! source, moves the value along a straight line over
+//! [`CONTROLLER_SMOOTHING_SECONDS`], so a jump never clicks. When a new
+//! instrument arrives, controllers not set since the sampler was made or
+//! last reset take its initial values; [`reset`](manguebyte_dsp::Processor::reset)
+//! puts every one back to them.
+//!
+//! A modulation `<opcode>_onccN=depth` adds `depth` times controller
+//! `N`'s value to the opcode, in the opcode's unit; several on one opcode
+//! add up, and a later one for the same opcode and controller replaces the
+//! earlier, as inherited opcodes are replaced. A voice reads its
+//! controllers every 16 frames, and its gains and filter glide from one
+//! reading to the next, while its pitch steps; volume, amplitude, pan,
+//! pitch, cutoff, resonance and `fileg_depth` follow the controller while
+//! the note plays. Envelope stages follow it as SFZ players do: each
+//! stage's time is read when the stage starts, the start level when the
+//! attack starts and the sustain level when the decay starts, so moving a
+//! controller changes the stages to come and not the one under way. The
+//! amplitude never goes below 0, the pan is held to -100..100, the
+//! resonance to 0..40 dB, the cutoff between 1 Hz and 0.49 of the sample
+//! rate, times to 0 or more and levels to 0..100 %.
+//!
+//! [`SamplerVoice`] sees no controller messages: its controllers stay at
+//! their initial values.
+//!
+//! # Filters
+//!
+//! Each voice of a region with a `cutoff` runs its sample through a filter
+//! of the region's [`FilterType`] before the amplitude envelope: the
+//! bilinear transforms of Butterworth prototypes, as trapezoidal
+//! state-variable sections whose state stays valid however fast the cutoff
+//! moves. The cutoff is `cutoff` times two to the power of the cents of
+//! `fil_keytrack`, `fil_veltrack`, the filter envelope and the
+//! controllers, over 1200. It is worked out every 16 frames, the filter's
+//! settings gliding in a straight line in between, so a sweep has no
+//! steps; nothing is allocated, and the cutoff is held below Nyquist at
+//! every sample rate. A mono sample is filtered once, a stereo one per
+//! side.
+//!
 //! # Pitch
 //!
 //! A voice reads its sample at a position kept to 32 bits of fraction, so
@@ -99,7 +158,9 @@
 
 #![forbid(unsafe_code)]
 
+mod controllers;
 mod envelope;
+mod filter;
 mod instrument;
 mod interpolate;
 mod player;
@@ -109,12 +170,19 @@ pub mod sfz;
 mod source;
 mod voice;
 
+pub use controllers::{CONTROLLER_SMOOTHING_SECONDS, MAX_CONTROLLERS};
 pub use instrument::{
     DEFAULT_SEED, Instrument, InstrumentBuilder, InstrumentError, LoadError, MAX_SAMPLE_FRAMES,
 };
 pub use interpolate::Interpolation;
-pub use region::{EnvelopeSpec, KeyCenter, LoopMode, OffMode, Region, Trigger};
-pub use sampler::{MAX_HELD_NOTES, MAX_LOADER_CAPACITY, MAX_POLYPHONY, Sampler, SamplerLoader};
+pub use region::{
+    EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, Modulation, ModulationTarget,
+    OffMode, Region, Trigger,
+};
+pub use sampler::{
+    MAX_HELD_NOTES, MAX_LOADER_CAPACITY, MAX_PENDING_CONTROLLER_CHANGES, MAX_POLYPHONY, Sampler,
+    SamplerLoader,
+};
 pub use sfz::{Control, Location, Opcode, Sfz, SfzError, SfzErrorKind, Warning, WarningKind};
 pub use source::{FileSource, MemorySource, SampleSource, normalize_path};
 pub use voice::{MAX_LAYERS, SamplerVoice};

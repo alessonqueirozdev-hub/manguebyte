@@ -12,7 +12,9 @@ use common::*;
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Transport};
-use manguebyte_sampler::{Instrument, Interpolation, MemorySource, Sampler, SamplerVoice};
+use manguebyte_sampler::{
+    Instrument, Interpolation, MAX_PENDING_CONTROLLER_CHANGES, MemorySource, Sampler, SamplerVoice,
+};
 
 thread_local! {
     static WATCHING: Cell<bool> = const { Cell::new(false) };
@@ -66,16 +68,21 @@ fn assert_no_heap_use(what: &str, work: impl FnOnce()) {
 }
 
 const TEXT: &str = "
-<global> ampeg_attack=0.001 ampeg_release=0.01
-<group> lokey=40 hikey=70 seq_length=2
+<control> set_cc74=64 set_hdcc300=0.5
+<global> ampeg_attack=0.001 ampeg_release=0.01 cutoff=3000 resonance=6 fil_keytrack=50
+         fil_veltrack=600 fileg_depth=1200 fileg_attack=0.002 fileg_decay=0.01 fileg_sustain=40
+         fileg_release=0.01 cutoff_oncc74=2400 resonance_oncc300=12 volume_oncc300=-6
+         amplitude_oncc301=-50 pan_oncc20=50 tune_oncc1=100 ampeg_attack_oncc300=0.002
+         ampeg_release_oncc301=0.01 fileg_depth_oncc301=-600 fileg_decay_oncc300=0.01
+<group> lokey=40 hikey=70 seq_length=2 fil_type=lpf_4p
 <region> sample=a.wav seq_position=1 loop_mode=loop_sustain loop_start=100 loop_end=3000 loop_crossfade=0.005
 <region> sample=b.wav seq_position=2 pan=30
-<group> lokey=71 hikey=90 group=5 off_by=6 polyphony=2
+<group> lokey=71 hikey=90 group=5 off_by=6 polyphony=2 fil_type=hpf_2p
 <region> sample=a.wav hirand=0.5 offset=10 off_mode=time off_time=0.002
 <region> sample=b.wav lorand=0.5 loop_mode=one_shot
-<group> key=36 group=6
+<group> key=36 group=6 fil_type=bpf_2p
 <region> sample=*sine
-<group> lokey=40 hikey=90
+<group> lokey=40 hikey=90 fil_type=lpf_1p
 <region> sample=a.wav trigger=release rt_decay=3
 <region> sample=*silence trigger=release_key end=-1 group=6
 ";
@@ -118,7 +125,7 @@ fn busy_events(seed: u64) -> EventBuffer {
                 value: random.unit(),
             },
             6 => controller(
-                [64, 120, 121, 123][random.below(4)],
+                [64, 120, 121, 123, 1, 20, 74, 200][random.below(8)],
                 random.below(128) as u8,
             ),
             7 => bend(random.below(16_384) as i16 - 8_192),
@@ -130,6 +137,15 @@ fn busy_events(seed: u64) -> EventBuffer {
         events.push(Event { offset, kind }).unwrap();
     }
     events
+}
+
+/// A plugin moving the parameters bound to controllers, as it would before
+/// each block.
+fn set_parameters(sampler: &mut Sampler<f32>, block: usize) {
+    for (turn, controller) in [300u16, 301, 74, 1].into_iter().enumerate() {
+        let value = ((block * 7 + turn * 3) % 11) as f32 / 10.0;
+        sampler.set_controller(controller, value, ((block * 37 + turn * 61) % 300) as u32);
+    }
 }
 
 #[test]
@@ -156,8 +172,15 @@ fn the_sampler_never_allocates_while_playing_or_swapping() {
             assert_no_heap_use("the sampler", || {
                 for (index, events) in blocks.iter().enumerate() {
                     buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                    set_parameters(&mut sampler, index);
                     sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
                 }
+                // More changes than the sampler holds for a block.
+                for frame in 0..(MAX_PENDING_CONTROLLER_CHANGES as u32 + 10) {
+                    sampler.set_controller(300, (frame % 7) as f32 / 7.0, frame % 256);
+                }
+                sampler.process(&mut buffer);
+                set_parameters(&mut sampler, 3);
                 sampler.reset();
                 sampler.process(&mut buffer);
             });
@@ -170,6 +193,7 @@ fn the_sampler_never_allocates_while_playing_or_swapping() {
             assert_no_heap_use("swapping instruments", || {
                 for (index, events) in blocks.iter().enumerate() {
                     buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                    set_parameters(&mut sampler, index);
                     sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
                 }
             });

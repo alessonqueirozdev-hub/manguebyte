@@ -9,8 +9,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use manguebyte_formats::FormatError;
 
+use crate::controllers::{Controls, MAX_CONTROLLERS};
+use crate::envelope::Stages;
 use crate::interpolate::SincTable;
-use crate::region::{KeyCenter, LoopMode, OffMode, Region, Trigger};
+use crate::region::{
+    EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, ModulationTarget, OffMode,
+    Region, Trigger,
+};
 use crate::sfz::{Location, Sfz, SfzError, Warning};
 use crate::source::{FileSource, SampleSource};
 
@@ -215,6 +220,90 @@ pub(crate) struct Zone {
     pub(crate) polyphony_scope: PolyphonyScope,
     pub(crate) bend_up: f64,
     pub(crate) bend_down: f64,
+    /// `volume`, in decibels, and `amplitude`, as a fraction: `gain` is
+    /// made of them, and modulations change them.
+    pub(crate) volume_db: f64,
+    pub(crate) amplitude: f64,
+    /// The filter, when the region has a `cutoff` of a type played here.
+    pub(crate) filter: Option<ZoneFilter>,
+    /// The modulations by controllers.
+    pub(crate) modulations: Box<[ZoneModulation]>,
+    /// Which kinds of thing the modulations move ([`MODULATES_GAIN`] and
+    /// the others).
+    pub(crate) modulates: u8,
+}
+
+/// A region's filter, its numbers resolved.
+pub(crate) struct ZoneFilter {
+    pub(crate) kind: FilterType,
+    /// Hertz.
+    pub(crate) cutoff: f64,
+    /// Decibels.
+    pub(crate) resonance: f64,
+    /// Cents per key from `keycenter`.
+    pub(crate) keytrack: f64,
+    pub(crate) keycenter: f64,
+    /// Cents at full velocity.
+    pub(crate) veltrack: f64,
+    /// Cents at the envelope's full level, and added at full velocity.
+    pub(crate) depth: f64,
+    pub(crate) vel2depth: f64,
+    pub(crate) envelope: EnvelopeSpec,
+}
+
+/// One modulation by a controller: what it adds, per unit of the
+/// controller's value, to its slot of a [`Sums`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ZoneModulation {
+    pub(crate) slot: usize,
+    pub(crate) controller: u16,
+    pub(crate) depth: f64,
+}
+
+/// What every modulation of a region adds up to, slot by slot.
+pub(crate) type Sums = [f64; SLOTS];
+
+/// The slots of [`Sums`].
+pub(crate) const AMPLITUDE: usize = 0;
+pub(crate) const VOLUME: usize = 1;
+pub(crate) const PAN: usize = 2;
+pub(crate) const PITCH: usize = 3;
+pub(crate) const CUTOFF: usize = 4;
+pub(crate) const RESONANCE: usize = 5;
+pub(crate) const FILEG_DEPTH: usize = 6;
+/// The first of the amplitude envelope's stages, in [`EnvelopeStage`]
+/// order.
+pub(crate) const AMPEG: usize = 7;
+/// The first of the filter envelope's stages.
+pub(crate) const FILEG: usize = AMPEG + EnvelopeStage::COUNT;
+pub(crate) const SLOTS: usize = FILEG + EnvelopeStage::COUNT;
+
+/// Bits of [`Zone::modulates`].
+pub(crate) const MODULATES_GAIN: u8 = 1;
+pub(crate) const MODULATES_PITCH: u8 = 2;
+pub(crate) const MODULATES_AMPEG: u8 = 4;
+pub(crate) const MODULATES_FILEG: u8 = 8;
+
+/// The slot a modulation target adds to, and the bit it sets.
+fn slot(target: ModulationTarget) -> (usize, u8) {
+    match target {
+        ModulationTarget::Amplitude => (AMPLITUDE, MODULATES_GAIN),
+        ModulationTarget::Volume => (VOLUME, MODULATES_GAIN),
+        ModulationTarget::Pan => (PAN, MODULATES_GAIN),
+        ModulationTarget::Pitch => (PITCH, MODULATES_PITCH),
+        ModulationTarget::Cutoff => (CUTOFF, 0),
+        ModulationTarget::Resonance => (RESONANCE, 0),
+        ModulationTarget::FilegDepth => (FILEG_DEPTH, 0),
+        ModulationTarget::Ampeg(stage) => (AMPEG + stage as usize, MODULATES_AMPEG),
+        ModulationTarget::Fileg(stage) => (FILEG + stage as usize, MODULATES_FILEG),
+    }
+}
+
+/// The stages of an envelope a [`Sums`] holds from `first`.
+pub(crate) fn stages(sums: &Sums, first: usize) -> Stages {
+    let mut stages = [0.0; EnvelopeStage::COUNT];
+    stages.copy_from_slice(&sums[first..first + EnvelopeStage::COUNT]);
+    stages
 }
 
 /// The voices a region's `polyphony` limit counts.
@@ -235,6 +324,38 @@ impl Zone {
 
     pub(crate) fn accepts_random(&self, random: f64) -> bool {
         random >= self.lorand && (random < self.hirand || self.hirand >= 1.0)
+    }
+
+    /// Whether a voice playing it has anything to update as it plays: a
+    /// filter, or a modulation by a controller.
+    pub(crate) fn ticks(&self) -> bool {
+        self.filter.is_some() || !self.modulations.is_empty()
+    }
+
+    /// What its modulations add up to with the controllers as they are at
+    /// `frame`.
+    pub(crate) fn sums<C: Controls + ?Sized>(&self, controls: &C, frame: u64) -> Sums {
+        let mut sums = [0.0; SLOTS];
+        for modulation in &self.modulations {
+            sums[modulation.slot] +=
+                modulation.depth * controls.value(modulation.controller, frame);
+        }
+        sums
+    }
+
+    /// The linear gain of `volume` and `amplitude` with what `sums` adds
+    /// to them; the amplitude never goes below 0.
+    pub(crate) fn gain_with(&self, sums: &Sums) -> f64 {
+        if self.modulates & MODULATES_GAIN == 0 {
+            return self.gain;
+        }
+        let amplitude = (self.amplitude + sums[AMPLITUDE] / 100.0).max(0.0);
+        10f64.powf((self.volume_db + sums[VOLUME]) / 20.0) * amplitude
+    }
+
+    /// The pan, -1 to 1 before it is held there, with what `sums` adds.
+    pub(crate) fn pan_with(&self, sums: &Sums) -> f64 {
+        self.pan + sums[PAN] / 100.0
     }
 
     /// The sums of the squares of the first `frames` frames a note reads
@@ -333,6 +454,9 @@ pub struct Instrument {
     random: AtomicU64,
     seed: u64,
     pub(crate) note_shift: i32,
+    /// The value each of the [`MAX_CONTROLLERS`] controllers starts at, 0
+    /// to 1 (`set_ccN`, `set_hdccN`).
+    pub(crate) controller_defaults: Arc<[f64]>,
     /// Shared by every instrument: see [`prepare_tables`](crate::prepare_tables).
     pub(crate) sinc: Arc<SincTable>,
     warnings: Arc<[Warning]>,
@@ -356,6 +480,7 @@ impl Clone for Instrument {
             random: AtomicU64::new(self.random.load(Ordering::Relaxed)),
             seed: self.seed,
             note_shift: self.note_shift,
+            controller_defaults: Arc::clone(&self.controller_defaults),
             sinc: Arc::clone(&self.sinc),
             warnings: Arc::clone(&self.warnings),
         }
@@ -453,6 +578,9 @@ impl Instrument {
             }
         }
         let sequence = zones.iter().map(|_| AtomicU32::new(0)).collect();
+        let controller_defaults = (0..MAX_CONTROLLERS)
+            .map(|number| sfz.control.initial_value(number as u16))
+            .collect();
         Self {
             zones: zones.into(),
             samples: samples.into(),
@@ -462,6 +590,7 @@ impl Instrument {
             random: AtomicU64::new(DEFAULT_SEED),
             seed: DEFAULT_SEED,
             note_shift: sfz.control.note_shift(),
+            controller_defaults,
             sinc: SincTable::shared(),
             warnings: sfz.warnings.as_slice().into(),
         }
@@ -567,8 +696,10 @@ impl Instrument {
             } else {
                 1.0 + zone.veltrack * curve
             };
-            let gain = zone.gain * velocity_gain;
-            let pan = zone.pan.clamp(-1.0, 1.0);
+            // Controllers at their initial values.
+            let sums = zone.sums(&*self.controller_defaults, 0);
+            let gain = zone.gain_with(&sums) * velocity_gain;
+            let pan = zone.pan_with(&sums).clamp(-1.0, 1.0);
             let (left_gain, right_gain) = if sample.right.is_some() {
                 ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
             } else {
@@ -594,6 +725,16 @@ impl Instrument {
                 / rate;
         }
         energy
+    }
+
+    /// The value controller `controller` starts at, 0 to 1: its `set_ccN`
+    /// (divided by 127) or `set_hdccN`, or 0. Also 0 for a number of
+    /// [`MAX_CONTROLLERS`] or more.
+    pub fn controller_default(&self, controller: u16) -> f64 {
+        self.controller_defaults
+            .get(usize::from(controller))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// How many regions it has.
@@ -987,7 +1128,46 @@ fn zone(region: &Region, sample: Option<(usize, &SampleData)>, generated: bool) 
         polyphony_scope,
         bend_up: region.bend_up,
         bend_down: region.bend_down,
+        volume_db: region.volume,
+        amplitude: region.amplitude / 100.0,
+        filter: None,
+        modulations: Box::default(),
+        modulates: 0,
     };
+    zone.filter = match (region.cutoff, region.fil_type) {
+        (Some(cutoff), Some(kind)) => Some(ZoneFilter {
+            kind,
+            cutoff,
+            resonance: region.resonance,
+            keytrack: region.fil_keytrack,
+            keycenter: f64::from(region.fil_keycenter),
+            veltrack: region.fil_veltrack,
+            depth: region.fileg_depth,
+            vel2depth: region.fileg_vel2depth,
+            envelope: region.fileg,
+        }),
+        _ => None,
+    };
+    let mut modulates = 0;
+    zone.modulations = region
+        .modulations
+        .iter()
+        .filter(|modulation| modulation.depth != 0.0)
+        .filter_map(|modulation| {
+            let (slot, bit) = slot(modulation.target);
+            // What moves the filter means nothing without one.
+            if (bit == 0 || bit == MODULATES_FILEG) && zone.filter.is_none() {
+                return None;
+            }
+            modulates |= bit;
+            Some(ZoneModulation {
+                slot,
+                controller: modulation.controller,
+                depth: modulation.depth,
+            })
+        })
+        .collect();
+    zone.modulates = modulates;
     let Some((index, data)) = sample else {
         return zone;
     };

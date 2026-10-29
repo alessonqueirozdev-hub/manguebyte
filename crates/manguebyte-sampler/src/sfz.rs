@@ -227,13 +227,21 @@ impl fmt::Display for Warning {
 }
 
 /// Settings from the `<control>` header that apply to the whole instrument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Control {
     /// Semitones added to every incoming note before regions are chosen
     /// (`note_offset`).
     pub note_offset: i32,
     /// Octaves added to every incoming note (`octave_offset`).
     pub octave_offset: i32,
+    /// The value each controller starts at, 0 to 1, from `set_ccN` (0 to
+    /// 127, divided by 127) and `set_hdccN` (0 to 1), one entry per
+    /// controller, in the order first written; a later one replaces the
+    /// earlier. Controllers not listed start at 0.
+    pub set_cc: Vec<(u16, f64)>,
+    /// A name for each controller that has one (`label_ccN`), for a
+    /// player to show; the sampler does nothing with them.
+    pub label_cc: Vec<(u16, String)>,
 }
 
 impl Control {
@@ -241,6 +249,37 @@ impl Control {
     pub fn note_shift(&self) -> i32 {
         self.note_offset + 12 * self.octave_offset
     }
+
+    /// The value controller `controller` starts at, 0 to 1: its `set_ccN`
+    /// or `set_hdccN`, or 0.
+    pub fn initial_value(&self, controller: u16) -> f64 {
+        self.set_cc
+            .iter()
+            .find(|(number, _)| *number == controller)
+            .map_or(0.0, |&(_, value)| value)
+    }
+
+    fn set_initial(&mut self, controller: u16, value: f64) {
+        match self
+            .set_cc
+            .iter_mut()
+            .find(|(number, _)| *number == controller)
+        {
+            Some(entry) => entry.1 = value,
+            None => self.set_cc.push((controller, value)),
+        }
+    }
+}
+
+/// The controller number `name` ends with after `prefix`, if it is one and
+/// below [`MAX_CONTROLLERS`](crate::MAX_CONTROLLERS).
+fn controller_suffix(name: &str, prefix: &str) -> Option<u16> {
+    let digits = name.strip_prefix(prefix)?;
+    if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let number: usize = digits.parse().ok()?;
+    (number < crate::MAX_CONTROLLERS).then_some(number as u16)
 }
 
 /// Longest value a `#define` may have, in bytes. With it, replacing
@@ -390,6 +429,29 @@ impl<'a> Parser<'a> {
 
     fn warn(&mut self, location: Location, kind: WarningKind) {
         self.warnings.push(Warning { location, kind });
+    }
+
+    /// `parsed` held to `0..=max`, with a warning if it was outside.
+    fn clamped(
+        &mut self,
+        name: &str,
+        value: &str,
+        location: &Location,
+        parsed: f64,
+        max: f64,
+    ) -> f64 {
+        let used = parsed.clamp(0.0, max);
+        if used != parsed {
+            self.warn(
+                location.clone(),
+                WarningKind::OutOfRange {
+                    opcode: Arc::from(name),
+                    value: Arc::from(value),
+                    used,
+                },
+            );
+        }
+        used
     }
 
     /// Parses one file's worth of text.
@@ -693,13 +755,29 @@ impl<'a> Parser<'a> {
                             );
                         }
                     }
-                    _ => self.warn(
-                        location.clone(),
-                        WarningKind::UnknownOpcode {
-                            name: Arc::from(name),
-                            value: Arc::from(value),
-                        },
-                    ),
+                    _ => {
+                        if let Some(controller) = controller_suffix(name, "set_cc") {
+                            let parsed = parse_number(value).ok_or_else(invalid)?;
+                            let used = self.clamped(name, value, location, parsed, 127.0);
+                            self.control.set_initial(controller, used / 127.0);
+                        } else if let Some(controller) = controller_suffix(name, "set_hdcc") {
+                            let parsed = parse_number(value).ok_or_else(invalid)?;
+                            let used = self.clamped(name, value, location, parsed, 1.0);
+                            self.control.set_initial(controller, used);
+                        } else if let Some(controller) = controller_suffix(name, "label_cc") {
+                            let label = &mut self.control.label_cc;
+                            label.retain(|(number, _)| *number != controller);
+                            label.push((controller, value.to_owned()));
+                        } else {
+                            self.warn(
+                                location.clone(),
+                                WarningKind::UnknownOpcode {
+                                    name: Arc::from(name),
+                                    value: Arc::from(value),
+                                },
+                            );
+                        }
+                    }
                 }
                 Ok(())
             }
