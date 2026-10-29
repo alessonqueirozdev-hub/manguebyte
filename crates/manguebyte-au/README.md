@@ -19,6 +19,12 @@ and both example plugins pass Apple's `auval` in a macOS CI job. No DAW
 has loaded one yet. Not there: an editor, MIDI 2.0 output, factory presets
 and AUv3.
 
+The codes come from the plugin's identity at run time
+(`manguebyte_plugin::plugin_info`, ADR 0012), in the state dictionary and
+in the `Info.plist` that `cargo mangue` writes; a library whose identity
+changes with its copy needs its `Info.plist` written for each copy
+(`info_plist` takes any `PluginInfo`).
+
 Documentation: <https://docs.rs/manguebyte-au>
 
 ## Licence

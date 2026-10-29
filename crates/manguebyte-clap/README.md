@@ -17,6 +17,11 @@ audio through the plugin's 32-bit path, and transport events inside a
 block cut it on their frames. Not there yet: note-end events, `tail`,
 presets, remote controls.
 
+The descriptor is built from the plugin's identity at run time
+(`manguebyte_plugin::plugin_info`, ADR 0012) the first time a host asks
+for it, and the path the host passes to `clap_entry.init` becomes
+`manguebyte_plugin::library_path()`.
+
 Documentation: <https://docs.rs/manguebyte-clap>
 
 ## Licence

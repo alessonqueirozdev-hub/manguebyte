@@ -37,6 +37,12 @@ break the API.
   four-sum loop (TECH_DEBT item 92).
 - `AudioBuffer`'s `apply_gain`, `apply_gain_ramp`, `mix_from`, `peak`,
   `rms` and its interleaving copies of one and two channels run on them.
+- `module::file` names the file of the binary the code is linked into,
+  a plugin's own library in a plugin, by asking the system about an
+  address inside it: `GetModuleHandleExW` with
+  `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS` and `GetModuleFileNameW` on
+  Windows, `dladdr` elsewhere, `None` under Miri and on WebAssembly
+  (ADR 0012).
 
 ### DSP
 
@@ -270,6 +276,42 @@ break the API.
 
 ### Plugins
 
+- **Identity at run time** ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)).
+  `Plugin::info()` gives a plugin's id, name, vendor, version and
+  description, `Plugin::INFO` unless overridden, so one pre-built engine
+  copied to several files, each with its own identity in data the copy
+  carries, is several plugins. `plugin_info::<P>()` asks it once per
+  plugin type, outside any lock but a brief one, and keeps it for the life
+  of the library; the kind is always `INFO`'s, and an id that
+  `is_valid_id` refuses (empty, white space, control characters) makes
+  the whole of `INFO` the identity. `library_path()` names the file the
+  plugin's code was loaded from, from what a wrapper recorded with
+  `set_library_path` or else from `manguebyte_core::module::file`, and is
+  known inside `info`.
+  - CLAP: the descriptor and the id `create_plugin` takes come from
+    `plugin_info`; `clap_entry.init` records the path the host gives when
+    it names a file.
+  - VST 3: `getFactoryInfo`, every class info and the class id
+    (`class_id` of the run-time id, worked out once when the factory is
+    made).
+  - AU: the codes in the state dictionary and in the `Info.plist`
+    `export_au!`'s hidden function writes.
+  - LV2: `plugin_descriptor::<P>()` builds the descriptor on first use
+    with the run-time URI and leaks it once, as the CLAP descriptor is;
+    `descriptor!` now calls it, and `lv2_descriptor` gives null rather
+    than unwinding if `info` panics. `plugin_uri` and the Turtle follow.
+  - Saved state names the run-time id and takes only state with it: two
+    copies with different ids refuse each other's state
+    (`StateError::WrongPlugin`). The `Harness` checks and names that id.
+  - `plugins/identity-probe` (not published) reads its identity from
+    bytes appended to its library; its test hosts two copies of one
+    library with different identities in one process through
+    `manguebyte-host`: two CLAP descriptors, two VST 3 class ids, audio
+    and state in each, and on Windows both editors open at once in real
+    windows, through CLAP and VST 3, with window classes of two modules.
+  - `cargo-mangue`: `layout::plan` and `bundle::write` are documented as
+    public API for programs that bundle plugins without cargo, with an
+    example of `write`.
 - **Layouts** (issue #15). `Plugin::LAYOUTS` lists every layout a plugin
   can run with, and `Plugin::set_layout` tells it the one the host chose,
   right before every `prepare`. A wrapper offers the entries with the

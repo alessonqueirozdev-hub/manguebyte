@@ -253,6 +253,15 @@ Write a processor once and ship it in every format.
   lilv in CI. Not yet checked by `lv2lint` or run in any host but the
   framework's own (`manguebyte-host`); MIDI output on the notify port; no
   editor, one fixed layout
+- 🚧 Plugin identity at run time ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)):
+  `Plugin::info`, asked once per library through `plugin_info`, and
+  `library_path`, read by the CLAP, VST 3, LV2 and AU wrappers, saved
+  state and the harness; two copies of one library with different
+  identities appended are hosted side by side in one process, through
+  CLAP and VST 3, editors included, in a test run on Windows. Not yet run
+  on Linux, not run on macOS (appended data breaks a signature there), and
+  AU `Info.plist` and LV2 Turtle files are not rewritten per copy
+  (TECH_DEBT 100)
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU

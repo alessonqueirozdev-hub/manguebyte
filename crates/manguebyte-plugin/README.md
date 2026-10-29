@@ -14,6 +14,14 @@ CLAP, VST 3, AU and LV2 wrappers and the standalone runner offer what
 their formats can of it. `Harness` runs it in a test, in any of its
 layouts, with no host.
 
+A plugin's identity is `Plugin::INFO`, fixed when it is compiled, unless
+it overrides `Plugin::info`, which works it out when the library is
+loaded: one engine binary copied to several files, each with its own
+identity in data it finds through `library_path()`, is then several
+plugins. `plugin_info::<P>()` asks `info` once and keeps the answer for
+the life of the library; every wrapper, saved state and the harness read
+it there. The kind always comes from `INFO`. See ADR 0012.
+
 Documentation: <https://docs.rs/manguebyte-plugin>
 
 ## Licence

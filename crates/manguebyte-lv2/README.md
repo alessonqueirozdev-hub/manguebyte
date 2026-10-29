@@ -14,6 +14,12 @@ MIDI 1.0 on the `notify` sequence, which then supports `midi:MidiEvent`.
 The ports are fixed in the bundle, so a plugin runs its own layout. No
 editor.
 
+The descriptor (`plugin_descriptor`, or `descriptor!`) is built on first
+use with the URI of the plugin's identity at run time
+(`manguebyte_plugin::plugin_info`, ADR 0012), and the Turtle files use the
+same; a library whose identity changes with its copy needs its Turtle
+written for each copy.
+
 Documentation: <https://docs.rs/manguebyte-lv2>
 
 ## Licence

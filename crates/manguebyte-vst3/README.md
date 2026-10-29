@@ -14,6 +14,11 @@ through the plugin's 32-bit path, so both give the same numbers), and
 `setBusArrangements` and `activateBus` choose among the layouts the
 plugin offers in `Plugin::LAYOUTS`. Not there yet: program lists.
 
+The factory reports the plugin's identity at run time
+(`manguebyte_plugin::plugin_info`, ADR 0012), and its class id is
+`class_id` of that identity's id, so two copies of one library with
+different identities are two classes.
+
 Documentation: <https://docs.rs/manguebyte-vst3>
 
 ## Licence

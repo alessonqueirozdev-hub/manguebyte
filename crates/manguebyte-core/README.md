@@ -47,6 +47,14 @@ println!("running on {}", Backend::detect().name());
 operation on every backend the processor has against the loops they
 replaced.
 
+## The binary's own file
+
+`manguebyte_core::module::file()` names the file of the binary the code
+is linked into, the plugin's library in a plugin, by asking the system
+about an address inside it (`GetModuleHandleExW` and
+`GetModuleFileNameW` on Windows, `dladdr` on other systems).
+`manguebyte_plugin::library_path` is built on it.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
