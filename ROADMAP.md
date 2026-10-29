@@ -125,9 +125,13 @@ Everything a standalone audio application needs, short of a user interface.
   layers, round robin and random layers, loop points with crossfades,
   release triggers, choke groups and polyphony limits, from files or from
   memory, in WebAssembly too, open so that any program can play the
-  instruments Parabolic exports. Samples are loaded whole, not streamed
-  from disk; filters, LFOs, modulation by controllers and keyswitches are
-  not started
+  instruments Parabolic exports. Filters per region (one to six poles,
+  band-pass and band-reject) with their envelope, and modulation by
+  controllers (`<opcode>_onccN`, `set_ccN`, controllers up to 511 that a
+  plugin sets without MIDI) are done and measured. Samples are loaded
+  whole, not streamed from disk; LFOs, controller curves and smoothing
+  per opcode, a second filter, the other filter types and keyswitches are
+  not started (TECH_DEBT 101)
 - ✅ Polyphonic voice allocation with per-note expression and modulation,
   accents and legato slides
 - ✅ Instruments: physically modelled plucked strings (guitars and basses),

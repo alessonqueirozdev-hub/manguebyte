@@ -176,6 +176,46 @@ break the API.
     graph sounds bit for bit as it does alone.
   - Limits: TECH_DEBT 88.
 
+### Sampler
+
+- Filters per region in `manguebyte-sampler`: `cutoff` turns on a filter
+  of the region's `fil_type`, among `lpf_1p`, `hpf_1p`, `lpf_2p` (the
+  default), `hpf_2p`, `bpf_2p`, `brf_2p` (and their `_sv` spellings),
+  `lpf_4p`, `hpf_4p`, `lpf_6p` and `hpf_6p` (`FilterType`): bilinear
+  Butterworth responses built from trapezoidal state-variable sections,
+  whose `resonance` raises the gain at the cutoff by its decibels. Other
+  types are reported and the region plays unfiltered. `fil_keytrack`,
+  `fil_keycenter` and `fil_veltrack` move the cutoff in cents, and so does
+  the filter envelope (`fileg_delay` to `fileg_release`, `fileg_vel2*`,
+  `fileg_depth`, `fileg_vel2depth`). The cutoff is worked out every 16
+  frames and glides in between, is held below 0.49 of the sample rate, and
+  nothing is allocated. The tests measure each low-pass and high-pass
+  type against its Butterworth response within 0.05 dB through the
+  sampler, the band types at and away from their centre, -3 dB at the
+  cutoff, the resonance's peak, keytrack and veltrack within half a cent,
+  and the filter envelope over time.
+- Modulation by controllers: `<opcode>_onccN` (also `_ccN`, and SFZ 1's
+  `ampeg_attackccN` form) for `amplitude`, `volume`/`gain`, `pan`,
+  `tune`/`pitch`, `cutoff`, `resonance`, `fileg_depth` and every stage of
+  `ampeg_*` and `fileg_*`, several on one opcode adding up, with
+  controllers 0 to 511 (`MAX_CONTROLLERS`). Envelope stages read their
+  times and levels when they start, as SFZ players do; the rest follows
+  the controller while the note plays. `set_ccN` and `set_hdccN` give the
+  initial values (`Control::set_cc`, `Instrument::controller_default`),
+  and `label_ccN` is kept (`Control::label_cc`). MIDI control changes
+  reach controllers 0 to 119; `Sampler::set_controller(controller, value,
+  frame)` sets any of them from a plugin's parameter on its frame within
+  the next block, without a MIDI message, so parameters bound above 127
+  never collide with a musician's controllers; `Sampler::controller`
+  reads one back. Every change glides over 10 ms
+  (`CONTROLLER_SMOOTHING_SECONDS`). Reset all controllers (121) restores
+  the MIDI controllers RP-015 resets, and a new instrument's initial values
+  apply to the controllers no one has set. `tests/controllers.rs` measures
+  each modulation on a playing note, the steps a jump leaves, the reach of
+  MIDI messages and the independence from block sizes; `tests/realtime.rs`
+  runs filters, modulations and `set_controller` under the counting
+  allocator. Limits: TECH_DEBT 101.
+
 ### Fixed
 
 - `cargo mangue` built the programs that write an LV2 bundle's Turtle files
@@ -680,6 +720,11 @@ equal to a whole one bit for bit at 1x, 1.25x and 2x
   rate. The harness's transport now comes from a clock: its beats are
   worked out from the frame instead of added up block by block, which can
   differ in the last bits, and it gives the three new fields.
+- `manguebyte_sampler::Control` is no longer `Copy` or `Eq`: it holds the
+  `set_ccN` values and `label_ccN` names in two new fields, so a struct
+  literal of it must name them or end with `..Control::default()`.
+  `Region` gains the filter and modulation fields (it is
+  `#[non_exhaustive]` already).
 
 ### Devices
 
