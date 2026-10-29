@@ -242,10 +242,11 @@ pub const fn plugin_entry<P: Plugin>() -> clap_plugin_entry {
 /// Records the path the host gives as the library's own, for
 /// [`manguebyte_plugin::library_path`], when it names a file. On macOS
 /// hosts give the bundle's folder, and the library's file is asked of the
-/// system instead.
+/// system instead. Under Miri, which has no file system, nothing is
+/// recorded.
 unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
     guard(true, || {
-        if plugin_path.is_null() {
+        if plugin_path.is_null() || cfg!(miri) {
             return true;
         }
         // SAFETY: the host passes a NUL-terminated path, valid for the call.

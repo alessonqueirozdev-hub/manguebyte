@@ -97,6 +97,7 @@ fn library_file(name: &str, identity: &str) -> PathBuf {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "reads and writes files, which Miri cannot")]
 fn the_descriptor_is_the_identity_read_from_the_path_init_was_given() {
     let file = library_file(
         "Copy One.clap",
