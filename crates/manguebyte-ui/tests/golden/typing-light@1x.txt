@@ -1,32 +1,32 @@
-fill rect(0 0 220 240) solid(#f2f3f5ff)
-text "Preset" size 16 weight 600 opsz 16 solid(#1c1f24ff) [77 10 25.320313, 200 20.273438 25.320313, 137 26.234375 25.320313, 204 35.632813 25.320313, 137 44.34375 25.320313, 211 53.742188 25.320313]
+fill rect(0 0 220 240) solid(#f4f3efff)
+text "Preset" size 16 weight 600 opsz 16 solid(#16150fff) [77 10 25.320313, 200 20.273438 25.320313, 137 26.234375 25.320313, 204 35.632813 25.320313, 137 44.34375 25.320313, 211 53.742188 25.320313]
 clip rect(10 35 124 25) {
-  fill rounded_rect(12 37 120 21 radii 2 2 2 2) solid(#f2f3f5ff)
-  stroke rounded_rect(12.5 37.5 119 20 radii 2 2 2 2) width 1 cap butt join miter 4 solid(#d0d4dbff)
+  fill rounded_rect(12 37 120 21 radii 4 4 4 4) solid(#f4f3efff)
+  stroke rounded_rect(12.5 37.5 119 20 radii 4 4 4 4) width 1 cap butt join miter 4 solid(#14120c14)
   clip rect(16 40.240234 112 14.519531) {
-    fill rect(52.86133 40.240234 21.767578 14.519531) solid(#1f6feb66)
-    text "Warm pad" size 12 weight 500 opsz 14 solid(#1c1f24ff) [104 16 51.865234, 115 27.396484 51.865234, 200 34.210938 51.865234, 180 39.003906 51.865234, 444 49.66211 51.865234, 198 52.86133 51.865234, 115 60.396484 51.865234, 134 67.21094 51.865234]
-    fill rect(52.86133 40.240234 1 14.519531) solid(#1c1f24ff)
+    fill rect(52.86133 40.240234 21.767578 14.519531) solid(#ff5a1f55)
+    text "Warm pad" size 12 weight 500 opsz 14 solid(#16150fff) [104 16 51.865234, 115 27.396484 51.865234, 200 34.210938 51.865234, 180 39.003906 51.865234, 444 49.66211 51.865234, 198 52.86133 51.865234, 115 60.396484 51.865234, 134 67.21094 51.865234]
+    fill rect(52.86133 40.240234 1 14.519531) solid(#16150fff)
   }
-  stroke rounded_rect(11.75 36.75 120.5 21.5 radii 4 4 4 4) width 1.5 cap round join round solid(#1f6febff)
+  stroke rounded_rect(12 37 120 21 radii 10 10 10 10) width 2 cap round join round solid(#ff5a1f99)
 }
 clip rect(10 66 124 24) {
-  fill rounded_rect(12 68 120 20 radii 2 2 2 2) solid(#f2f3f5ff)
-  stroke rounded_rect(12.5 68.5 119 19 radii 2 2 2 2) width 1 cap butt join miter 4 solid(#d0d4dbff)
-  text "Notes" size 12 weight 500 opsz 14 solid(#5f6670ff) [60 16 82.365234, 187 25.076172 82.365234, 211 32.32422 82.365234, 137 36.291016 82.365234, 204 43.339844 82.365234]
+  fill rounded_rect(12 68 120 20 radii 4 4 4 4) solid(#f4f3efff)
+  stroke rounded_rect(12.5 68.5 119 19 radii 4 4 4 4) width 1 cap butt join miter 4 solid(#14120c14)
+  text "Notes" size 12 weight 500 opsz 14 solid(#55534aff) [60 16 82.365234, 187 25.076172 82.365234, 211 32.32422 82.365234, 137 36.291016 82.365234, 204 43.339844 82.365234]
   clip rect(16 70.740234 112 14.519531) {
-    text "" size 12 weight 500 opsz 14 solid(#1c1f24ff) []
+    text "" size 12 weight 500 opsz 14 solid(#16150fff) []
   }
 }
 clip rect(10 96 70 41) {
-  text "Shape" size 12 weight 500 opsz 14 solid(#1c1f24ff) [83 26.874023 109.625, 155 34.625977 109.625, 115 41.844727 109.625, 198 48.65918 109.625, 137 56.07715 109.625]
-  fill rounded_rect(12 114.51953 66 20.480469 radii 2 2 2 2) solid(#f2f3f5ff)
-  stroke rounded_rect(12.5 115.01953 65 19.480469 radii 2 2 2 2) width 1 cap butt join miter 4 solid(#d0d4dbff)
-  text "Saw" size 12 weight 500 opsz 14 solid(#1c1f24ff) [83 16 129.125, 115 23.751953 129.125, 229 30.566406 129.125]
-  stroke path(nonzero M 64 122.759766 L 68 126.759766 L 72 122.759766) width 1.5 cap round join round solid(#5f6670ff)
+  text "Shape" size 12 weight 500 opsz 14 solid(#16150fff) [83 26.874023 109.625, 155 34.625977 109.625, 115 41.844727 109.625, 198 48.65918 109.625, 137 56.07715 109.625]
+  fill rounded_rect(12 114.51953 66 20.480469 radii 4 4 4 4) solid(#f4f3efff)
+  stroke rounded_rect(12.5 115.01953 65 19.480469 radii 4 4 4 4) width 1 cap butt join miter 4 solid(#14120c14)
+  text "Saw" size 12 weight 500 opsz 14 solid(#16150fff) [83 16 129.125, 115 23.751953 129.125, 229 30.566406 129.125]
+  stroke path(nonzero M 64 122.759766 L 68 126.759766 L 72 122.759766) width 1.5 cap round join round solid(#55534aff)
 }
-stroke arc(119 136.60498 20 2.3561945 4.712389) width 4 cap round join round solid(#d0d4dbff)
-stroke arc(119 136.60498 20 2.3561945 2.668736) width 4 cap round join round solid(#e86a00ff)
-stroke path(nonzero M 120.53739 131.8472 L 123.91965 121.3801) width 2 cap round join round solid(#23262dff)
-text "Cutoff" size 12 weight 500 opsz 14 solid(#1c1f24ff) [13 101.07031 109.625, 216 109.87109 109.625, 211 117.08984 109.625, 187 121.05664 109.625, 148 128.30469 109.625, 148 132.37695 109.625]
-text "1000 Hz" size 11 weight 400 opsz 14 solid(#5f6670ff) [258 96.13257 171.34668, 257 103.26538 171.34668, 257 110.39819 171.34668, 257 117.531006 171.34668, 314 124.66382 171.34668, 37 127.61792 171.34668, 236 135.79272 171.34668]
+stroke arc(119 137.60498 21.5 2.3561945 4.712389) width 3 cap round join round solid(#14120c14)
+stroke arc(119 137.60498 21.5 2.3561945 2.668736) width 3 cap round join round solid(#ff5a1fff)
+stroke path(nonzero M 120.652695 132.49037 L 124.68834 120.001205) width 2 cap round join round solid(#16150fff)
+text "Cutoff" size 12 weight 500 opsz 14 solid(#16150fff) [13 101.07031 109.625, 216 109.87109 109.625, 211 117.08984 109.625, 187 121.05664 109.625, 148 128.30469 109.625, 148 132.37695 109.625]
+text "1000 Hz" size 11 weight 500 opsz 14 solid(#55534aff) [258 96.09766 173.34668, 257 103.2251 173.34668, 257 110.35254 173.34668, 257 117.47998 173.34668, 314 124.60742 173.34668, 37 127.56152 173.34668, 236 135.75244 173.34668]

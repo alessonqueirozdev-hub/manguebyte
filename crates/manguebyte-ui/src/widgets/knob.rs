@@ -187,7 +187,7 @@ impl Widget for Knob {
             let track = theme
                 .palette
                 .track
-                .lerp(theme.palette.text_muted, 0.35 * cx.hover());
+                .lerp(theme.palette.text_secondary, 0.35 * cx.hover());
             scene.stroke(
                 Arc::new(center, radius, START, SWEEP),
                 Stroke::round(ring),

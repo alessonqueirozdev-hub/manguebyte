@@ -55,7 +55,7 @@ impl Container {
     /// assert_eq!(inward.bounds.x, 4.0);
     /// assert!(out.bounds.x >= inward.bounds.right() + 5.0);
     /// assert!(group.bounds.contains(out.center()));
-    /// assert!(ui.dump().contains("rounded_rect(0 0 100 30 radii 8 8 8 8)"));
+    /// assert!(ui.dump().contains("rounded_rect(0 0 100 30 radii 18 18 18 18)"));
     /// ```
     pub fn panel() -> Container {
         Container { fill: Fill::Panel }
@@ -79,7 +79,7 @@ impl Widget for Container {
             Fill::Panel => {
                 let theme = cx.theme();
                 scene.fill(
-                    RoundedRect::new(rect, theme.corners.large),
+                    RoundedRect::new(rect, theme.corners.xl),
                     theme.palette.surface,
                 );
             }

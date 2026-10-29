@@ -163,7 +163,7 @@ impl Label {
         };
         let color = match (self.color, self.muted, own_color) {
             (Some(color), _, _) => color,
-            (None, true, _) => theme.palette.text_muted,
+            (None, true, _) => theme.palette.text_secondary,
             (None, false, true) => style.color,
             (None, false, false) => theme.palette.text,
         };

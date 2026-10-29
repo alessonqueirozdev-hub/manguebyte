@@ -256,16 +256,16 @@ impl Widget for Meter {
         let bar = theme.sizes.meter_width.min(width).max(0.0);
         let well = Rect::new(rect.x + (rect.width - bar) * 0.5, top, bar, height);
         scene.fill(
-            RoundedRect::new(well, theme.corners.small),
+            RoundedRect::new(well, theme.corners.sm),
             theme.palette.track,
         );
         let level = (height - 2.0).max(0.0) * self.fraction();
         if level > 0.0 {
             let warning = self.warning.is_some_and(|at| self.shown >= at);
             let color = if warning {
-                theme.palette.meter_warning
+                theme.palette.danger
             } else {
-                theme.palette.meter
+                theme.palette.success
             };
             scene.fill(
                 Rect::new(

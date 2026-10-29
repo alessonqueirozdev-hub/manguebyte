@@ -359,15 +359,15 @@ fn a_label_whose_text_changes_is_laid_out_again() {
 #[test]
 fn a_new_theme_draws_everything_in_its_colours() {
     let (mut ui, _params, _levels) = open(1.0);
-    assert!(ui.dump().contains("solid(#e8e8e8ff)"), "dark text");
+    assert!(ui.dump().contains("solid(#eef0f6ff)"), "dark text");
     ui.set_theme(manguebyte_ui::Theme::light());
     let summary = ui.frame();
     assert!(summary.laid_out);
     assert_eq!(ui.last_damage(), [IRect::new(0, 0, 400, 300)]);
     let dump = ui.dump();
-    assert!(dump.contains("solid(#1c1f24ff)"), "light text");
+    assert!(dump.contains("solid(#16150fff)"), "light text");
     assert!(
-        !dump.contains("#e8e8e8"),
+        !dump.contains("#eef0f6"),
         "nothing kept the dark theme's colours"
     );
     assert!(ui.pixels() == &ui.render_fresh());

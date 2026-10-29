@@ -346,7 +346,7 @@ impl Widget for Ghost {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let radius = theme.corners.medium;
+        let radius = theme.corners.md;
         scene.fill(RoundedRect::new(rect, radius), theme.palette.surface);
         let edge = Rect::new(
             rect.x + 0.75,

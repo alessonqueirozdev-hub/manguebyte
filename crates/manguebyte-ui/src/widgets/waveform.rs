@@ -567,9 +567,9 @@ enum Press {
 /// The colour of a marker of `kind`.
 fn marker_color(theme: &Theme, kind: MarkerKind) -> manguebyte_gfx::Color {
     match kind {
-        MarkerKind::Edge => theme.palette.focus,
-        MarkerKind::Loop => theme.palette.meter,
-        MarkerKind::Cue => theme.palette.text_muted,
+        MarkerKind::Edge => theme.palette.text,
+        MarkerKind::Loop => theme.palette.success,
+        MarkerKind::Cue => theme.palette.text_secondary,
     }
 }
 
@@ -1094,7 +1094,7 @@ impl Widget for WaveformView {
         let rect = cx.rect();
         let scale = cx.scale();
         scene.fill(
-            RoundedRect::new(rect, theme.corners.small),
+            RoundedRect::new(rect, theme.corners.sm),
             theme.palette.background,
         );
         let (wave, geometry, selection, markers, playhead) = {

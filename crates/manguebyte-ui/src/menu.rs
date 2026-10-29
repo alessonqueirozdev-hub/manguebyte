@@ -246,8 +246,8 @@ impl Widget for MenuPanel {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let radius = theme.corners.medium;
-        scene.fill(RoundedRect::new(rect, radius), theme.palette.surface);
+        let radius = theme.corners.md;
+        scene.fill(RoundedRect::new(rect, radius), theme.palette.overlay);
         let edge = Rect::new(
             rect.x + 0.5,
             rect.y + 0.5,
@@ -257,7 +257,7 @@ impl Widget for MenuPanel {
         scene.stroke(
             RoundedRect::new(edge, radius),
             Stroke::new(1.0),
-            theme.palette.track,
+            theme.palette.hairline_strong,
         );
     }
 }
@@ -281,7 +281,7 @@ fn item_style(cx_theme: &crate::Theme, enabled: bool) -> TextStyle {
         .with_color(if enabled {
             palette.text
         } else {
-            palette.text_muted
+            palette.text_secondary
         })
         .with_align(Align::Start)
 }
@@ -313,10 +313,12 @@ impl Widget for MenuEntry {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let palette = &theme.palette;
         let open = self.expanded.as_ref().is_some_and(|open| open.get());
         if self.enabled && (cx.is_focused() || open) {
-            scene.fill(RoundedRect::new(rect, theme.corners.small), palette.track);
+            scene.fill(
+                RoundedRect::new(rect, theme.corners.sm),
+                crate::access::menu_highlight(theme),
+            );
         }
         let style = item_style(theme, self.enabled);
         let ink = style.color;

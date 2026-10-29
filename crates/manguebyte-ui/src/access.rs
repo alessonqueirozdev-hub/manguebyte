@@ -370,10 +370,16 @@ pub fn contrast_ratio(text: Color, background: Color) -> f64 {
     (front.max(back) + 0.05) / (front.min(back) + 0.05)
 }
 
-/// The colour selected text is drawn on in `theme`: its focus colour, at
-/// two fifths, over its background.
+/// The colour selected text is drawn on in `theme`: its accent, at a
+/// third, over the field.
 pub(crate) fn selection_color(theme: &Theme) -> Color {
-    theme.palette.focus.with_alpha(0x66)
+    theme.palette.accent.with_alpha(0x55)
+}
+
+/// The colour behind the highlighted item of a menu in `theme`: the
+/// accent's tint over the menu's surface.
+pub(crate) fn menu_highlight(theme: &Theme) -> Color {
+    blend(theme.palette.accent_soft, theme.palette.overlay)
 }
 
 /// `over`, drawn at its alpha on the opaque `under`.
@@ -389,16 +395,46 @@ fn blend(over: Color, under: Color) -> Color {
 }
 
 /// The first pair of the theme's text and background colours whose
-/// contrast is below [`MIN_TEXT_CONTRAST`], if any: text and muted text,
-/// each on the background and on the surface of panels; text on the track
-/// colour, which marks the highlighted item of a menu; and text on the
-/// selection colour of a text input, over the background.
+/// contrast is below [`MIN_TEXT_CONTRAST`], if any: each of the three
+/// levels of text on the background, the surface of cards and the raised
+/// faces of controls; text and secondary text on the overlay of menus and
+/// tooltips; text on a menu's highlighted item (the accent's tint over the
+/// overlay), on a selected row (the same tint over a card) and on the
+/// selection of a text input; and each categorical hue's text on its fill,
+/// over a card.
 fn contrast_problem(theme: &Theme) -> Option<String> {
     let palette = &theme.palette;
-    let selection = blend(selection_color(theme), palette.background);
-    let pairs = [
+    let selection = blend(selection_color(theme), palette.raised);
+    let selected_row = blend(palette.accent_soft, palette.surface);
+    let mut pairs = vec![
         ("text", palette.text, "background", palette.background),
         ("text", palette.text, "surface", palette.surface),
+        ("text", palette.text, "raised", palette.raised),
+        ("text", palette.text, "overlay", palette.overlay),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "background",
+            palette.background,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "surface",
+            palette.surface,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "raised",
+            palette.raised,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "overlay",
+            palette.overlay,
+        ),
         (
             "text_muted",
             palette.text_muted,
@@ -406,14 +442,34 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
             palette.background,
         ),
         ("text_muted", palette.text_muted, "surface", palette.surface),
-        ("text", palette.text, "track", palette.track),
+        ("text_muted", palette.text_muted, "raised", palette.raised),
         (
             "text",
             palette.text,
-            "selection (focus over background)",
+            "menu highlight (accent tint over overlay)",
+            menu_highlight(theme),
+        ),
+        (
+            "text",
+            palette.text,
+            "selected row (accent tint over surface)",
+            selected_row,
+        ),
+        (
+            "text",
+            palette.text,
+            "selection (accent over raised)",
             selection,
         ),
     ];
+    for hue in &palette.hues {
+        pairs.push((
+            "categorical text",
+            hue.text,
+            "its fill over the surface",
+            blend(hue.fill, palette.surface),
+        ));
+    }
     for (text_name, text, back_name, back) in pairs {
         let ratio = contrast_ratio(text, back);
         if ratio < MIN_TEXT_CONTRAST {
@@ -718,12 +774,17 @@ mod tests {
             assert_eq!(contrast_problem(&theme), None);
         }
         let mut faint = Theme::light();
-        faint.palette.text_muted = Color::hex(0xA0A4AA);
+        faint.palette.text_muted = Color::hex(0xA4A197);
         let found = contrast_problem(&faint).expect("too faint");
         assert!(
             found.contains("text_muted") && found.contains("background"),
             "{found}"
         );
+        // A categorical hue whose text does not stand out from its fill.
+        let mut washed = Theme::dark();
+        washed.palette.hues[1].text = washed.palette.surface;
+        let found = contrast_problem(&washed).expect("washed out");
+        assert!(found.contains("categorical"), "{found}");
         // Half-transparent text is judged as it is drawn.
         let mut veiled = Theme::dark();
         veiled.palette.text = veiled.palette.text.with_alpha(64);

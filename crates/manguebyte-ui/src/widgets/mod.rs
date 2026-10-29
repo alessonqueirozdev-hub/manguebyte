@@ -152,7 +152,7 @@ pub(crate) fn focus_ring(scene: &mut Scene, rect: Rect, theme: &Theme) {
         (rect.height - 2.0 * inset).max(0.0),
     );
     scene.stroke(
-        RoundedRect::new(ring, theme.corners.medium),
+        RoundedRect::new(ring, theme.corners.md),
         Stroke::round(width),
         theme.palette.focus,
     );
@@ -231,7 +231,7 @@ pub(crate) fn value_style(theme: &Theme) -> TextStyle {
     theme
         .typography
         .value
-        .with_color(theme.palette.text_muted)
+        .with_color(theme.palette.text_secondary)
         .with_align(manguebyte_gfx::Align::Center)
 }
 

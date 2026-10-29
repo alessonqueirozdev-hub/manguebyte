@@ -204,8 +204,8 @@ impl Widget for TooltipBox {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let radius = theme.corners.small;
-        scene.fill(RoundedRect::new(rect, radius), theme.palette.surface);
+        let radius = theme.corners.sm;
+        scene.fill(RoundedRect::new(rect, radius), theme.palette.overlay);
         let edge = Rect::new(
             rect.x + 0.5,
             rect.y + 0.5,
@@ -215,7 +215,7 @@ impl Widget for TooltipBox {
         scene.stroke(
             RoundedRect::new(edge, radius),
             Stroke::new(1.0),
-            theme.palette.track,
+            theme.palette.hairline_strong,
         );
         let style = tip_style(theme);
         let width = (rect.width - 2.0 * TIP_PAD).max(0.0);

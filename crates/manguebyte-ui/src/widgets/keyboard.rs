@@ -625,7 +625,6 @@ impl Widget for PianoKeyboard {
         let inner = self.state.lock();
         let gap = device_px(1.0, scale);
         scene.fill(rect, theme.palette.background);
-        scene.fill(keys, theme.palette.track);
         let lit = |note: u8| {
             let index = usize::from(note);
             inner.down[index] || inner.sounding[index]
@@ -694,14 +693,14 @@ impl Widget for PianoKeyboard {
                 (right - left).max(0.0),
                 (strip.height - 2.0).max(0.0),
             );
-            scene.fill(bar, theme.palette.focus.with_alpha(0x99));
+            scene.fill(bar, theme.palette.accent.with_alpha(0x99));
             if let Some(root) = range.root.filter(|&root| self.span.contains(root)) {
                 if let Some(column) = self.span.column(strip, root) {
                     let left = snap_px(column.x, scale);
                     let right = snap_px(column.right(), scale);
                     scene.fill(
                         Rect::new(left, strip.y, (right - left).max(0.0), strip.height),
-                        theme.palette.focus,
+                        theme.palette.accent,
                     );
                 }
                 if let Some(key) = self.key_rect(keys, root) {
@@ -718,7 +717,7 @@ impl Widget for PianoKeyboard {
                             center.y,
                         )
                     };
-                    scene.fill(Circle::new(center, radius), theme.palette.focus);
+                    scene.fill(Circle::new(center, radius), theme.palette.accent);
                 }
             }
         }
@@ -729,7 +728,7 @@ impl Widget for PianoKeyboard {
                 let mark = Rect::new(key.x, key.bottom() - 3.0, key.width, 3.0)
                     .intersect(&keys)
                     .unwrap_or(key);
-                scene.fill(mark, theme.palette.focus);
+                scene.fill(mark, theme.palette.accent);
             }
         }
     }

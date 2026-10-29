@@ -168,8 +168,8 @@ fn the_letters_can_be_turned_off_and_space_plays_the_key_the_keyboard_is_on() {
 
 #[test]
 fn keys_the_application_lights_are_drawn_lit_and_said_to_sound() {
-    let accent = Color::hex(0xFF7A00);
-    let white = Color::hex(0xDADCE0);
+    let palette = manguebyte_ui::Theme::dark().palette;
+    let (accent, white) = (palette.accent, palette.key_white);
     for scale in [1.0, 1.25, 2.0] {
         let state = KeyboardState::new();
         let view = row((
@@ -222,7 +222,8 @@ fn keys_the_application_lights_are_drawn_lit_and_said_to_sound() {
 
 #[test]
 fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
-    let white = Color::hex(0xDADCE0);
+    let palette = manguebyte_ui::Theme::dark().palette;
+    let white = palette.key_white;
     for scale in [1.0, 1.25, 2.0] {
         let state = KeyboardState::new();
         let mut ui = Harness::new(
@@ -232,9 +233,9 @@ fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
         );
         ui.frame();
         // Along a row below the black keys, every pixel is a key's white
-        // or the gap's track colour, never a blend of them.
+        // or the gap's colour, the background, never a blend of them.
         let y = (80.0 * scale) as u32;
-        let track = Color::hex(0x3A3F4A);
+        let track = palette.background;
         let width = (1040.0 * scale) as u32;
         let mut gaps = 0;
         for x in 0..width {
@@ -268,8 +269,8 @@ fn ranges_are_marked_and_said() {
         Some("up, in a range")
     );
     assert_eq!(ui.get(Role::Button, "B3").value_text(), Some("up"));
-    // The strip above the root key is the focus colour.
-    let focus = Color::hex(0x5CA8FF);
+    // The strip above the root key is the accent.
+    let focus = manguebyte_ui::Theme::dark().palette.accent;
     let f3 = ui.get(Role::Button, "F3");
     let column = KeySpan::new(48, 71)
         .column(manguebyte_gfx::Rect::new(0.0, 0.0, 280.0, 8.0), 53)

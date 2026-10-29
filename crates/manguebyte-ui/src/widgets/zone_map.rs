@@ -1059,7 +1059,7 @@ impl Widget for ZoneMap {
             for b in &areas[first + 1..] {
                 if let (Some(a), Some(b)) = (a, b) {
                     if let Some(both) = a.intersect(b).filter(|both| !both.is_empty()) {
-                        scene.fill(both, theme.palette.meter_warning.with_alpha(0x66));
+                        scene.fill(both, theme.palette.danger.with_alpha(0x66));
                     }
                 }
             }

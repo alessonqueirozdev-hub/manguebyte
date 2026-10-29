@@ -238,7 +238,7 @@ impl Widget for ComboBox {
         field_box(scene, outer, theme, false);
         if self.open {
             scene.fill(
-                RoundedRect::new(outer, theme.corners.small),
+                RoundedRect::new(outer, theme.corners.sm),
                 theme.palette.track.with_alpha(0x80),
             );
         }
@@ -258,7 +258,7 @@ impl Widget for ComboBox {
             .move_to(Point::new(x - 4.0, middle - 2.0))
             .line_to(Point::new(x, middle + 2.0))
             .line_to(Point::new(x + 4.0, middle - 2.0));
-        scene.stroke(&arrow, Stroke::round(1.5), theme.palette.text_muted);
+        scene.stroke(&arrow, Stroke::round(1.5), theme.palette.text_secondary);
         if cx.is_focused() {
             focus_ring(scene, rect, theme);
         }

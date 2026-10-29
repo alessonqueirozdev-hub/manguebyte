@@ -1188,7 +1188,7 @@ fn a_picture_made_for_twice_the_scale_is_copied_pixel_for_pixel_at_scale_two() {
         }
     }
     // Around it, the background.
-    let background = Color::hex(0x16181C);
+    let background = manguebyte_ui::Theme::dark().palette.background;
     assert_eq!(
         ui.pixels().pixel(6, 6).map(|p| p.to_array()),
         Some([background.r, background.g, background.b, 255])
@@ -1227,7 +1227,7 @@ fn a_covering_picture_is_cut_at_its_rectangle_and_a_contained_one_leaves_room() 
         pixels.fill(Color::hex(0xFF0000));
         Image::new(pixels)
     };
-    let background = Color::hex(0x16181C);
+    let background = manguebyte_ui::Theme::dark().palette.background;
     let is = |ui: &Harness, x: u32, y: u32, color: Color| {
         ui.pixels().pixel(x, y).map(|p| p.to_array()) == Some([color.r, color.g, color.b, 255])
     };

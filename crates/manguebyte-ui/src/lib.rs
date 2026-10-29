@@ -207,7 +207,7 @@ pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
 pub use scroll::ScrollMetrics;
 pub use source::{AtomicSource, Source, State, Watch};
-pub use theme::{Corners, Palette, Sizes, Theme, Typography};
+pub use theme::{Corners, Elevation, Hue, Palette, Sizes, Spacing, Theme, Typography};
 pub use tree::NodeId;
 pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};

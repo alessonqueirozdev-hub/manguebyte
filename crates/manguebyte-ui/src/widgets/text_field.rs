@@ -242,10 +242,10 @@ pub(crate) fn field_style(theme: &Theme) -> TextStyle {
 /// colour if `invalid`.
 pub(crate) fn field_box(scene: &mut Scene, outer: Rect, theme: &Theme, invalid: bool) {
     let palette = &theme.palette;
-    let radius = theme.corners.small;
+    let radius = theme.corners.sm;
     scene.fill(RoundedRect::new(outer, radius), palette.background);
     let border = if invalid {
-        palette.meter_warning
+        palette.danger
     } else {
         palette.track
     };
@@ -296,7 +296,7 @@ impl Widget for TextField {
         field_box(scene, outer, theme, self.invalid);
         if self.edit.text().is_empty() && !self.edit.is_composing() {
             if let Some(placeholder) = &self.placeholder {
-                let muted = style.with_color(theme.palette.text_muted);
+                let muted = style.with_color(theme.palette.text_secondary);
                 let hint = self.hint.get(inner.width, muted, || {
                     line(placeholder, &muted, inner.width)
                 });

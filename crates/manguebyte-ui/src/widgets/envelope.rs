@@ -629,7 +629,7 @@ impl Widget for EnvelopeEditor {
         let shape = self.shape(rect, theme);
         let graph = shape.graph;
         scene.fill(
-            RoundedRect::new(rect, theme.corners.small),
+            RoundedRect::new(rect, theme.corners.sm),
             theme.palette.background,
         );
         hline(
@@ -668,7 +668,7 @@ impl Widget for EnvelopeEditor {
             let color = if is_active {
                 theme.palette.accent
             } else if matches!(handle, Handle::Curve(_)) {
-                theme.palette.text_muted
+                theme.palette.text_secondary
             } else {
                 theme.palette.thumb
             };

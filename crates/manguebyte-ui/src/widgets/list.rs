@@ -929,7 +929,7 @@ impl Widget for ListView {
         let height = Self::row_height(theme);
         let geometry = self.geometry(rect, theme, self.state.scroll_offset());
         scene.fill(
-            RoundedRect::new(rect, theme.corners.small),
+            RoundedRect::new(rect, theme.corners.sm),
             theme.palette.background,
         );
         let (selection, cursor) = {

@@ -81,11 +81,11 @@ impl Widget for FileList {
             theme.palette.track
         };
         scene.fill(
-            RoundedRect::new(rect, theme.corners.medium),
+            RoundedRect::new(rect, theme.corners.md),
             theme.palette.surface,
         );
         scene.stroke(
-            RoundedRect::new(rect, theme.corners.medium),
+            RoundedRect::new(rect, theme.corners.md),
             Stroke::new(if self.lit { 2.0 } else { 1.0 }),
             edge,
         );
@@ -173,7 +173,7 @@ impl Widget for PushButton {
         } else {
             theme.palette.track
         };
-        scene.fill(RoundedRect::new(rect, theme.corners.medium), fill);
+        scene.fill(RoundedRect::new(rect, theme.corners.md), fill);
         let style = theme.typography.label.with_color(theme.palette.text);
         let layout = TextLayout::new(self.text, &style, None);
         let size = layout.size();

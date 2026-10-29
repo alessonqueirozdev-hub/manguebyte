@@ -489,7 +489,7 @@ pub(crate) fn paint_bars(scene: &mut Scene, geometry: &Geometry, theme: &Theme, 
     let thumb_color = if focused {
         palette.focus
     } else {
-        palette.text_muted
+        palette.text_secondary
     };
     // A margin inside the gutter, so that a bar never touches the content.
     let inset = |rect: Rect| {
@@ -501,7 +501,7 @@ pub(crate) fn paint_bars(scene: &mut Scene, geometry: &Geometry, theme: &Theme, 
             (rect.height - 2.0 * by).max(0.0),
         )
     };
-    let radius = theme.corners.small;
+    let radius = theme.corners.sm;
     for (track, thumb) in [
         (geometry.track_y(), geometry.thumb_y()),
         (geometry.track_x(), geometry.thumb_x()),

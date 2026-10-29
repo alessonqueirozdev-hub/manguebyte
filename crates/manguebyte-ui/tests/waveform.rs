@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use manguebyte_gfx::{Color, IRect, Point, Size};
+use manguebyte_gfx::{IRect, Point, Size};
 use manguebyte_ui::testing::{Found, Harness};
 use manguebyte_ui::{
     Action, IntoView, Key, Modifiers, Role, Waveform, WaveformEvent, WaveformState, label, row,
@@ -370,7 +370,7 @@ fn every_lane_shows_its_own_channel() {
     ))));
     let mut ui = Harness::new(waveform_view("Stereo", state), Size::new(240.0, 120.0), 1.0);
     ui.frame();
-    let accent = Color::hex(0xFF7A00);
+    let accent = manguebyte_ui::Theme::dark().palette.accent;
     let is_accent = |x: u32, y: u32| {
         ui.pixels().pixel(x, y).map(|p| p.to_array()) == Some([accent.r, accent.g, accent.b, 255])
     };
@@ -395,7 +395,8 @@ fn every_lane_shows_its_own_channel() {
 
 #[test]
 fn marker_lines_are_whole_device_pixels_at_every_scale() {
-    let focus = Color::hex(0x5CA8FF);
+    // Start and end markers are drawn in the text colour.
+    let focus = manguebyte_ui::Theme::dark().palette.text;
     for scale in [1.0, 1.25, 2.0] {
         let (mut ui, state) = sampler(vec![0.0; 48_000], Size::new(480.0, 120.0), scale);
         state.set_marker_frame(WaveformState::END, 40_123);
