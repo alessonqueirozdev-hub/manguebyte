@@ -2,7 +2,7 @@ use std::fmt;
 
 use manguebyte_params::{LoadReport, ParamSet, ParamState, ParseStateError};
 
-use crate::Plugin;
+use crate::{Plugin, plugin_info};
 
 const HEADER: &str = "manguebyte-plugin";
 /// The version written when the parameters carry no extra state, so such
@@ -62,9 +62,10 @@ fn is_valid_section_name(name: &str) -> bool {
 
 /// Captures a plugin's state as text.
 ///
-/// The text names the plugin and holds every parameter's real value by
-/// identifier. It is safe to call from any thread while audio is running:
-/// the values are read from atomics and nothing is locked.
+/// The text names the plugin, by the id [`plugin_info`] gives, and holds
+/// every parameter's real value by identifier. It is safe to call from any
+/// thread while audio is running: the values are read from atomics, and
+/// nothing is locked but, briefly, `plugin_info`'s cache.
 ///
 /// ```text
 /// manguebyte-plugin 1 org.example.gain
@@ -113,7 +114,7 @@ pub fn save_state<P: Plugin>(params: &P::Params) -> String {
     };
     format!(
         "{HEADER} {version} {}\n{}{sections}",
-        P::INFO.id,
+        plugin_info::<P>().id,
         params.save()
     )
 }
@@ -125,6 +126,12 @@ pub fn save_state<P: Plugin>(params: &P::Params) -> String {
 /// state that no field recognises are skipped. State from a different
 /// plugin is refused, and nothing is changed. Safe to call from any thread
 /// while audio is running.
+///
+/// "The same plugin" means the same id as [`plugin_info`] gives, which is
+/// [`Plugin::info`]'s, not [`Plugin::INFO`]'s: two copies of one library
+/// that work out different ids refuse each other's state, with
+/// [`StateError::WrongPlugin`], and a copy whose identity falls back to
+/// `INFO` takes state saved under `INFO`'s id and only that.
 ///
 /// The values are restored first, then each piece of extra state in the
 /// order it was saved. Its text comes back exactly, except that a carriage
@@ -143,7 +150,7 @@ pub fn load_state<P: Plugin>(params: &P::Params, text: &str) -> Result<LoadRepor
         return Err(StateError::UnsupportedVersion(version));
     }
     let id = fields.next().ok_or(StateError::NotPluginState)?;
-    if id != P::INFO.id {
+    if id != plugin_info::<P>().id {
         return Err(StateError::WrongPlugin(id.to_owned()));
     }
     let (values, sections) = if version == VERSION_SECTIONS {
@@ -328,6 +335,58 @@ mod tests {
             load_state::<Notes>(&other, "manguebyte-plugin 3 org.manguebyte.test.notes\n"),
             Err(StateError::UnsupportedVersion(3))
         );
+    }
+
+    /// The same plugin as `Notes`, but for the id it works out when loaded.
+    struct Renamed(Arc<NotesParams>);
+
+    impl Plugin for Renamed {
+        const INFO: PluginInfo = Notes::INFO;
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+        type Params = NotesParams;
+
+        fn info() -> PluginInfo {
+            PluginInfo {
+                id: "org.manguebyte.test.notes-copy",
+                ..Self::INFO
+            }
+        }
+        fn new() -> Self {
+            Self(Notes::new().0)
+        }
+        fn params(&self) -> Arc<NotesParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+    }
+
+    /// State is saved under the id the plugin works out at run time, and
+    /// only state saved under that id loads: not state saved under its
+    /// compiled id, which is another plugin's.
+    #[test]
+    fn state_belongs_to_the_run_time_id() {
+        let params = Renamed::new().params();
+        params.gain.set(0.75);
+        let saved = save_state::<Renamed>(&params);
+        assert!(saved.starts_with("manguebyte-plugin 1 org.manguebyte.test.notes-copy\n"));
+
+        let fresh = Renamed::new().params();
+        load_state::<Renamed>(&fresh, &saved).unwrap();
+        assert_eq!(fresh.gain.value(), 0.75);
+
+        let compiled = save_state::<Notes>(&Notes::new().params());
+        assert_eq!(
+            load_state::<Renamed>(&fresh, &compiled),
+            Err(StateError::WrongPlugin("org.manguebyte.test.notes".into()))
+        );
+        assert_eq!(
+            load_state::<Notes>(&fresh, &saved),
+            Err(StateError::WrongPlugin(
+                "org.manguebyte.test.notes-copy".into()
+            ))
+        );
+        assert_eq!(fresh.gain.value(), 0.75, "refused state changed nothing");
     }
 
     #[test]

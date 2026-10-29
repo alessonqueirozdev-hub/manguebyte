@@ -87,7 +87,7 @@ impl<P: Plugin> Harness<P> {
         assert!(max_block_size > 0, "max_block_size must be non-zero");
         let mut clock = TransportClock::new(TempoMap::default(), sample_rate);
         clock.play();
-        let id = P::INFO.id;
+        let id = crate::plugin_info::<P>().id;
         assert!(
             !id.is_empty() && !id.contains(char::is_whitespace),
             "plugin id {id:?} must be non-empty and free of spaces"
@@ -177,7 +177,7 @@ impl<P: Plugin> Harness<P> {
         assert!(
             layout.outputs > 0 && crate::offered_layouts::<P>().contains(&layout),
             "plugin {} does not offer the layout {layout:?}",
-            P::INFO.id
+            crate::plugin_info::<P>().id
         );
         self.layout = layout;
         self.sidechain = AudioBuffer::new(layout.sidechain, self.max_block_size);
@@ -370,7 +370,12 @@ impl<P: Plugin> Harness<P> {
         let param = self
             .params
             .find(id)
-            .unwrap_or_else(|| panic!("plugin {} has no parameter {id:?}", P::INFO.id))
+            .unwrap_or_else(|| {
+                panic!(
+                    "plugin {} has no parameter {id:?}",
+                    crate::plugin_info::<P>().id
+                )
+            })
             .param_id();
         self.schedule(frame, EventKind::ParamValue { param, value });
     }

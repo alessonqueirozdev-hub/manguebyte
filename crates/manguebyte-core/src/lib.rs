@@ -12,6 +12,8 @@
 //! - [`decibels`]: gain conversions.
 //! - [`NoDenormals`]: stops near-silence from slowing the processor down.
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
+//! - [`module`]: the file of the binary this code is linked into, such as a
+//!   plugin's own library.
 //! - [`source`]: sources of audio that are pulled a block at a time, and
 //!   audio in memory as one.
 //! - [`vector`]: operations on slices of samples (gain, mixing, ramps,
@@ -23,6 +25,7 @@ mod buffer;
 pub mod decibels;
 mod denormal;
 pub mod log;
+pub mod module;
 mod param_id;
 mod sample;
 mod smoothing;

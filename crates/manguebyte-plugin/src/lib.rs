@@ -54,6 +54,16 @@
 //! A plugin can also offer an editor, through [`Plugin::editor`] and the
 //! contract in the [`editor`] module.
 //!
+//! # Identity
+//!
+//! What hosts know a plugin by, its id, name, vendor and version, is
+//! [`Plugin::INFO`], fixed when it is compiled, unless the plugin works it
+//! out when its library is loaded, in [`Plugin::info`]: one engine, built
+//! once, can then be copied to many files, each a plugin of its own with
+//! its identity in data the copy carries, which it finds through
+//! [`library_path`]. Everything that reports the identity reads it through
+//! [`plugin_info`], which asks `info` once and keeps the answer.
+//!
 //! # MIDI controllers
 //!
 //! An instrument or a note effect states which MIDI controllers it listens
@@ -78,6 +88,7 @@
 mod controllers;
 pub mod editor;
 mod harness;
+mod identity;
 pub mod output;
 mod state;
 
@@ -92,6 +103,7 @@ use manguebyte_params::ParamSet;
 pub use controllers::{MidiController, MidiControllers};
 use editor::EditorSpec;
 pub use harness::Harness;
+pub use identity::{is_valid_id, library_path, plugin_info, set_library_path};
 use output::OutputBuffer;
 pub use state::{StateError, load_state, save_state};
 
@@ -108,12 +120,18 @@ pub enum PluginKind {
     Analyzer,
 }
 
-/// The fixed facts about a plugin.
+/// The facts that identify a plugin to hosts and people.
+///
+/// A plugin gives them as [`Plugin::INFO`], at compile time, and may work
+/// them out at run time in [`Plugin::info`]; [`plugin_info`] gives what the
+/// wrappers report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginInfo {
     /// A globally unique identifier in reverse-domain form, such as
     /// `"com.example.reverb"`. Hosts store it in sessions, so it must never
-    /// change once a version has shipped.
+    /// change once a version has shipped. It must pass [`is_valid_id`]:
+    /// not empty, with no white space or control characters. VST 3's class
+    /// id, an Audio Unit's codes and the LV2 URI are all derived from it.
     pub id: &'static str,
     /// The name shown to people.
     pub name: &'static str,
@@ -123,7 +141,8 @@ pub struct PluginInfo {
     pub version: &'static str,
     /// One line about what it does.
     pub description: &'static str,
-    /// What sort of plugin it is.
+    /// What sort of plugin it is. Always [`Plugin::INFO`]'s: see
+    /// [`Plugin::info`].
     pub kind: PluginKind,
 }
 
@@ -301,7 +320,12 @@ pub struct NoteName {
 /// [`prepare`]: Self::prepare
 /// [`editor`]: Self::editor
 pub trait Plugin: Send + 'static {
-    /// The fixed facts about the plugin.
+    /// The facts that identify the plugin, fixed when it is compiled.
+    ///
+    /// The wrappers report [`info`](Self::info) instead, which is this
+    /// unless overridden. `INFO` itself is still what is used where a
+    /// constant is needed: the [`kind`](PluginInfo::kind), and whatever
+    /// reads the plugin's identity in a `const` context.
     const INFO: PluginInfo;
     /// How many channels it reads and writes, unless the host chooses
     /// another of [`LAYOUTS`](Self::LAYOUTS).
@@ -360,6 +384,50 @@ pub trait Plugin: Send + 'static {
     const LAYOUTS: &'static [AudioLayout] = &[Self::LAYOUT];
     /// Its parameters.
     type Params: ParamSet + 'static;
+
+    /// The facts that identify the plugin, worked out when its library is
+    /// loaded. [`INFO`](Self::INFO) unless overridden, so a plugin that
+    /// knows its identity when it is compiled writes nothing.
+    ///
+    /// This is for a plugin whose identity is data: one engine, compiled
+    /// once and copied to many files, each copy with the id, name, vendor
+    /// and version of the instrument it plays, found next to or inside its
+    /// own file through [`library_path`]. Two copies loaded in one host are
+    /// then two plugins.
+    ///
+    /// The wrappers do not call this directly but through
+    /// [`plugin_info`], which calls it once per library, the first time a
+    /// host asks about the plugin (CLAP's descriptor, VST 3's factory, the
+    /// LV2 descriptor, an Audio Unit's factory), before any instance exists,
+    /// and keeps the result until the library is unloaded. So it may take
+    /// its time, read files and allocate, and strings it builds can be
+    /// leaked to make them `'static`, which costs one copy per process.
+    /// A panic here is caught at the boundary, and the host finds no
+    /// plugin.
+    ///
+    /// Two of the facts are not taken from here:
+    ///
+    /// - the [`kind`](PluginInfo::kind) is always `INFO`'s, because the
+    ///   buses a plugin has, its [`LAYOUT`](Self::LAYOUT), and VST 3's
+    ///   parameters for MIDI controllers are fixed when it is compiled;
+    /// - an id that [`is_valid_id`] refuses makes the whole of `INFO` the
+    ///   identity.
+    ///
+    /// Saved state carries the id, and a plugin refuses state saved under
+    /// another, so two copies with different ids never load each other's
+    /// state, as two different plugins would not.
+    ///
+    /// Formats that keep the identity in a bundle's files, an Audio Unit's
+    /// `Info.plist` and an LV2 bundle's Turtle, have them written by `cargo
+    /// mangue bundle` from what this returns in a program it builds and
+    /// runs; a plugin whose identity depends on where its library is needs
+    /// those files written for each copy. See ADR 0012.
+    fn info() -> PluginInfo
+    where
+        Self: Sized,
+    {
+        Self::INFO
+    }
 
     /// Creates the plugin, with its parameters at their defaults.
     fn new() -> Self
