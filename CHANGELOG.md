@@ -480,6 +480,69 @@ break the API.
 
 ### User interface
 
+A new look and motion ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)),
+with what they may cost the audio and the idle interface tested.
+
+- `manguebyte-gfx`: soft shadows and glows, `Scene::shadow` and
+  `Scene::stroke_shadow` with a `Shadow` (offset, blur, spread, colour), of
+  any filled shape or stroked outline. The blur is three box passes each
+  way on whole numbers, the same bit for bit on every machine; masks are
+  kept in a renderer cache under their outline, box size and fill rule
+  (`Renderer::shadow_cache`, `set_shadow_cache_limit`), so a shadow is
+  blurred once and not every frame. Shadows never draw beyond their
+  reach, which `Scene::bounds` includes (`Shadow::reach`,
+  `Shadow::reach_exact`), so partial renders through them equal whole
+  ones (`tests/shadows.rs`, golden images at 1x and 2x).
+- Design tokens in layers: four surfaces with hairlines and a top
+  highlight, three levels of text, one accent with a bright end and a
+  soft tint, six categorical `Hue`s, success, warning and danger,
+  `Elevation` (shadows `sm`, `md`, `lg` and the accent's glow), a radius
+  scale (`Corners::sm` to `xl` and `full`), a `Spacing` scale, headings,
+  captions and chips in `Typography`, and `Motion` tokens.
+  `Theme::dark()`, the default, is deep and dark with a warm glow;
+  `Theme::light()` is light and editorial without glow; both switch at
+  run time. Ramps are designed in OKLCH and stored as constants. The
+  accessibility check covers every text level on every surface, menus,
+  selected rows, the text selection and each hue's text on its fill.
+- Motion (`manguebyte_ui::motion`): `Animated<T>` values eased by the
+  standard curve, any cubic Bézier or a spring, on the frame clock the
+  root is given, polled, with no timer and no callback. The root eases a
+  hover, a press and a focus-ring amount for every widget
+  (`PaintCx::hover`, `press`, `focus_ring`) and draws a widget again only
+  while one of its values moves; `Frame::animating` and
+  `Root::is_animating` are true only while something moves.
+  `UpdateCx::animate` ticks a widget's own values. Motion turns off with
+  the theme (`Motion::enabled`) or the system: `Root::set_system_motion`,
+  set from Windows' animation setting by the window glue
+  (`manguebyte_window::system_motion`). The harness starts with motion
+  off (`Harness::set_motion`).
+- The focus ring shows only after the keyboard or assistive technology
+  moved the focus (`Root::focus_visible`), as `:focus-visible` does, and
+  is a soft accent ring around the control's face.
+- Every widget restyled to the approved mockup: knobs with a lit face, a
+  glowing value arc and a pointer; sliders, switches (the thumb on a
+  spring) and meters with gradients; fields and combo boxes with an
+  accent border while active; menus, tooltips and drag ghosts floating
+  with a large shadow; thin scroll bars that fade in while a view scrolls
+  or is hovered; lists with rounded rows, hover and selection tints, hue
+  swatches and details (`ListData::hue`, `ListData::detail`); waveforms
+  filled with a gradient and a brighter core of the root mean square
+  (`Waveform::rms`, `Waveform::summary`), the loop tinted and markers on
+  pills; keyboards with soft keys rounded at the foot, glowing lit keys and
+  black keys with depth; the envelope with a gradient under a glowing
+  curve; the zone map with rounded zones in categorical hues
+  (`Zone::with_hue`) and name and range labels that are left out rather
+  than cut badly. `card(child)` and `panel(child)` draw cards with a
+  shadow; `pill(text)` is a title-bar button with a status dot and a
+  primary style; `Label::heading` and `Label::caption`.
+- `Widget::overflow` lets a widget draw past its rectangle (a card's or a
+  menu's shadow); the root clips it there and draws that reach again when
+  it changes. `Widget::hover_moved` tells a hovered widget where the
+  pointer is.
+- `examples/sampler_screen.rs` is the mockup's screen in both themes at
+  1x, 1.25x and 2x; `examples/design_bench.rs` measures it. Limits:
+  TECH_DEBT 99.
+
 Scrolling, lists, drag and drop and pictures in `manguebyte-ui`
 ([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)), all
 tested headless (`crates/manguebyte-ui/tests/views.rs`).
@@ -686,6 +749,19 @@ equal to a whole one bit for bit at 1x, 1.25x and 2x
 
 ### Breaking
 
+- In `manguebyte-ui`'s theme (ADR 0011): `Palette`'s fields are new.
+  The old `text_muted` is `text_secondary` (and `text_muted` is now a
+  third, fainter level), `meter` and `meter_warning` are `success` and
+  `danger`, `surface` is the cards' surface with `raised` and `overlay`
+  above it, and `track`, `focus` and `thumb` have new colours (the track
+  and focus are translucent). `Corners` is a scale: `small`, `medium`
+  and `large` became `sm`, `md` and `xl`, with `lg` and `full` added.
+  `Sizes` lost `spacing` and `padding` to the new `Spacing` and gained
+  `focus_gap`; `list_row` is 32. `Theme` gained `elevation`, `spacing`
+  and `motion`, and `Typography` `heading`, `caption` and `chip`, so
+  struct literals of them must name the new fields. `Zone` gained `hue`
+  and `RowCx` a hover. Every default colour and size changed, and the
+  focus ring no longer shows after a press.
 - In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`
   on it without a wildcard arm needs an arm for it; `AccessState` gains
   `selected`, `AccessEntry` and `testing::Found` gain `item`, and

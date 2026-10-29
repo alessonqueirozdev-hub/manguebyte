@@ -234,7 +234,7 @@ impl Screen {
         self.root
             .access_tree()
             .into_iter()
-            .find(|entry| entry.node.name == name)
+            .find(|entry| entry.node.name == name && entry.item.is_none())
             .map(|entry| entry.bounds.center())
             .unwrap_or_else(|| panic!("no {name}"))
     }

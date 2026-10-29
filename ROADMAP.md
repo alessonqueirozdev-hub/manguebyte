@@ -350,6 +350,18 @@ our own, and nothing claimed before its test exists.
   dragged from a list or from other programs, all tested headless;
   spectrum and EQ editors not started, and none worked by hand in a
   real window yet ([TECH_DEBT](docs/TECH_DEBT.md) item 98)
+- ✅ Design tokens and motion
+  ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)): layered tokens
+  (surfaces, hairlines, three text levels, one accent, categorical hues,
+  semantic roles, elevation, radius, spacing, type, motion), a deep dark
+  theme with glow as the default and a light editorial one, switchable at
+  run time; cached, deterministic shadows and glows in the renderer;
+  eased hover, press, focus and selection on the frame clock; the focus
+  ring after the keyboard only; every widget restyled. Tested: an idle
+  interface draws and asks for nothing, a transition repaints only its
+  widget and stops, shadows are blurred once and partial renders through
+  them equal whole ones, motion turns off with the system's setting.
+  Not worked by hand in a host yet ([TECH_DEBT](docs/TECH_DEBT.md) item 99)
 - 🚧 Accessibility: every widget describes itself (the method has no
   default) and the test harness finds widgets only that way; platform
   adapters not started
