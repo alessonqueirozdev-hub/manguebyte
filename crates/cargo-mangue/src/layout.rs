@@ -132,6 +132,11 @@ impl BundlePlan {
 
 /// Works out the files of a bundle.
 ///
+/// This function and [`write`](crate::bundle::write) are public API for
+/// programs that bundle plugins without cargo, such as an exporter that
+/// ships one pre-built engine (ADR 0012): their signatures and the layouts
+/// they produce change only with a breaking-change entry in the changelog.
+///
 /// ```
 /// use cargo_mangue::layout::{BundleSpec, Contents, plan};
 /// use cargo_mangue::platform::{Arch, Format, Os};

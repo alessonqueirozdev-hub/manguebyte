@@ -65,7 +65,53 @@ pub fn codesign_command(bundle: &Path) -> ToolCommand {
 /// Writes a bundle into `out_dir`, replacing one of the same name.
 ///
 /// `libraries` says where the plugin's library is for each architecture
-/// the plan mentions.
+/// the plan mentions. The library is copied as it is, so a library that is
+/// a copy of a pre-built engine with data appended to it, as a plugin
+/// exporter makes (ADR 0012), is bundled with its data.
+///
+/// This function and [`plan`](crate::layout::plan) are public API for
+/// programs that bundle plugins without cargo, such as an exporter that
+/// ships one pre-built engine: their signatures and what they write change
+/// only with a breaking-change entry in the changelog.
+///
+/// ```
+/// use std::ffi::OsString;
+/// use std::path::{Path, PathBuf};
+/// use cargo_mangue::bundle::write;
+/// use cargo_mangue::layout::{BundleSpec, plan};
+/// use cargo_mangue::platform::{Arch, Format, Os};
+/// use cargo_mangue::tools::Tools;
+///
+/// /// No programs: nothing for Windows needs any.
+/// struct NoTools;
+/// impl Tools for NoTools {
+///     fn find(&self, _: &str) -> Option<PathBuf> { None }
+///     fn run(&mut self, _: &Path, _: &[OsString]) -> Result<(), String> { Ok(()) }
+/// }
+///
+/// let folder = std::env::temp_dir().join(format!("bundle-write-doc-{}", std::process::id()));
+/// std::fs::create_dir_all(&folder)?;
+/// // An engine with an instrument's data appended, as an exporter makes it.
+/// let engine = folder.join("engine.dll");
+/// std::fs::write(&engine, b"MZ...the engine...the instrument's data")?;
+///
+/// let plan = plan(&BundleSpec {
+///     format: Format::Vst3,
+///     os: Os::Windows,
+///     archs: vec![Arch::X86_64],
+///     name: "My Piano".into(),
+///     identifier: "parabolic.k7m2q9xh4cv3bnw8".into(),
+///     version: "1.0.0".into(),
+/// })?;
+/// let out = folder.join("out");
+/// let written = write(&plan, &out, &[(Arch::X86_64, engine.clone())], &mut NoTools)?;
+/// assert_eq!(written.path, out.join("My Piano.vst3"));
+/// assert!(written.notes.is_empty());
+/// let library = out.join("My Piano.vst3/Contents/x86_64-win/My Piano.vst3");
+/// assert_eq!(std::fs::read(library)?, std::fs::read(&engine)?);
+/// # std::fs::remove_dir_all(&folder)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///
