@@ -203,6 +203,6 @@ pub use widgets::{
     list_view, meter, scroll_view, slider, text_field, toggle, waveform_view,
 };
 pub use widgets::{
-    KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, is_black, note_name,
-    note_name_portuguese, piano_keyboard,
+    EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, envelope, is_black,
+    note_name, note_name_portuguese, piano_keyboard,
 };

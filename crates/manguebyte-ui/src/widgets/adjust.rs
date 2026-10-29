@@ -229,6 +229,11 @@ impl Adjust {
         true
     }
 
+    /// Whether a value is being typed.
+    pub(crate) fn is_typing(&self) -> bool {
+        self.entry.is_some()
+    }
+
     /// Where the caret of the value being typed is, if one is.
     pub(crate) fn caret(&self) -> Option<Rect> {
         self.entry.as_ref()?.edit.caret_rect()
