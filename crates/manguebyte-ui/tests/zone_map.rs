@@ -527,13 +527,18 @@ fn labels(ui: &Harness) -> Vec<(String, manguebyte_gfx::Rect)> {
 #[test]
 fn a_narrow_zone_drawn_over_a_wide_one_keeps_their_labels_apart_and_whole() {
     // The layout the sampler's scripted session ends in: Pad's zone, F3
-    // to the end, and over it Pluck's, E3 to G3, narrow and chosen.
-    for scale in [1.0, 1.25, 2.0] {
+    // to the end, and over it Pluck's, E3 to G3, narrow and chosen; Pluck's
+    // is over Pad's whether it comes after it (its body drawn later) or
+    // before it (its accent ring and glow drawn over every body).
+    let pad = || Zone::new(1, "Pad.wav", 53, 72);
+    let pluck = || Zone::new(2, "Pluck.wav", 52, 55);
+    let layouts = [vec![pad(), pluck()], vec![pluck(), pad()]];
+    for (zones, scale) in layouts
+        .iter()
+        .flat_map(|zones| [1.0, 1.25, 2.0].map(|scale| (zones.clone(), scale)))
+    {
         let state = ZoneMapState::new();
-        state.set_zones(vec![
-            Zone::new(1, "Pad.wav", 53, 72),
-            Zone::new(2, "Pluck.wav", 52, 55),
-        ]);
+        state.set_zones(zones);
         state.set_selected([2]);
         let mut ui = Harness::new(
             zone_map("Zones", two_octaves(), state.clone()),

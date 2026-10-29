@@ -1197,6 +1197,7 @@ impl Widget for ZoneMap {
             // is never cut. It goes in the first part of the zone, from the
             // left, that no zone drawn above covers in the rows it takes and
             // that is wide enough for it; with no such part it is left out.
+            // Labels are drawn last, over every zone.
             // Labels are placed after the rings, so that no two overlap.
             let pad = 6.0f32.min(shape.rect.width * 0.12);
             if shape.rect.height >= name_height + 2.0 {
@@ -1211,10 +1212,19 @@ impl Widget for ZoneMap {
                 );
                 let two_lines =
                     shape.rect.height >= top - shape.rect.y + name_height + range_height + 2.0;
-                let above: Vec<Rect> = areas[index + 1..]
+                // Drawn above this zone: zones after it, whose bodies cover
+                // it, and chosen zones, whose rings and glow are drawn over
+                // every body.
+                let above: Vec<Rect> = zones
                     .iter()
-                    .flatten()
-                    .map(|area| zone_shape(*area, theme).rect)
+                    .zip(&areas)
+                    .enumerate()
+                    .filter(|&(other, (them, _))| {
+                        other != index
+                            && (other > index || (selected.contains(&them.id) && !chosen))
+                    })
+                    .filter_map(|(_, (_, area))| *area)
+                    .map(|area| zone_shape(area, theme).rect)
                     .collect();
                 let tries = [true, false].into_iter().filter(|&both| two_lines || !both);
                 for both in tries {
