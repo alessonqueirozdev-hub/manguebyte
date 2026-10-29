@@ -96,6 +96,18 @@ pub mod __private {
     pub fn factory<P: Plugin>() -> *mut std::ffi::c_void {
         crate::wrapper::factory::<P>()
     }
+
+    /// The `Info.plist` of `P`'s component bundle, from the identity
+    /// [`plugin_info`](manguebyte_plugin::plugin_info) gives: what
+    /// `__manguebyte_au_info_plist` returns.
+    pub fn info_plist<P: Plugin>(executable: &str, identifier: &str, version: &str) -> String {
+        crate::info_plist(
+            manguebyte_plugin::plugin_info::<P>(),
+            executable,
+            identifier,
+            version,
+        )
+    }
 }
 
 /// Exports a plugin as the Audio Unit of this library.
@@ -123,19 +135,15 @@ macro_rules! export_au {
 
         /// The `Info.plist` of this plugin's component bundle, for an
         /// executable named `executable`, a bundle identifier and a bundle
-        /// version. Used by `cargo mangue bundle`.
+        /// version, from the plugin's identity as `plugin_info` gives it.
+        /// Used by `cargo mangue bundle`.
         #[doc(hidden)]
         pub fn __manguebyte_au_info_plist(
             executable: &str,
             identifier: &str,
             version: &str,
         ) -> ::std::string::String {
-            $crate::info_plist(
-                &<$plugin as $crate::__private::Plugin>::INFO,
-                executable,
-                identifier,
-                version,
-            )
+            $crate::__private::info_plist::<$plugin>(executable, identifier, version)
         }
     };
 }

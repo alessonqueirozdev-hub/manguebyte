@@ -144,34 +144,33 @@ pub use turtle::{BundleFiles, bundle_files};
 pub use uri::{STATE_KEY_URI, URI_PREFIX, plugin_uri, uri_for_id};
 #[doc(hidden)]
 pub use uri::{c_str, uri_c_bytes, uri_c_len};
-pub use wrapper::{DEFAULT_MAX_BLOCK, Descriptor, EVENTS_PER_BLOCK, LARGEST_MAX_BLOCK};
+pub use wrapper::{
+    DEFAULT_MAX_BLOCK, Descriptor, EVENTS_PER_BLOCK, LARGEST_MAX_BLOCK, plugin_descriptor,
+};
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::wrapper::entry_descriptor;
     pub use manguebyte_plugin::Plugin;
 }
 
 /// The LV2 descriptor of a plugin type, as a `&'static`
-/// [`Descriptor`].
+/// [`Descriptor`]: [`plugin_descriptor`] for that type.
 ///
-/// The descriptor lives in an immutable static, with the plugin's URI
-/// worked out from its id at compile time. A host written in Rust, such as
-/// a test, can drive the plugin through it; [`export_lv2!`] hands it to
-/// real hosts.
+/// The descriptor is built the first time it is asked for, with the
+/// plugin's URI worked out from the id
+/// [`plugin_info`](manguebyte_plugin::plugin_info) gives, and kept for the
+/// rest of the program. A host written in Rust, such as a test, can drive
+/// the plugin through it; [`export_lv2!`] hands it to real hosts.
 ///
 /// ```ignore
 /// let descriptor = manguebyte_lv2::descriptor!(MyPlugin);
 /// ```
 #[macro_export]
 macro_rules! descriptor {
-    ($plugin:ty) => {{
-        const LEN: usize = $crate::uri_c_len(<$plugin as $crate::__private::Plugin>::INFO.id);
-        const BYTES: [u8; LEN] =
-            $crate::uri_c_bytes::<LEN>(<$plugin as $crate::__private::Plugin>::INFO.id);
-        const URI: &::core::ffi::CStr = $crate::c_str(&BYTES);
-        static DESCRIPTOR: $crate::Descriptor = $crate::Descriptor::new::<$plugin>(URI);
-        &DESCRIPTOR
-    }};
+    ($plugin:ty) => {
+        $crate::plugin_descriptor::<$plugin>()
+    };
 }
 
 /// Exports a plugin as the LV2 entry point of this library.
@@ -194,7 +193,7 @@ macro_rules! export_lv2 {
         #[unsafe(no_mangle)]
         pub extern "C" fn lv2_descriptor(index: u32) -> *const $crate::sys::LV2_Descriptor {
             if index == 0 {
-                $crate::descriptor!($plugin).as_ptr()
+                $crate::__private::entry_descriptor::<$plugin>()
             } else {
                 ::core::ptr::null()
             }

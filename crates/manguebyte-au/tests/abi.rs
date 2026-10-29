@@ -1420,6 +1420,111 @@ fn the_state_goes_out_and_comes_back_and_another_units_is_refused() {
     assert_eq!(fx.parameter(GAIN), Ok(3.0));
 }
 
+/// `Fx` again, with the id it works out when loaded in place of its
+/// compiled one: a copy of the same library with another identity.
+struct FxCopy(Fx);
+
+impl Plugin for FxCopy {
+    const INFO: PluginInfo = Fx::INFO;
+    const LAYOUT: AudioLayout = Fx::LAYOUT;
+    type Params = FxParams;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            id: "org.manguebyte.test.fx-copy",
+            name: "Fx copy",
+            ..Self::INFO
+        }
+    }
+    fn new() -> Self {
+        Self(Fx::new())
+    }
+    fn params(&self) -> Arc<FxParams> {
+        self.0.params()
+    }
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.0.prepare(spec);
+    }
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.0.process(buffer, context);
+    }
+}
+
+/// The code a unit's state dictionary gives under `key`.
+///
+/// # Safety
+///
+/// `saved` must be a live dictionary.
+unsafe fn code_in(saved: CFPropertyListRef, key: &str) -> u32 {
+    // SAFETY: CoreFoundation's functions, on the caller's dictionary and a
+    // string made and released here.
+    unsafe {
+        let key = CFStringCreateWithBytes(
+            ptr::null(),
+            key.as_ptr(),
+            key.len() as _,
+            kCFStringEncodingUTF8,
+            0,
+        );
+        let value = CFDictionaryGetValue(saved, key);
+        let mut code = 0i32;
+        assert_ne!(
+            CFNumberGetValue(value, kCFNumberSInt32Type, (&raw mut code).cast()),
+            0
+        );
+        CFRelease(key);
+        code as u32
+    }
+}
+
+/// The codes, the `Info.plist` and the state follow the identity the
+/// plugin works out at run time, so two copies of one library are two
+/// units that refuse each other's state.
+#[test]
+fn the_codes_come_from_the_run_time_identity() {
+    let _serial = serial();
+    let id = "org.manguebyte.test.fx-copy";
+    let plist = manguebyte_au::__private::info_plist::<FxCopy>("Fx", "org.example.fx", "1.0.0");
+    let subtype = manguebyte_au::code_text(subtype_code(id));
+    let manufacturer = manguebyte_au::code_text(manufacturer_code(id));
+    assert!(plist.contains(&format!("<string>{subtype}</string>")));
+    assert!(plist.contains(&format!("<string>{manufacturer}</string>")));
+    assert!(plist.contains("Fx copy"), "{plist}");
+    assert_ne!(subtype_code(id), subtype_code(Fx::INFO.id));
+
+    let global = kAudioUnitScope_Global;
+    let copy = Host::new::<FxCopy>();
+    let fx = Host::new::<Fx>();
+    let from_copy = copy
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    let from_fx = fx
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    // SAFETY: the dictionaries the units made, released once here.
+    unsafe {
+        assert_eq!(code_in(from_copy, "subtype"), as_os_type(subtype_code(id)));
+        assert_eq!(
+            code_in(from_copy, "manufacturer"),
+            as_os_type(manufacturer_code(id))
+        );
+        assert_eq!(
+            fx.set(kAudioUnitProperty_ClassInfo, global, 0, &from_copy),
+            kAudioUnitErr_InvalidPropertyValue
+        );
+        assert_eq!(
+            copy.set(kAudioUnitProperty_ClassInfo, global, 0, &from_fx),
+            kAudioUnitErr_InvalidPropertyValue
+        );
+        assert_eq!(
+            copy.set(kAudioUnitProperty_ClassInfo, global, 0, &from_copy),
+            noErr
+        );
+        CFRelease(from_copy);
+        CFRelease(from_fx);
+    }
+}
+
 #[test]
 fn the_codes_are_the_ones_the_plist_names() {
     let _serial = serial();

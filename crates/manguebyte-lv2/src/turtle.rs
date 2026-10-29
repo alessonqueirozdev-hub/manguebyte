@@ -104,7 +104,7 @@ pub fn bundle_files<P: Plugin>(binary: &str) -> BundleFiles {
 }
 
 fn plugin_file_name<P: Plugin>() -> String {
-    let mut name: String = P::INFO
+    let mut name: String = manguebyte_plugin::plugin_info::<P>()
         .id
         .chars()
         .map(|c| {
@@ -440,7 +440,7 @@ fn param_lines(param: &dyn Param) -> Vec<String> {
 /// The text of `P`'s description: what it is, what it needs from the
 /// host, and every port with its index.
 fn plugin_ttl<P: Plugin>() -> String {
-    let info = P::INFO;
+    let info = manguebyte_plugin::plugin_info::<P>();
     let layout = P::LAYOUT;
     let plugin = P::new();
     let params = plugin.params();

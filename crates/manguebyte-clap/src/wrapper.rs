@@ -49,6 +49,7 @@ use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,7 +97,7 @@ use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::output::{OutputBuffer, OutputEvent};
 use manguebyte_plugin::{
     AudioLayout, ParamWatcher, Plugin, PluginKind, VoiceInfo, load_state, offered_layouts,
-    save_state,
+    plugin_info, save_state, set_library_path,
 };
 
 use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
@@ -179,6 +180,11 @@ fn leak_c_string(text: &str) -> *const c_char {
 
 /// The CLAP descriptor of `P`, built once and kept for the rest of the
 /// program, as CLAP requires descriptors to outlive every plugin instance.
+///
+/// It is built from [`plugin_info`], so the first time a host asks for it
+/// is when [`Plugin::info`] runs, before any instance exists. Its strings
+/// and the descriptor itself are leaked, once per plugin type, so the
+/// pointers handed to the host stay valid until the library is unloaded.
 fn descriptor<P: Plugin>() -> &'static clap_plugin_descriptor {
     let mut all = DESCRIPTORS
         .lock()
@@ -188,7 +194,7 @@ fn descriptor<P: Plugin>() -> &'static clap_plugin_descriptor {
         return found;
     }
 
-    let info = P::INFO;
+    let info = plugin_info::<P>();
     let mut features: Vec<*const c_char> = match info.kind {
         PluginKind::Instrument => vec![
             CLAP_PLUGIN_FEATURE_INSTRUMENT.as_ptr(),
@@ -233,8 +239,26 @@ pub const fn plugin_entry<P: Plugin>() -> clap_plugin_entry {
     }
 }
 
-unsafe extern "C" fn entry_init(_plugin_path: *const c_char) -> bool {
-    true
+/// Records the path the host gives as the library's own, for
+/// [`manguebyte_plugin::library_path`], when it names a file. On macOS
+/// hosts give the bundle's folder, and the library's file is asked of the
+/// system instead.
+unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
+    guard(true, || {
+        if plugin_path.is_null() {
+            return true;
+        }
+        // SAFETY: the host passes a NUL-terminated path, valid for the call.
+        let given = unsafe { CStr::from_ptr(plugin_path) };
+        if let Ok(given) = given.to_str() {
+            let given = Path::new(given);
+            if given.is_file() {
+                let absolute = std::path::absolute(given);
+                set_library_path(absolute.as_deref().unwrap_or(given));
+            }
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn entry_deinit() {}
@@ -329,7 +353,9 @@ unsafe extern "C" fn factory_create<P: Plugin>(
         }
         // SAFETY: the host passes a valid `clap_host` and a NUL-terminated id.
         let (host_version, wanted) = unsafe { ((*host).clap_version, CStr::from_ptr(plugin_id)) };
-        if !clap_version_is_compatible(host_version) || wanted.to_bytes() != P::INFO.id.as_bytes() {
+        if !clap_version_is_compatible(host_version)
+            || wanted.to_bytes() != plugin_info::<P>().id.as_bytes()
+        {
             return ptr::null();
         }
 

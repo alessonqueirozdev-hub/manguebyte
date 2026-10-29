@@ -106,9 +106,10 @@ pub(crate) fn percent_encode(text: &str) -> String {
 }
 
 /// The URI of plugin `P`, as its descriptor and its Turtle description
-/// give it.
+/// give it: [`uri_for_id`] of the id
+/// [`plugin_info`](manguebyte_plugin::plugin_info) gives.
 pub fn plugin_uri<P: Plugin>() -> String {
-    uri_for_id(P::INFO.id)
+    uri_for_id(manguebyte_plugin::plugin_info::<P>().id)
 }
 
 #[cfg(test)]

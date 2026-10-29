@@ -49,7 +49,8 @@ use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{
-    AudioLayout, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts, save_state,
+    AudioLayout, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts, plugin_info,
+    save_state,
 };
 
 use crate::cf::{self, Owned};
@@ -307,7 +308,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             },
             component: AtomicPtr::new(ptr::null_mut()),
             ids: ids.into_boxed_slice(),
-            codes: codes(&P::INFO).map(as_os_type),
+            codes: codes(plugin_info::<P>()).map(as_os_type),
             inputs: inputs.into_boxed_slice(),
             layouts: offered_layouts::<P>(),
             initialized: AtomicBool::new(false),

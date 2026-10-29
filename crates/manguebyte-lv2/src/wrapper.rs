@@ -33,12 +33,13 @@
 //! takes effect from the start of the next block, moved back by the frames
 //! it was late.
 
+use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
@@ -52,7 +53,7 @@ use manguebyte_plugin::{ParamWatcher, Plugin, load_state, save_state};
 use crate::atom::{Events, NumberTypes, Object, Sequence, number};
 use crate::ports::{PortLayout, PortRole};
 use crate::sys::*;
-use crate::uri::STATE_KEY;
+use crate::uri::{STATE_KEY, plugin_uri};
 
 /// Most events delivered to the plugin in one block. Extra events are
 /// dropped rather than allocated for.
@@ -84,14 +85,63 @@ fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
 // --- Descriptor -------------------------------------------------------------
 
 /// The `LV2_Descriptor` of one plugin type, made by
-/// [`descriptor!`](crate::descriptor) and kept in an immutable static.
+/// [`plugin_descriptor`] (or [`descriptor!`](crate::descriptor)) and kept
+/// for the rest of the program.
 #[repr(transparent)]
 pub struct Descriptor(LV2_Descriptor);
 
 // SAFETY: the descriptor is never changed after it is built. Its only
-// pointer is to the plugin's URI, a C string in an immutable constant, and
-// its functions may be called from any thread the LV2 rules allow.
+// pointer is to the plugin's URI, a C string that is never changed or
+// freed (a constant, or one leaked by `plugin_descriptor`), and its
+// functions may be called from any thread the LV2 rules allow.
 unsafe impl Sync for Descriptor {}
+
+static DESCRIPTORS: Mutex<Vec<(TypeId, &'static Descriptor)>> = Mutex::new(Vec::new());
+
+/// The LV2 descriptor of `P`, built the first time it is asked for and
+/// kept for the rest of the program.
+///
+/// Its URI is [`plugin_uri`]'s, from the identity
+/// [`plugin_info`](manguebyte_plugin::plugin_info) gives, so the first
+/// call is when [`Plugin::info`] runs, before any instance exists. The URI
+/// and the descriptor are leaked, once per plugin type, so the pointers
+/// handed to a host stay valid until the library is unloaded.
+///
+/// # Panics
+///
+/// If `P::info` panics. The entry point [`export_lv2!`](crate::export_lv2)
+/// makes catches that, and gives the host no plugin.
+pub fn plugin_descriptor<P: Plugin>() -> &'static Descriptor {
+    let key = TypeId::of::<P>();
+    {
+        let all = DESCRIPTORS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(&(_, found)) = all.iter().find(|(id, _)| *id == key) {
+            return found;
+        }
+    }
+    // Outside the lock, as `info` may take its time. Percent-encoding
+    // leaves no NUL in the URI.
+    let uri = CString::new(plugin_uri::<P>()).unwrap_or_default();
+    let mut all = DESCRIPTORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(&(_, found)) = all.iter().find(|(id, _)| *id == key) {
+        return found;
+    }
+    let uri: &'static CStr = Box::leak(uri.into_boxed_c_str());
+    let built: &'static Descriptor = Box::leak(Box::new(Descriptor::new::<P>(uri)));
+    all.push((key, built));
+    built
+}
+
+/// What `lv2_descriptor` returns for index 0: `P`'s descriptor, or null if
+/// it cannot be made.
+#[doc(hidden)]
+pub fn entry_descriptor<P: Plugin>() -> *const LV2_Descriptor {
+    guard(ptr::null(), || plugin_descriptor::<P>().as_ptr())
+}
 
 impl std::fmt::Debug for Descriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,8 +151,8 @@ impl std::fmt::Debug for Descriptor {
 
 impl Descriptor {
     /// The descriptor of `P`, whose URI is `uri`. Use
-    /// [`descriptor!`](crate::descriptor), which works the URI out from
-    /// the plugin's id.
+    /// [`plugin_descriptor`], which works the URI out from the plugin's
+    /// id.
     #[doc(hidden)]
     pub const fn new<P: Plugin>(uri: &'static CStr) -> Self {
         Self(LV2_Descriptor {
@@ -129,7 +179,8 @@ impl Descriptor {
 
     /// The plugin's URI.
     pub fn uri(&self) -> &CStr {
-        // SAFETY: `new` set it from a `&'static CStr`.
+        // SAFETY: `new` set it from a `&'static CStr`, which is never
+        // freed.
         unsafe { CStr::from_ptr(self.0.URI) }
     }
 }

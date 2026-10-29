@@ -3,10 +3,10 @@
 // See the note at the top of `wrapper.rs`.
 #![allow(clippy::unnecessary_cast)]
 
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::marker::PhantomData;
 
-use manguebyte_plugin::{Plugin, PluginKind};
+use manguebyte_plugin::{Plugin, PluginInfo, PluginKind, plugin_info};
 use vst3::Steinberg::{
     self as sb, FIDString, FUnknown, IPluginFactory, IPluginFactory2Trait, IPluginFactory3,
     IPluginFactory3Trait, IPluginFactoryTrait, TUID, kInvalidArgument, kResultOk, tresult,
@@ -38,8 +38,14 @@ fn sub_categories(kind: PluginKind) -> &'static str {
     }
 }
 
-/// The factory for a library that exports the single plugin `P`.
-pub(crate) struct Factory<P>(PhantomData<fn() -> P>);
+/// The factory for a library that exports the single plugin `P`, with the
+/// plugin's identity as [`plugin_info`] gave it when the factory was made,
+/// and the class id derived from it.
+pub(crate) struct Factory<P> {
+    info: &'static PluginInfo,
+    class: [c_char; 16],
+    plugin: PhantomData<fn() -> P>,
+}
 
 impl<P: Plugin> Class for Factory<P> {
     type Interfaces = (IPluginFactory3,);
@@ -51,7 +57,7 @@ impl<P: Plugin> IPluginFactoryTrait for Factory<P> {
         let Some(info) = (unsafe { info.as_mut() }) else {
             return kInvalidArgument;
         };
-        copy_narrow(P::INFO.vendor, &mut info.vendor);
+        copy_narrow(self.info.vendor, &mut info.vendor);
         copy_narrow("", &mut info.url);
         copy_narrow("", &mut info.email);
         info.flags = sb::PFactoryInfo_::FactoryFlags_::kUnicode as i32;
@@ -67,10 +73,10 @@ impl<P: Plugin> IPluginFactoryTrait for Factory<P> {
         let (Some(info), 0) = (unsafe { info.as_mut() }, index) else {
             return kInvalidArgument;
         };
-        info.cid = class_id(P::INFO.id);
+        info.cid = self.class;
         info.cardinality = sb::PClassInfo_::ClassCardinality_::kManyInstances as i32;
         copy_narrow(AUDIO_CLASS, &mut info.category);
-        copy_narrow(P::INFO.name, &mut info.name);
+        copy_narrow(self.info.name, &mut info.name);
         kResultOk
     }
 
@@ -88,7 +94,7 @@ impl<P: Plugin> IPluginFactoryTrait for Factory<P> {
             *obj = std::ptr::null_mut();
             *class.cast::<TUID>()
         };
-        if wanted != class_id(P::INFO.id) {
+        if wanted != self.class {
             return kInvalidArgument;
         }
         // SAFETY: the host passes a 16-byte interface id and a pointer of
@@ -103,14 +109,14 @@ impl<P: Plugin> IPluginFactory2Trait for Factory<P> {
         let (Some(info), 0) = (unsafe { info.as_mut() }, index) else {
             return kInvalidArgument;
         };
-        info.cid = class_id(P::INFO.id);
+        info.cid = self.class;
         info.cardinality = sb::PClassInfo_::ClassCardinality_::kManyInstances as i32;
         copy_narrow(AUDIO_CLASS, &mut info.category);
-        copy_narrow(P::INFO.name, &mut info.name);
+        copy_narrow(self.info.name, &mut info.name);
         info.classFlags = 0;
         copy_narrow(sub_categories(P::INFO.kind), &mut info.subCategories);
-        copy_narrow(P::INFO.vendor, &mut info.vendor);
-        copy_narrow(P::INFO.version, &mut info.version);
+        copy_narrow(self.info.vendor, &mut info.vendor);
+        copy_narrow(self.info.version, &mut info.version);
         copy_narrow(sdk_version(), &mut info.sdkVersion);
         kResultOk
     }
@@ -122,14 +128,14 @@ impl<P: Plugin> IPluginFactory3Trait for Factory<P> {
         let (Some(info), 0) = (unsafe { info.as_mut() }, index) else {
             return kInvalidArgument;
         };
-        info.cid = class_id(P::INFO.id);
+        info.cid = self.class;
         info.cardinality = sb::PClassInfo_::ClassCardinality_::kManyInstances as i32;
         copy_narrow(AUDIO_CLASS, &mut info.category);
-        copy_wide(P::INFO.name, &mut info.name);
+        copy_wide(self.info.name, &mut info.name);
         info.classFlags = 0;
         copy_narrow(sub_categories(P::INFO.kind), &mut info.subCategories);
-        copy_wide(P::INFO.vendor, &mut info.vendor);
-        copy_wide(P::INFO.version, &mut info.version);
+        copy_wide(self.info.vendor, &mut info.vendor);
+        copy_wide(self.info.version, &mut info.version);
         copy_wide(sdk_version(), &mut info.sdkVersion);
         kResultOk
     }
@@ -145,9 +151,20 @@ impl<P: Plugin> IPluginFactory3Trait for Factory<P> {
 /// [`export_vst3!`](crate::export_vst3) puts this behind the symbols a host
 /// looks for. Tests can call it directly to drive a plugin through the real
 /// binary interface. The caller owns one reference to the result.
+///
+/// The factory reports the identity [`plugin_info`] gives, so the first
+/// call is when [`Plugin::info`] runs, before any instance exists; the
+/// class id is [`class_id`] of that identity's id. A panic in `info`
+/// gives null.
 pub fn plugin_factory<P: Plugin>() -> *mut c_void {
     guard(std::ptr::null_mut(), || {
-        ComWrapper::new(Factory::<P>(PhantomData))
+        let info = plugin_info::<P>();
+        let factory = Factory::<P> {
+            info,
+            class: class_id(info.id),
+            plugin: PhantomData,
+        };
+        ComWrapper::new(factory)
             .to_com_ptr::<IPluginFactory>()
             .map_or(std::ptr::null_mut(), |factory| factory.into_raw().cast())
     })
