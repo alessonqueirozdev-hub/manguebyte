@@ -312,6 +312,7 @@ break the API.
     transport, as LV2 does with `time:Position` (TECH_DEBT 86).
   - The CLAP host (`manguebyte-host`) sends `NoteParamValue` to a hosted
     plugin as a per-note parameter value.
+- **Tail** (#issue 25). `Plugin::tail_samples` returns the Tail enum (None, Samples(usize), Infinite), defaulting to Infinite and read at activation like with `Plugin::latency_samples`. vst3 has `getTailSamples` which defaults to kInfiniteTail. CLAP has a tail extension which defaults to INFINITE_TAIL defined within the wrapper.rs file which is a i32::MAX value casted to u32 because the official clap repo says INT_32 MAX corresponds to infinite on CLAP. Both vst3 and CLAP clamp sample values larger than their largest possible finite values, rather than turning them to infinte. Au TailTime reports in seconds and clamps to the constant derived by testing.
 - **Notes out of AU and LV2** (TECH_DEBT 82). An Audio Unit that sends
   notes has one MIDI output (`kAudioUnitProperty_MIDIOutputCallbackInfo`)
   and hands the host's `kAudioUnitProperty_MIDIOutputCallback` a

@@ -24,6 +24,7 @@ use manguebyte_graph::Graph;
 use manguebyte_host::clap::clap_sys::version::CLAP_VERSION;
 use manguebyte_host::clap::{
     ClapError, ClapLibrary, ClapProcessor, HostEvent, ParamsRescan, ProcessFailure, ProcessStatus,
+    Tail,
 };
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
@@ -230,7 +231,11 @@ fn ports_follow_the_layout_the_plugin_declares() {
     assert!(plugin.note_outputs().is_empty());
 
     assert_eq!(plugin.latency(), 0);
-    assert_eq!(plugin.tail(), None, "the wrapper declares no tail");
+    assert_eq!(
+        plugin.tail(),
+        Some(Tail::Infinite),
+        "before activation the plugin reports an infinite tail"
+    );
 }
 
 #[test]

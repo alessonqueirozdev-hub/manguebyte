@@ -33,7 +33,7 @@ fn sequence(sampler: &mut Sampler<f32>, count: usize, key: u8, velocity: f32) ->
             .filter(|&i| levels[i] > 0.2)
             .collect();
         assert_eq!(loud.len(), 1, "levels {levels:?}");
-        assert!(levels.iter().all(|&level| level > 0.2 || level < 0.01));
+        assert!(levels.iter().all(|&level| !(0.01..=0.2).contains(&level)));
         played.push(loud[0]);
         // Let the release end.
         render_mono(sampler, 480, &[]);

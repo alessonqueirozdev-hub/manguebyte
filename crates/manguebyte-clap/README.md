@@ -14,7 +14,7 @@ modulation (`ParamFlags::per_note`), `voice-info` (`Plugin::voice_info`),
 `note-name` (`Plugin::NOTE_NAMES`), `audio-ports-config` and
 `audio-ports-activation` (`Plugin::LAYOUTS`). Every port takes 64-bit
 audio through the plugin's 32-bit path, and transport events inside a
-block cut it on their frames. Not there yet: note-end events, `tail`,
+block cut it on their frames. Not there yet: note-end events,
 presets, remote controls.
 
 Documentation: <https://docs.rs/manguebyte-clap>

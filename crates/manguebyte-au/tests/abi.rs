@@ -11,9 +11,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ffi::{CStr, c_void};
-use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{assert_eq, ptr};
 
 use manguebyte_au::sys::AudioBuffer as AuBuffer;
 use manguebyte_au::sys::*;
@@ -25,7 +25,7 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, Param, param_set};
 use manguebyte_plugin::output::OutputBuffer;
-use manguebyte_plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
+use manguebyte_plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind, Tail};
 
 // --- Watching the heap ---------------------------------------------------------
 
@@ -191,6 +191,10 @@ impl Plugin for Fx {
                 }
             }
         }
+    }
+
+    fn tail_samples(&self) -> Tail {
+        Tail::Samples(22_050)
     }
 }
 
@@ -734,9 +738,14 @@ fn properties_describe_the_unit() {
         fx.get::<f64>(kAudioUnitProperty_Latency, global, 0),
         Ok(0.0)
     );
-    assert_eq!(
-        fx.get::<f64>(kAudioUnitProperty_TailTime, global, 0),
-        Ok(0.0)
+    // assert_eq!(
+    //     fx.get::<f64>(kAudioUnitProperty_TailTime, global, 0),
+    //     Ok(2000.0)
+    // );
+    // Testing whether the tail is effectively infinite, because I cannot check it against a constant, as the AU docs say it is.
+    assert_tail_is_effectively_infinite(
+        fx.get::<f64>(kAudioUnitProperty_TailTime, global, 0)
+            .unwrap(),
     );
     assert_eq!(
         fx.get::<AudioChannelLayoutTag>(kAudioUnitProperty_SupportedChannelLayoutTags, output, 0),
@@ -2025,4 +2034,44 @@ fn channel_counts_follow_the_layouts_offered() {
     let mut expected = signal(1, 32, 0.1);
     expected.apply_gain(0.5);
     assert_same_bits(&out, &expected, "mono");
+}
+
+#[test]
+fn the_tail_a_unit_states_reaches_the_host_in_seconds() {
+    let _serial = serial();
+    let fx = Host::new::<Fx>();
+    assert_eq!(fx.simple(kAudioUnitInitializeSelect), noErr);
+    let tail = fx
+        .get::<f64>(kAudioUnitProperty_TailTime, kAudioUnitScope_Global, 0)
+        .unwrap();
+    // tail_samples of 22050 at 44.1 kHz is 0.5 seconds.
+    assert_eq!(tail, 0.5, "the tail Fx states reaches the host in seconds");
+}
+
+#[test]
+fn a_unit_that_states_no_tail_reports_a_long_finite_one() {
+    let _serial = serial();
+    let keys = Host::new::<Keys>();
+    assert_eq!(keys.simple(kAudioUnitInitializeSelect), noErr);
+    let tail = keys
+        .get::<f64>(kAudioUnitProperty_TailTime, kAudioUnitScope_Global, 0)
+        .unwrap();
+
+    assert_tail_is_effectively_infinite(tail);
+}
+
+/// Helper for tests that check a unit's tail time, which is effectively infinite if it is a large finite number.
+fn assert_tail_is_effectively_infinite(tail: f64) {
+    assert!(
+        tail.is_finite(),
+        "an infinite tail is a large finite number, not f64::INFINITY"
+    );
+    assert!(
+        tail >= 1_000.0,
+        "an infinite tail is long enough never to cut sound off"
+    );
+    assert!(
+        tail * 768_000.0 <= f64::from(i32::MAX),
+        "it fits an i32 of frames at 768 kHz"
+    );
 }

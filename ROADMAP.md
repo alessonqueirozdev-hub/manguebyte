@@ -219,7 +219,7 @@ Write a processor once and ship it in every format.
   `audio-ports-config` and `audio-ports-activation` from
   `Plugin::LAYOUTS`, 64-bit ports through the 32-bit path, and transport
   events inside a block, which cut it there
-- ⬜ CLAP extensions still to come: note-end events, tail (issue #25),
+- ⬜ CLAP extensions still to come: note-end events,
   presets (`preset-load` and the preset-discovery factory), remote
   controls, `render`, `thread-pool`, a native 64-bit path (TECH_DEBT 91)
 - ✅ VST 3: audio and event buses, every automation point on its frame,

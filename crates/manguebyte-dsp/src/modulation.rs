@@ -164,7 +164,7 @@ impl Lfo {
     /// block's length.
     pub fn advance(&mut self, samples: usize) {
         let moved = self.phase + self.frequency / self.sample_rate * samples as f64;
-        if moved >= 1.0 || moved < 0.0 {
+        if !(0.0..1.0).contains(&moved) {
             self.held = self.next_random();
         }
         self.phase = moved.rem_euclid(1.0);

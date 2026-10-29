@@ -62,7 +62,7 @@ fn heard(signal: &[f32]) -> Vec<usize> {
     for (index, &frequency) in FREQUENCIES.iter().enumerate() {
         let amplitude = amplitude_at(signal, frequency, RATE);
         assert!(
-            amplitude > 0.2 || amplitude < 0.01,
+            !(0.01..=0.2).contains(&amplitude),
             "ambiguous level {amplitude} at {frequency} Hz"
         );
         if amplitude > 0.2 {

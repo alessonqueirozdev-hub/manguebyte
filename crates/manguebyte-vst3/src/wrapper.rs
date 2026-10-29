@@ -75,7 +75,7 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::{
-    AudioLayout, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
+    AudioLayout, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind, Tail,
     apply_param_events, load_state, offered_layouts, save_state,
 };
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};
@@ -198,6 +198,19 @@ fn takes_notes<P: Plugin>() -> bool {
 /// Whether a plugin of this kind has an event bus.
 const fn takes_notes_const(kind: PluginKind) -> bool {
     matches!(kind, PluginKind::Instrument | PluginKind::NoteEffect)
+}
+
+/// Converts a [`Tail`] to the number of samples VST 3 expects.
+/// A tail too long for a `u32` is reported as infinite, so nothing is cut off.
+fn vst3_tail(tail: Tail) -> u32 {
+    match tail {
+        Tail::None => vst::kNoTail,
+        Tail::Samples(n) => u32::try_from(n)
+            .ok()
+            .filter(|&n| n < vst::kInfiniteTail)
+            .unwrap_or(vst::kInfiniteTail - 1),
+        Tail::Infinite => vst::kInfiniteTail,
+    }
 }
 
 /// The speaker arrangement for a bus of `channels` channels.
@@ -350,6 +363,8 @@ pub(crate) struct Component<P: Plugin> {
     controls: Arc<Controls>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
+    /// The tail the plugin reported when it was last activated.
+    tail: AtomicU32,
     /// The layouts a host may arrange the buses in, the plugin's own first.
     layouts: Vec<AudioLayout>,
     /// The one `setBusArrangements` chose, by index into `layouts`. Only
@@ -425,6 +440,7 @@ impl<P: Plugin> Component<P> {
         Some(Self {
             controls,
             latency: AtomicU32::new(0),
+            tail: AtomicU32::new(vst::kInfiniteTail),
             layouts: offered_layouts::<P>(),
             config: AtomicUsize::new(0),
             sidechain_active: AtomicBool::new(false),
@@ -1180,6 +1196,8 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                 self.active.store(true, Ordering::Relaxed);
                 let latency = u32::try_from(audio.plugin.latency_samples()).unwrap_or(u32::MAX);
                 self.latency.store(latency, Ordering::Relaxed);
+                let tail = vst3_tail(audio.plugin.tail_samples());
+                self.tail.store(tail, Ordering::Relaxed);
             } else {
                 self.active.store(false, Ordering::Relaxed);
                 self.controls.running.store(false, Ordering::Relaxed);
@@ -1457,10 +1475,9 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
     }
 
     unsafe fn getTailSamples(&self) -> u32 {
-        // The plugin API has no way to state its tail yet, so the host is
-        // told never to assume silence. Nothing is cut off; the cost is
-        // that the host keeps processing a silent plugin.
-        vst::kInfiniteTail
+        // The tail the plugin stated when it was activated (see `vst3_tail`);
+        // infinite before activation, so nothing is ever cut off.
+        self.tail.load(Ordering::Relaxed)
     }
 }
 
@@ -1966,4 +1983,36 @@ pub(crate) unsafe fn create<P: Plugin>(iid: *const TUID, obj: *mut *mut c_void) 
     // SAFETY: a live object of ours, and the caller's pointers. The query
     // takes its own reference; ours is released when `unknown` drops.
     unsafe { ((*(*pointer).vtbl).queryInterface)(pointer, iid, obj) }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::vst3_tail;
+    use manguebyte_plugin::Tail;
+    use std::assert_eq;
+    use vst3::Steinberg::Vst as vst;
+
+    #[test]
+    pub fn vst3_tail_returns_infinite_tail() {
+        assert_eq!(vst::kInfiniteTail, vst3_tail(Tail::Infinite));
+    }
+
+    #[test]
+    pub fn vst3_tail_returns_value() {
+        assert_eq!(345642, vst3_tail(Tail::Samples(345642)));
+    }
+
+    #[test]
+    pub fn vst3_tail_bigger_than_infinite_clamp_to_largest_value() {
+        assert_eq!(
+            vst::kInfiniteTail - 1,
+            vst3_tail(Tail::Samples(u32::MAX as usize))
+        );
+    }
+
+    #[test]
+    pub fn vst3_tail_returns_no_tail() {
+        assert_eq!(vst::kNoTail, vst3_tail(Tail::None));
+    }
 }

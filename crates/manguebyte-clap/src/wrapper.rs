@@ -71,6 +71,7 @@ use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
 use clap_sys::ext::posix_fd_support::CLAP_EXT_POSIX_FD_SUPPORT;
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
+use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
 use clap_sys::ext::timer_support::CLAP_EXT_TIMER_SUPPORT;
 use clap_sys::ext::voice_info::{
     CLAP_EXT_VOICE_INFO, CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES, clap_host_voice_info,
@@ -95,7 +96,7 @@ use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::output::{OutputBuffer, OutputEvent};
 use manguebyte_plugin::{
-    AudioLayout, ParamWatcher, Plugin, PluginKind, VoiceInfo, load_state, offered_layouts,
+    AudioLayout, ParamWatcher, Plugin, PluginKind, Tail, VoiceInfo, load_state, offered_layouts,
     save_state,
 };
 
@@ -114,6 +115,9 @@ const TRANSPORT_CHANGES: usize = 64;
 /// plugin allocate without bound.
 const MAX_STATE_BYTES: usize = 64 << 20;
 
+/// CLAP reads any tail at or above `INT32_MAX` as infinite (`ext/tail.h`).
+const INFINITE_TAIL: u32 = i32::MAX as u32;
+
 /// Runs `work`, turning a panic into `fallback`.
 ///
 /// A panic must never cross into the host: unwinding through C is not
@@ -131,6 +135,19 @@ pub(crate) fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
 
 fn step_count(param: &dyn Param) -> Option<f64> {
     param.step_count().filter(|&steps| steps > 0).map(f64::from)
+}
+
+fn clap_tail(tail: manguebyte_plugin::Tail) -> u32 {
+    match tail {
+        Tail::None => 0,
+        Tail::Samples(samples) => u32::try_from(samples)
+            .ok()
+            .filter(|&n| n < INFINITE_TAIL)
+            // Values above INFINITE_TAIL are clamped to INFINITE_TAIL - 1
+            // Which is i32::MAX - 1
+            .unwrap_or(INFINITE_TAIL - 1),
+        Tail::Infinite => INFINITE_TAIL,
+    }
 }
 
 fn to_clap(param: &dyn Param, plain: f64) -> f64 {
@@ -285,6 +302,9 @@ impl<P: Plugin> Vtables<P> {
     const LATENCY: &'static clap_plugin_latency = &clap_plugin_latency {
         get: Some(latency_get::<P>),
     };
+    const TAIL: &'static clap_plugin_tail = &clap_plugin_tail {
+        get: Some(tail_get::<P>),
+    };
     const PORTS_CONFIG: &'static clap_plugin_audio_ports_config = &clap_plugin_audio_ports_config {
         count: Some(ports_config_count::<P>),
         get: Some(ports_config_get::<P>),
@@ -377,6 +397,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
             // editor, which drops every copy, before that.
             host: unsafe { HostRef::new(host) },
             latency: AtomicU32::new(0),
+            tail: AtomicU32::new(INFINITE_TAIL),
             layouts: offered_layouts::<P>(),
             config: AtomicUsize::new(0),
             sidechain_on: AtomicBool::new(true),
@@ -434,6 +455,8 @@ pub(crate) struct Instance<P: Plugin> {
     ids: Vec<ParamId>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
+    /// Tail reported by the plugin when it was last activated.
+    tail: AtomicU32,
     /// The layouts offered as `audio-ports-config` configurations, the
     /// plugin's own first; a configuration's id is its index.
     layouts: Vec<AudioLayout>,
@@ -687,6 +710,8 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
         });
         let latency = u32::try_from(audio.plugin.latency_samples()).unwrap_or(u32::MAX);
         instance.latency.store(latency, Ordering::Relaxed);
+        let tail = clap_tail(audio.plugin.tail_samples());
+        instance.tail.store(tail, Ordering::Relaxed);
         if instance.has_voice_info {
             let voices = audio.plugin.voice_info();
             let changed = {
@@ -848,6 +873,8 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
         ptr::from_ref(Vtables::<P>::NOTE_PORTS).cast()
     } else if id == CLAP_EXT_LATENCY {
         ptr::from_ref(Vtables::<P>::LATENCY).cast()
+    } else if id == CLAP_EXT_TAIL {
+        ptr::from_ref(Vtables::<P>::TAIL).cast()
     } else {
         ptr::null()
     }
@@ -2295,8 +2322,19 @@ unsafe extern "C" fn latency_get<P: Plugin>(plugin: *const clap_plugin) -> u32 {
     })
 }
 
+unsafe extern "C" fn tail_get<P: Plugin>(plugin: *const clap_plugin) -> u32 {
+    guard(INFINITE_TAIL, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        unsafe { instance::<P>(plugin) }.map_or(INFINITE_TAIL, |instance| {
+            instance.tail.load(Ordering::Relaxed)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::assert_eq;
+
     use super::*;
 
     fn clap_transport(flags: u32) -> clap_event_transport {
@@ -2353,5 +2391,35 @@ mod tests {
 
         // What the flags do not vouch for is unknown.
         assert_eq!(convert_transport(&clap_transport(0)), Transport::STOPPED);
+    }
+
+    #[test]
+    fn all_tail_boundaries_return_correct_value() {
+        assert_eq!(clap_tail(Tail::None), 0, "Tail::None is 0");
+        assert_eq!(
+            clap_tail(Tail::Samples(480)),
+            480,
+            "480 is a common tail length"
+        );
+        assert_eq!(
+            clap_tail(Tail::Samples(i32::MAX as usize - 1)),
+            i32::MAX as u32 - 1,
+            "i32::MAX - 1 is the largest possible value"
+        );
+        assert_eq!(
+            clap_tail(Tail::Samples(i32::MAX as usize)),
+            i32::MAX as u32 - 1,
+            "Values above i32::MAX are clamped to i32::MAX - 1"
+        );
+        assert_eq!(
+            clap_tail(Tail::Samples(usize::MAX)),
+            i32::MAX as u32 - 1,
+            "Values above i32::MAX are clamped to i32::MAX - 1"
+        );
+        assert_eq!(
+            clap_tail(Tail::Infinite),
+            INFINITE_TAIL,
+            "Tail::Infinite is already infinite"
+        );
     }
 }

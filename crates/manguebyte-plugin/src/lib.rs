@@ -138,6 +138,17 @@ pub struct AudioLayout {
     pub sidechain: usize,
 }
 
+/// The tail behavior of a plugin's output.
+#[derive(Debug)]
+pub enum Tail {
+    /// The output stops when the input does.
+    None,
+    /// The output keeps sounding for this many frames after the input stops.
+    Samples(usize),
+    /// The output may never stop, or its length is unknown.
+    Infinite,
+}
+
 impl AudioLayout {
     /// Stereo in, stereo out.
     pub const STEREO_EFFECT: Self = Self {
@@ -619,6 +630,13 @@ pub trait Plugin: Send + 'static {
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {
         0
+    }
+
+    /// How many frames the output keeps sounding after the input stops, or
+    /// [`Tail::Infinite`] if it may never stop. `Tail::Infinite` is the default unless
+    /// overridden.
+    fn tail_samples(&self) -> Tail {
+        Tail::Infinite
     }
 
     /// How many voices the plugin plays, for an instrument that says so.

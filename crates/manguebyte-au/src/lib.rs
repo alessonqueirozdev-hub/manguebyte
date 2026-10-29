@@ -83,7 +83,10 @@ pub use codes::{
     version_number,
 };
 pub use plist::{FACTORY_FUNCTION, display_name, info_plist};
-pub use wrapper::{DEFAULT_MAX_FRAMES, DEFAULT_SAMPLE_RATE, EVENTS_PER_BLOCK, LARGEST_MAX_FRAMES};
+pub use wrapper::{
+    DEFAULT_MAX_FRAMES, DEFAULT_SAMPLE_RATE, EVENTS_PER_BLOCK, INFINITE_TAIL_SECONDS,
+    LARGEST_MAX_FRAMES,
+};
 
 #[doc(hidden)]
 pub mod __private {

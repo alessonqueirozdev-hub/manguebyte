@@ -25,6 +25,7 @@ use manguebyte_clap::clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_late
 use manguebyte_clap::clap_sys::ext::note_ports::*;
 use manguebyte_clap::clap_sys::ext::params::*;
 use manguebyte_clap::clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
+use manguebyte_clap::clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
 use manguebyte_clap::clap_sys::factory::plugin_factory::{
     CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory,
 };
@@ -40,7 +41,7 @@ use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
-use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind};
+use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind, Tail};
 
 // --- Watching the heap ---------------------------------------------------
 //
@@ -194,6 +195,10 @@ impl Plugin for Level {
 
     fn latency_samples(&self) -> usize {
         7
+    }
+
+    fn tail_samples(&self) -> Tail {
+        Tail::Samples(480)
     }
 }
 
@@ -1263,5 +1268,50 @@ fn an_instrument_takes_notes_expression_modulation_and_a_sidechain() {
     assert_eq!(
         processed.output[0],
         [50.25, 50.25, 50.25, 50.25, 0.25, 0.25, 0.25, 0.25]
+    );
+}
+
+#[test]
+fn the_plugin_offers_the_tail_extension() {
+    let (_guard, host) = level_host();
+    assert!(
+        host.extension::<clap_plugin_tail>(CLAP_EXT_TAIL).is_some(),
+        "the plugin offers CLAP's tail extension"
+    );
+}
+
+#[test]
+fn activated_plugin_reports_tail() {
+    let (_guard, host) = level_host();
+    let tail: &clap_plugin_tail = host.extension(CLAP_EXT_TAIL).unwrap();
+    unsafe { assert_eq!(tail.get.unwrap()(host.plugin), 480) };
+}
+
+#[test]
+fn a_tail_is_infinite_until_the_plugin_is_activated() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let host = Host::new(clap_entry, Level::INFO.id);
+    let tail: &clap_plugin_tail = host.extension(CLAP_EXT_TAIL).unwrap();
+    let value = unsafe { tail.get.unwrap()(host.plugin) };
+    assert!(
+        value >= i32::MAX as u32,
+        "before activation the host must not assume silence"
+    );
+}
+
+#[test]
+fn a_plugin_that_states_no_tail_reports_an_infinite_tail() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let host = Host::new(plugin_entry::<Keys>(), Keys::INFO.id);
+    host.activate(48_000.0, 64);
+    let tail: &clap_plugin_tail = host.extension(CLAP_EXT_TAIL).unwrap();
+    let value = unsafe { tail.get.unwrap()(host.plugin) };
+    assert!(
+        value >= i32::MAX as u32,
+        "before activation the host must not assume silence"
     );
 }
