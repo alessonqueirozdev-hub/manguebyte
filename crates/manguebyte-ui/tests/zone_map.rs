@@ -495,6 +495,91 @@ fn edits_draw_only_the_map_and_equal_a_whole_repaint() {
     }
 }
 
+/// The labels a zone map drew, read from its scene's dump: each text, and
+/// the rectangle it takes (from its first glyph's origin to its measured
+/// width, from a size above its baseline to a fifth of a size below, past the descenders).
+fn labels(ui: &Harness) -> Vec<(String, manguebyte_gfx::Rect)> {
+    let map = ui.get(Role::List, "Zones");
+    let dump = ui.dump_of(&map);
+    dump.lines()
+        .filter_map(|line| {
+            let line = line.trim_start().strip_prefix("text \"")?;
+            let (text, rest) = line.split_once('"')?;
+            let number = |key: &str| -> Option<f32> {
+                let at = rest.find(key)? + key.len();
+                rest[at..].split_whitespace().next()?.parse().ok()
+            };
+            let (size, weight) = (number(" size ")?, number(" weight ")?);
+            let glyphs = rest.split_once('[')?.1;
+            let mut first = glyphs.split(',').next()?.split_whitespace().skip(1);
+            let x: f32 = first.next()?.parse().ok()?;
+            let baseline: f32 = first.next()?.parse().ok()?;
+            let style = manguebyte_gfx::TextStyle::new(size).with_weight(weight);
+            let width = manguebyte_gfx::TextLayout::new(text, &style, None)
+                .size()
+                .width;
+            let rect = manguebyte_gfx::Rect::new(x, baseline - size, width, size * 1.2);
+            Some((text.to_owned(), rect))
+        })
+        .collect()
+}
+
+#[test]
+fn a_narrow_zone_drawn_over_a_wide_one_keeps_their_labels_apart_and_whole() {
+    // The layout the sampler's scripted session ends in: Pad's zone, F3
+    // to the end, and over it Pluck's, E3 to G3, narrow and chosen.
+    for scale in [1.0, 1.25, 2.0] {
+        let state = ZoneMapState::new();
+        state.set_zones(vec![
+            Zone::new(1, "Pad.wav", 53, 72),
+            Zone::new(2, "Pluck.wav", 52, 55),
+        ]);
+        state.set_selected([2]);
+        let mut ui = Harness::new(
+            zone_map("Zones", two_octaves(), state.clone()),
+            Size::new(240.0, 128.0),
+            scale,
+        );
+        ui.frame();
+        let found = labels(&ui);
+        // Nothing is cut: a label is whole or left out.
+        for (text, _) in &found {
+            assert!(!text.contains('\u{2026}'), "{scale}x: {text:?} was cut");
+        }
+        // Pluck's zone is too narrow for its name; Pad's is there, beside
+        // Pluck's zone, with its range.
+        let texts: Vec<&str> = found.iter().map(|(text, _)| text.as_str()).collect();
+        assert!(texts.contains(&"Pad.wav"), "{scale}x: {texts:?}");
+        assert!(texts.contains(&"F3\u{2013}C5"), "{scale}x: {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Pl")),
+            "{scale}x: {texts:?}"
+        );
+        // No two labels meet.
+        for (i, (a, ra)) in found.iter().enumerate() {
+            for (b, rb) in &found[i + 1..] {
+                assert!(
+                    ra.intersect(rb).is_none_or(|r| r.is_empty()),
+                    "{scale}x: {a:?} {ra:?} meets {b:?} {rb:?}"
+                );
+            }
+        }
+        // No label of Pad's lies over Pluck's zone, which is drawn above it.
+        let pluck = ui
+            .everything()
+            .into_iter()
+            .find(|found| found.item.is_some() && found.node.name == "Pluck.wav")
+            .expect("Pluck's zone")
+            .bounds;
+        for (text, rect) in &found {
+            assert!(
+                rect.intersect(&pluck).is_none_or(|r| r.is_empty()),
+                "{scale}x: {text:?} {rect:?} is over Pluck's zone {pluck:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn labels_of_overlapping_zones_never_overlap_and_tiny_zones_go_unlabelled() {
     // Two zones over each other, and one a key wide.

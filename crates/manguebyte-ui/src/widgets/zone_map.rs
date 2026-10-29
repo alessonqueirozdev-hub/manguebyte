@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use manguebyte_gfx::{Align, Point, Rect, RoundedRect, Scene, Size, Stroke};
 
 use super::keys::{KeySpan, is_black, note_name};
-use super::{focus_ring, glow_fill, hline, line, line_height, snap_px, vline};
+use super::{focus_ring, glow_fill, hline, line_height, snap_px, vline};
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Button, DropData, Event, Handled, Key, KeyEvent, Modifiers};
@@ -998,6 +998,28 @@ impl ZoneMap {
     }
 }
 
+/// The parts of the span `from..to`, left to right, that none of `above`
+/// covers in the rows `rows` (a zone drawn over another is kept clear of
+/// by two pixels more).
+fn free_spans(from: f32, to: f32, rows: (f32, f32), above: &[Rect]) -> Vec<(f32, f32)> {
+    let mut spans = vec![(from, to)];
+    for zone in above {
+        if zone.bottom() <= rows.0 || zone.y >= rows.1 {
+            continue;
+        }
+        let (left, right) = (zone.x - 2.0, zone.right() + 2.0);
+        spans = spans
+            .into_iter()
+            .flat_map(|(a, b)| {
+                [(a, b.min(left)), (a.max(right), b)]
+                    .into_iter()
+                    .filter(|(x, y)| y > x)
+            })
+            .collect();
+    }
+    spans
+}
+
 /// A zone's label, waiting to be placed.
 struct ZoneLabel {
     chosen: bool,
@@ -1141,7 +1163,7 @@ impl Widget for ZoneMap {
                 glow_fill(scene, zone_shape(area, theme), palette.accent, theme, 0.8);
             }
         }
-        for (zone, area) in zones.iter().zip(&areas) {
+        for (index, (zone, area)) in zones.iter().zip(&areas).enumerate() {
             let Some(area) = *area else {
                 continue;
             };
@@ -1171,40 +1193,51 @@ impl Widget for ZoneMap {
                     scene.fill(RoundedRect::new(mark, height * 0.5), hue.color);
                 }
             }
-            // Its name, and its range under it if both fit; nothing that
-            // would not show at least a few letters. Each line is cut to the
-            // zone's width and kept only if the zone is tall enough for it,
-            // so nothing reaches out of the zone; labels are placed after
-            // the rings, so that no two overlap.
+            // Its name, and its range under it if both fit, whole: a label
+            // is never cut. It goes in the first part of the zone, from the
+            // left, that no zone drawn above covers in the rows it takes and
+            // that is wide enough for it; with no such part it is left out.
+            // Labels are placed after the rings, so that no two overlap.
             let pad = 6.0f32.min(shape.rect.width * 0.12);
-            let room = shape.rect.width - 2.0 * pad;
-            if room >= 14.0 && shape.rect.height >= name_height + 2.0 {
+            if shape.rect.height >= name_height + 2.0 {
                 let top = shape.rect.y + 4.0f32.min((shape.rect.height - name_height) * 0.5);
-                let name = line(&zone.name, &name_style.with_color(hue.text), room);
-                let range = line(
+                let whole = |text: &str, style: &manguebyte_gfx::TextStyle| {
+                    manguebyte_gfx::TextLayout::new(text, &style.with_max_lines(1), None)
+                };
+                let name = whole(&zone.name, &name_style.with_color(hue.text));
+                let range = whole(
                     &self.range_text(zone),
                     &range_style.with_color(hue.text.with_alpha(0xB3)),
-                    room,
                 );
-                let both =
+                let two_lines =
                     shape.rect.height >= top - shape.rect.y + name_height + range_height + 2.0;
-                let range = (both && !range.is_truncated()).then_some(range);
-                let width = name
-                    .size()
-                    .width
-                    .max(range.as_ref().map_or(0.0, |r| r.size().width))
-                    .min(room);
-                let height = name_height + if range.is_some() { range_height } else { 0.0 };
-                let at = Point::new(shape.rect.x + pad, top);
-                // A name cut to a letter or two says nothing.
-                if !(name.is_truncated() && room < 36.0) {
-                    labels.push(ZoneLabel {
-                        chosen,
-                        area: shape.rect.width * shape.rect.height,
-                        rect: Rect::new(at.x, at.y, width, height),
-                        name,
-                        range,
-                    });
+                let above: Vec<Rect> = areas[index + 1..]
+                    .iter()
+                    .flatten()
+                    .map(|area| zone_shape(*area, theme).rect)
+                    .collect();
+                let tries = [true, false].into_iter().filter(|&both| two_lines || !both);
+                for both in tries {
+                    let width = if both {
+                        name.size().width.max(range.size().width)
+                    } else {
+                        name.size().width
+                    };
+                    let height = name_height + if both { range_height } else { 0.0 };
+                    let rows = (top, top + height);
+                    let span = free_spans(shape.rect.x, shape.rect.right(), rows, &above)
+                        .into_iter()
+                        .find(|(from, to)| to - from >= width + 2.0 * pad);
+                    if let Some((from, _)) = span {
+                        labels.push(ZoneLabel {
+                            chosen,
+                            area: shape.rect.width * shape.rect.height,
+                            rect: Rect::new(from + pad, top, width, height),
+                            name: name.clone(),
+                            range: both.then(|| range.clone()),
+                        });
+                        break;
+                    }
                 }
             }
         }

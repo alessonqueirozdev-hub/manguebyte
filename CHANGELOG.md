@@ -531,8 +531,9 @@ with what they may cost the audio and the idle interface tested.
   pills; keyboards with soft keys rounded at the foot, glowing lit keys and
   black keys with depth; the envelope with a gradient under a glowing
   curve; the zone map with rounded zones in categorical hues
-  (`Zone::with_hue`) and name and range labels that are left out rather
-  than cut badly. `card(child)` and `panel(child)` draw cards with a
+  (`Zone::with_hue`) and name and range labels that are whole or left
+  out, never cut, placed in the part of a zone no zone drawn above it
+  covers, and never over each other. `card(child)` and `panel(child)` draw cards with a
   shadow; `pill(text)` is a title-bar button with a status dot and a
   primary style; `Label::heading` and `Label::caption`.
 - `Widget::overflow` lets a widget draw past its rectangle (a card's or a
