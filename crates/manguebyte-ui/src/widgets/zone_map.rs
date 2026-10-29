@@ -479,16 +479,24 @@ impl ZoneMap {
     /// The zone at `at` and the edges of it near `at`, the zone drawn last
     /// first.
     fn zone_at(&self, rect: Rect, zones: &[Zone], at: Point) -> Option<(u64, Edges)> {
-        for zone in zones.iter().rev() {
+        // Zones the pointer is inside come before those whose edge it is
+        // just outside of.
+        let inside = zones.iter().rev().filter(|zone| {
+            Self::zone_rect(self.span, rect, zone).is_some_and(|area| area.contains(at))
+        });
+        let near = zones.iter().rev().filter(|zone| {
+            Self::zone_rect(self.span, rect, zone)
+                .is_some_and(|area| !area.contains(at) && area.outset(EDGE).contains(at))
+        });
+        for zone in inside.chain(near) {
             let Some(area) = Self::zone_rect(self.span, rect, zone) else {
                 continue;
             };
-            if !area.outset(EDGE).contains(at) {
-                continue;
-            }
-            let near = |a: f32, b: f32| (a - b).abs() <= EDGE;
-            let (left, right) = (near(at.x, area.x), near(at.x, area.right()));
-            let (top, bottom) = (near(at.y, area.y), near(at.y, area.bottom()));
+            // A narrow zone keeps its middle third for moving it.
+            let (across, down) = (EDGE.min(area.width / 3.0), EDGE.min(area.height / 3.0));
+            let near = |a: f32, b: f32, reach: f32| (a - b).abs() <= reach;
+            let (left, right) = (near(at.x, area.x, across), near(at.x, area.right(), across));
+            let (top, bottom) = (near(at.y, area.y, down), near(at.y, area.bottom(), down));
             // A zone too small to tell its edges apart: the nearer one.
             let edges = Edges {
                 left: left && (!right || (at.x - area.x).abs() < (at.x - area.right()).abs()),

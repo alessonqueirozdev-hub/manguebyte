@@ -165,6 +165,30 @@ fn edges_resize_onto_key_and_velocity_boundaries_and_never_cross() {
 }
 
 #[test]
+fn a_press_inside_a_narrow_zone_moves_it_rather_than_the_edge_beside_it() {
+    // A one-key zone at C3, and a wide zone drawn over it from C#3 on:
+    // the middle of C3 is within reach of the wide zone's left edge.
+    // Keys 8 pixels wide.
+    let state = ZoneMapState::new();
+    state.set_zones(vec![
+        Zone::new(1, "Narrow", 48, 48),
+        Zone::new(2, "Wide", 49, 60),
+    ]);
+    let view = zone_map("Zones", two_octaves(), state.clone());
+    let mut ui = Harness::new(view, Size::new(192.0, 128.0), 1.0);
+    ui.frame();
+    let narrow = ui.get(Role::ListItem, "Narrow").center();
+    let wide = ui.get(Role::ListItem, "Wide").bounds;
+    assert!(
+        wide.x - narrow.x <= 4.0,
+        "within the wide zone's edge reach"
+    );
+    ui.drag(narrow, (16.0, 0.0), 2);
+    assert_eq!(keys(&state, 1).0, 50);
+    assert_eq!(keys(&state, 2), (49, 60, 0, 127));
+}
+
+#[test]
 fn a_band_selects_what_it_crosses_and_escape_puts_everything_back() {
     let (mut ui, state) = open(
         vec![
