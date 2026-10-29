@@ -21,7 +21,7 @@ manguebyte-plugin.workspace = true
 # and is already in Cargo.lock. Only the modules named here are compiled:
 # the clipboard needs `DataExchange` and `Memory`, and placing an input
 # method's windows at the caret needs `Ime` (functions of imm32.dll, which
-# every process with windows has loaded). Application windows (ADR 0009)
+# every process with windows has loaded). Application windows (ADR 0010)
 # add `Com`, `Com_StructuredStorage` and `Ole` for drops and OLE's set-up,
 # and `Shell` and `Shell_Common` for dropped file lists and the file
 # dialogs; the COM interfaces themselves are declared in `win32::com`.

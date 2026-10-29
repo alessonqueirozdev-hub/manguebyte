@@ -465,6 +465,71 @@ tested headless (`crates/manguebyte-ui/tests/views.rs`).
   scroll view, driven headless and written to PNG files.
 - Limits: TECH_DEBT 96.
 
+Application windows, files dropped from other programs and the system's
+file dialogs ([ADR 0010](docs/adr/0010-application-windows.md)), tested
+headless on every system and with real windows on Windows
+(`crates/manguebyte-window/tests/app.rs`, `win32_app.rs`,
+`crates/manguebyte-gui/tests/app_window.rs`, `win32_app_window.rs`).
+
+- `manguebyte_window::App`: an application's own top-level windows and
+  the loop that runs them. `App::open_window(AppWindowOptions, handler)`
+  makes a window with a title, an inside of a size in logical pixels
+  (made at the scale of the monitor it opens on), resizable or `fixed`,
+  with `with_min_size` and `with_max_size`; it runs the same code as a
+  child window for drawing, timers, input, the clipboard and the scale.
+  The close button, Alt+F4, the window menu and the taskbar reach the
+  handler as `Event::CloseRequested` and nothing else: the application
+  closes the window with `close()`, or not. `App::run` is the thread's
+  message loop until the last of the application's windows closes
+  (`RunEnd::LastWindowClosed`), `quit` is asked (`RunEnd::Quit`) or
+  someone posts `WM_QUIT` (`RunEnd::QuitMessage`); child windows of a
+  host never need it. On Win32 `WM_GETMINMAXINFO` gives the system the
+  limits, `WM_DPICHANGED` changes the scale and then takes the suggested
+  rectangle, a minimised window keeps its back buffer, and keys the
+  handler leaves go to the default handling. `set_title`, `title`,
+  `size_limits` and `is_app_window` on every window. `App::headless`
+  runs steps a test posts (`HeadlessApp::post`) in place of messages, and
+  `Headless` gains `request_close`, `drag_frame_to` and `move_to_monitor`.
+- File drops: a window made `with_file_drops` hears `Event::DragEnter`,
+  `DragOver`, `DragLeave` and `Drop`, reads what the drag carries
+  (`DragData`: paths and text) with `drag_data`, and takes or refuses it
+  by its answer, which the system shows with its cursor (a copy, or a
+  link where only that is allowed, never a move). A drag that comes while
+  the handler runs is refused and heard at the next move. On Win32 it is
+  an `IDropTarget` of the crate's own, registered with `RegisterDragDrop`
+  only on a single-threaded apartment and revoked in `WM_DESTROY`; an
+  `App` initialises OLE for its thread, a child window never does for a
+  host's. `Headless::drag_enter`, `drag_over`, `drop_at`, `drop_files`.
+- File dialogs: `open_files`, `pick_folder` and `save_file` on a window,
+  or through a `Dialogs` handle an interface keeps, described by a
+  `FileDialog` (title, `FileFilter`s, starting folder, the name a save
+  offers, several files or one), return `Option<Vec<PathBuf>>` or
+  `Option<PathBuf>`, `None` for a cancel. On Win32 they are
+  `IFileOpenDialog` and `IFileSaveDialog`, modal to the window's
+  top-level window. A headless window answers what the test scripted
+  (`Headless::answer_next_dialog`, `on_next_dialog`, which may drive the
+  window while the dialog is "open") and records what was asked
+  (`take_dialogs`). Showing the system's dialogs is tested by hand only;
+  the tests configure them through COM and read them back
+  (`testing::prepare_dialog`).
+- `manguebyte-ui`: `Root::file_drop(FileDrop, &DropData)` runs a drag
+  from another program as a drag of the interface's own with no source
+  and no ghost, so widgets take files through `Widget::drag` with a
+  payload holding the `DropData` (`DropData::has_file_with_extension`).
+- `manguebyte-gui`: `Editor::open_in_app` and `open_app_window` show an
+  interface in an application window and return an `AppEditor`
+  (`on_close_request`, `dialogs`, `set_visible`); gestures set the
+  parameters given, as a standalone program's host would.
+  `Editor::with_file_drops` lets an editor inside a host take drops.
+  `HeadlessEditor` drags files. `examples/app_window.rs` lists the files
+  dropped on it and opens the three dialogs.
+- `win32::testing` (feature `testing`): `Drag` plays a drag against a
+  window's registered drop target with a real `IDataObject` of its own,
+  `Ole`, `is_drop_target`, `tracking_limits`, `dpi_changed`,
+  `window_title`, `window_rect`, `is_resizable`, `post_quit`, and
+  `Message::Close` and `Message::SysCommandClose`.
+- Limits: TECH_DEBT 97.
+
 ### Breaking
 
 - In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`

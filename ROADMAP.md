@@ -289,7 +289,13 @@ our own, and nothing claimed before its test exists.
   windows inside a host's window and a headless backend for tests
   (`manguebyte-window`), and the glue that opens an editor in them
   (`manguebyte-gui`), tested on Windows, with two plugin binaries'
-  editors open in one process; macOS and Linux follow as CI proves each
+  editors open in one process. Application windows with their loop,
+  close requests, size limits and monitor changes, files dropped from
+  other programs onto widgets, and the open, folder and save dialogs
+  ([ADR 0010](docs/adr/0010-application-windows.md)), tested headless and
+  with real Win32 windows; showing the dialogs and a real drag from the
+  file manager are tested by hand only, and not yet recorded. macOS and
+  Linux follow as CI proves each ([TECH_DEBT](docs/TECH_DEBT.md) item 97)
 - 🚧 Editors for the example plugins: Mangue Duck's (knobs, a bypass switch
   and a gain-reduction meter) and Mangue Pluck's (a knob for each
   parameter), tested headless and in real Win32 windows. Mangue Pluck's
@@ -307,9 +313,10 @@ our own, and nothing claimed before its test exists.
   the interface with a typed payload, a ghost, auto-scrolling and
   cancelling, and pictures fitted and sharp at 2x done
   ([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)); files
-  dropped from outside the window, rows of different heights, multi-line
-  text and drag and drop by keyboard not started
-  ([TECH_DEBT](docs/TECH_DEBT.md) item 96)
+  dropped from other programs onto the same drop targets done
+  ([ADR 0010](docs/adr/0010-application-windows.md)); dragging out of the
+  window, rows of different heights, multi-line text and drag and drop by
+  keyboard not started ([TECH_DEBT](docs/TECH_DEBT.md) items 96 and 97)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,

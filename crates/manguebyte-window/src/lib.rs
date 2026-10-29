@@ -16,7 +16,7 @@
 //! of window can take files and text dragged onto it
 //! ([`WindowOptions::with_file_drops`], [`Event::Drop`]) and show the
 //! system's dialogs for opening files, picking a folder and saving
-//! ([`WindowCx::open_files`], [`FileDialog`]). ADR 0009 says why and how.
+//! ([`WindowCx::open_files`], [`FileDialog`]). ADR 0010 says why and how.
 //!
 //! Two backends implement it:
 //!

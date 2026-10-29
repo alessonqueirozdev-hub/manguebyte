@@ -8,6 +8,24 @@ under one name; depend on this crate directly to use only this part.
 
 Documentation: <https://docs.rs/manguebyte-gui>
 
+## What is in it
+
+- `Editor`: an editor spec a plugin returns from `Plugin::editor`; the
+  CLAP and VST 3 wrappers open it in the host's window, and a test can
+  open it headless (feature `headless`).
+- Application windows: `Editor::open_in_app` and `open_app_window` show
+  an interface in a window of a `manguebyte_window::App`, for a standalone
+  program or a plugin run as one, with close requests the application
+  answers, files dropped onto widgets and the system's file dialogs
+  (ADR 0010). Windows only for now.
+
+`examples/app_window.rs` lists the files dropped on it and has buttons for
+the open, folder and save dialogs:
+
+```text
+cargo run -p manguebyte-gui --example app_window
+```
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

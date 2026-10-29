@@ -213,7 +213,10 @@ statics, and the process's DPI awareness is never changed:
 context as the fallback on systems that lack it. The helpers that make
 top-level windows, run message loops or set a thread's DPI awareness for
 tests are behind the crate's `testing` feature, which only tests and the
-probe turn on. `manguebyte-gui` has no `unsafe` code, keeps no global
+probe turn on. (Applications' own top-level windows and their loop are
+public since [ADR 0010](0010-application-windows.md), for the thread an
+application owns; a plugin's windows still never make one or run a loop.)
+`manguebyte-gui` has no `unsafe` code, keeps no global
 state and starts no thread; everything it asks of the system goes through
 `manguebyte-window`. The system caret, which input methods and screen
 magnifiers follow, belongs to the thread, not the window: a window makes

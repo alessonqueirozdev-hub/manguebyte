@@ -22,6 +22,8 @@ Documentation: <https://docs.rs/manguebyte-ui>
   activation). Popup menus, hover and tooltips.
 - Drag and drop inside the interface (`drag`): typed payloads, targets
   that accept or refuse, a ghost over everything, scrolling near an edge.
+  Files and text dragged from other programs reach the same targets
+  (`Root::file_drop`), as payloads holding a `DropData`.
 - Parameters read from their atomics each frame and changed only through
   gestures; no listeners anywhere: lists, scroll views and text fields
   share their state with the application through values it polls.
