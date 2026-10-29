@@ -10,6 +10,7 @@
 //! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
+//! | [`ImageView`] | [`Image`](crate::Role::Image) | an image, fitted to its rectangle, sharp at any scale it has a version for | nothing |
 //! | [`ListView`] | [`List`](crate::Role::List), its rows [`ListItem`](crate::Role::ListItem) | rows the application keeps, only those in sight | the selection, by clicks, the keys and typing; rows dragged out and dropped in |
 //! | [`ScrollView`] | [`ScrollView`](crate::Role::ScrollView) | one child larger than itself, through a viewport, with scroll bars | the offset, by the wheel, the bars and the keys |
 //!
@@ -34,6 +35,7 @@ mod adjust;
 mod canvas;
 mod combo;
 mod container;
+mod image;
 mod knob;
 mod label;
 mod list;
@@ -47,6 +49,7 @@ mod toggle;
 pub use canvas::{Canvas, CanvasCx, canvas};
 pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
+pub use image::{Fit, ImageView, image};
 pub use knob::{Knob, knob};
 pub use label::{Label, label};
 pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view};

@@ -1,17 +1,17 @@
-//! Scroll views, lists, and drag and drop, driven headless.
+//! Scroll views, lists, drag and drop, and images, driven headless.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use manguebyte_gfx::{IRect, Point, Rect, Scene, Size};
+use manguebyte_gfx::{Color, IRect, Image, Pixmap, Point, Rect, Scene, Size};
 use manguebyte_ui::access::{AccessNode, Role};
 use manguebyte_ui::drag::{DragEvent, DragPayload};
 use manguebyte_ui::testing::{Found, Harness};
 use manguebyte_ui::{
-    AccessCx, Button, Event, EventCx, Handled, IntoView, Key, KeyEvent, ListData, ListEvent,
-    ListState, MeasureCx, Modifiers, PaintCx, RowCx, State, View, Widget, column, label, list_view,
-    row, scroll_view, text_field,
+    AccessCx, Button, Event, EventCx, Fit, Handled, IntoView, Key, KeyEvent, ListData, ListEvent,
+    ListState, MeasureCx, Modifiers, PaintCx, RowCx, State, View, Widget, column, image, label,
+    list_view, row, scroll_view, text_field,
 };
 
 const SHIFT: Modifiers = Modifiers {
@@ -1147,4 +1147,108 @@ fn a_drag_near_a_lists_edge_scrolls_the_list() {
         panic!("{events:?}");
     };
     assert_eq!(*index, ((60.0 + stopped) / 24.0).round() as usize);
+}
+
+// Images.
+
+/// A picture of `width` by `height` in which each pixel has its own colour.
+fn pattern(width: u32, height: u32) -> Pixmap {
+    let mut rgba = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&[
+                (x * 40) as u8,
+                (y * 40) as u8,
+                ((x + y) % 2 * 255) as u8,
+                255,
+            ]);
+        }
+    }
+    Pixmap::from_straight(width, height, &rgba).expect("a picture")
+}
+
+#[test]
+fn a_picture_made_for_twice_the_scale_is_copied_pixel_for_pixel_at_scale_two() {
+    let picture = pattern(6, 6);
+    let view = image("Logo", Image::new(picture.clone()))
+        .density(2.0)
+        .fit(Fit::None);
+    let mut ui = Harness::new(view, Size::new(10.0, 10.0), 2.0);
+    ui.frame();
+    let logo = ui.get(Role::Image, "Logo");
+    assert_eq!(logo.bounds, Rect::new(0.0, 0.0, 10.0, 10.0));
+    // 3 by 3 logical pixels, centred in 10: from 3.5, which is device 7.
+    for y in 0..6 {
+        for x in 0..6 {
+            assert_eq!(
+                ui.pixels().pixel(7 + x, 7 + y),
+                picture.pixel(x, y),
+                "({x}, {y})"
+            );
+        }
+    }
+    // Around it, the background.
+    let background = Color::hex(0x16181C);
+    assert_eq!(
+        ui.pixels().pixel(6, 6).map(|p| p.to_array()),
+        Some([background.r, background.g, background.b, 255])
+    );
+    ui.assert_accessible();
+}
+
+#[test]
+fn the_version_of_a_picture_that_suits_the_scale_is_drawn() {
+    let plain = |color: Color, side: u32| {
+        let mut pixels = Pixmap::new(side, side).expect("small");
+        pixels.fill(color);
+        Image::new(pixels)
+    };
+    let red = Color::hex(0xFF0000);
+    let blue = Color::hex(0x0000FF);
+    for (scale, expected) in [(1.0, red), (1.5, blue), (2.0, blue), (3.0, blue)] {
+        let view = image("Mark", plain(red, 8))
+            .with_density(plain(blue, 16), 2.0)
+            .fit(Fit::Stretch);
+        let mut ui = Harness::new(view, Size::new(8.0, 8.0), scale);
+        ui.frame();
+        let center = (4.0 * scale) as u32;
+        assert_eq!(
+            ui.pixels().pixel(center, center).map(|p| p.to_array()),
+            Some([expected.r, expected.g, expected.b, 255]),
+            "{scale}x"
+        );
+    }
+}
+
+#[test]
+fn a_covering_picture_is_cut_at_its_rectangle_and_a_contained_one_leaves_room() {
+    let wide = || {
+        let mut pixels = Pixmap::new(40, 10).expect("small");
+        pixels.fill(Color::hex(0xFF0000));
+        Image::new(pixels)
+    };
+    let background = Color::hex(0x16181C);
+    let is = |ui: &Harness, x: u32, y: u32, color: Color| {
+        ui.pixels().pixel(x, y).map(|p| p.to_array()) == Some([color.r, color.g, color.b, 255])
+    };
+    let red = Color::hex(0xFF0000);
+    // Cover: fills the 20 by 20 square, cut at its edges.
+    let view = row((
+        image("Cover", wide()).fit(Fit::Cover).width(20.0),
+        label("Next").flex(1.0),
+    ));
+    let mut ui = Harness::new(view, Size::new(60.0, 20.0), 1.0);
+    ui.frame();
+    assert!(is(&ui, 1, 1, red) && is(&ui, 18, 18, red));
+    assert!(is(&ui, 30, 1, background), "nothing past its rectangle");
+    // Contain: the whole of it, 20 by 5, with room above and below.
+    let view = row((
+        image("Contain", wide()).fit(Fit::Contain).width(20.0),
+        label("Next").flex(1.0),
+    ));
+    let mut ui = Harness::new(view, Size::new(60.0, 20.0), 1.0);
+    ui.frame();
+    assert!(is(&ui, 1, 10, red) && is(&ui, 18, 10, red));
+    assert!(is(&ui, 10, 2, background) && is(&ui, 10, 17, background));
+    ui.assert_accessible();
 }

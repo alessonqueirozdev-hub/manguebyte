@@ -60,6 +60,8 @@
 //!   everything and scrolls views whose edge the pointer is near, and
 //!   Escape or a release where nothing accepts cancels. Lists reorder and
 //!   move rows this way.
+//! - **Pictures** ([`image`]): an image fitted to its rectangle, with a
+//!   version per screen density so that it stays sharp at 2x.
 //! - **Hover and tooltips**: the widget under the pointer hears it
 //!   ([`Widget::hover_changed`]), and a view given a
 //!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
@@ -192,7 +194,7 @@ pub use tree::NodeId;
 pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, ComboBox, Container, Knob, Label, ListData, ListEvent, ListState, ListView,
-    Meter, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, canvas, combo, knob,
-    label, list_view, meter, scroll_view, slider, text_field, toggle,
+    Canvas, CanvasCx, ComboBox, Container, Fit, ImageView, Knob, Label, ListData, ListEvent,
+    ListState, ListView, Meter, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle,
+    canvas, combo, image, knob, label, list_view, meter, scroll_view, slider, text_field, toggle,
 };
