@@ -1,0 +1,28 @@
+[package]
+name = "mangue-identity-probe"
+description = "A test plugin of the Manguebyte workspace whose identity is read from bytes appended to its own library file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
+# An editor, so that the test can open two copies' editors at once.
+manguebyte-gui.workspace = true
+manguebyte-ui.workspace = true
+
+[dev-dependencies]
+# The test is a host: it loads copies of this package's own library.
+manguebyte-host.workspace = true
+# Real top-level windows for the copies' editors to go in.
+manguebyte-window = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

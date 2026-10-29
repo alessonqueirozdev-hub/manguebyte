@@ -601,6 +601,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mangue-identity-probe"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+ "manguebyte-gui",
+ "manguebyte-host",
+ "manguebyte-ui",
+ "manguebyte-window",
+]
+
+[[package]]
 name = "mangue-pluck"
 version = "0.1.0"
 dependencies = [
