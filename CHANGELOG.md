@@ -396,8 +396,83 @@ break the API.
   conversion of notes moved from the LV2 host to a module both use.
 - Limits: TECH_DEBT 93.
 
+### User interface
+
+Scrolling, lists, drag and drop and pictures in `manguebyte-ui`
+([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)), all
+tested headless (`crates/manguebyte-ui/tests/views.rs`).
+
+- `scroll_view(name, child)`: a viewport onto one child larger than
+  itself, up and down, sideways (`.horizontal()`) or both (`.both()`).
+  The wheel scrolls `Sizes::scroll_line` (40) a notch, and a touchpad's
+  fractions of a notch add up exactly; Shift turns it sideways. The bars
+  are drawn from the theme at the right and bottom edges, in room kept
+  for them whether or not the child overflows: drag the thumb, press the
+  track for a page. With the keyboard focus, which the view takes only
+  when its child overflows, the arrows, Page Up, Page Down, Home and End
+  scroll it. A view at its edge leaves the wheel to the view around it.
+  Tab or assistive technology giving the focus to a widget out of sight
+  scrolls every view it is in to it. `.position(State<Point>)` lets the
+  application read and set the offset. Layout gains
+  `Arrange::Scroll { x, y }`, `scroll_viewport` and
+  `Placement::from_device`; the root moves what a view holds by its
+  offset in whole device pixels and clips it to the viewport, so what is
+  out of sight is neither drawn nor hit, and scrolling damages only the
+  view, with the result equal to a whole repaint bit for bit at 1x,
+  1.25x and 2x. `Root::scroll_metrics`, `UpdateCx::scroll`,
+  `EventCx::scroll`, `EventCx::scroll_to` and `ScrollMetrics` let a
+  widget of one's own be a scroll node.
+- `list_view(name, data, state)`: rows an application keeps through
+  `ListData` (row count, name, a revision number, and optionally its own
+  row drawing, drag payloads and which drops it accepts), of which only
+  those in sight are drawn and described. Rows are `Sizes::list_row` (24)
+  tall; rows of different heights are not supported. Click, Ctrl+click
+  and Shift+click selection; the arrows, Shift and Ctrl with them,
+  Ctrl+Space, Page Up, Page Down, Home, End and Ctrl+A; typing the first
+  letters of a row's name; activation by double click or Enter; the wheel
+  and a bar. Everything is polled from a `ListState` (`Send`, so an
+  editor spec can keep it): the selection, the keyboard's row, the offset,
+  and `ListEvent::Activated` and `ListEvent::Dropped`. A test with 100 000
+  rows checks that building, scrolling to the end and back, describing
+  and selecting everything draw and ask for only the rows in sight (10 or
+  11), that the offset stays exact at 2.4 million pixels, and that a
+  steady list draws nothing.
+- Drag and drop inside the interface (`manguebyte_ui::drag`): a widget
+  starts a drag with `EventCx::start_drag(DragPayload::new(data,
+  description))`, any `Send + Sync` type of the application's; targets
+  accept or refuse it by type and place through `Widget::drag`
+  (`DragEvent::Over`, `Left`, `Drop`, and `Ended` to the source); the root
+  draws a ghost with the description over everything (a `DragItem` to
+  assistive technology), scrolls scroll views and lists near whose edges
+  the pointer rests, and cancels on Escape, a release where nothing
+  accepts, a second button, `PointerCancel` or losing the window's focus.
+  Lists drag their selected rows and show where a drop would go; tests
+  reorder rows within a list and move them between two. `Root::dragging`
+  and `Root::drop_target` say what is going on.
+- `image(name, image)`: a picture fitted by `Fit::Contain`, `Cover`,
+  `Stretch` or `None`, with a version per density
+  (`.density`, `.with_density`): the least dense version with at least as
+  many pixels as the screen is drawn. A 2x picture at scale 2 is copied
+  pixel for pixel.
+- Accessibility: roles `ScrollView`, `List`, `ListItem` and `DragItem`, a
+  `selected` state, `AccessItem` for parts of a widget that are nodes of
+  their own (`Widget::access_items`, `Widget::act_item`, `Root::act_item`,
+  `AccessEntry::item`, `Found::item`), and `assert_accessible` checks that
+  lists and scroll views have names and list items say whether they are
+  selected. `Harness::wheel_by` sends fractions of a notch and sideways
+  turns.
+- `examples/views_demo.rs`: two lists with drag between them inside a
+  scroll view, driven headless and written to PNG files.
+- Limits: TECH_DEBT 96.
+
 ### Breaking
 
+- In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`
+  on it without a wildcard arm needs an arm for it; `AccessState` gains
+  `selected`, `AccessEntry` and `testing::Found` gain `item`, and
+  `Sizes` gains `scroll_bar`, `scroll_line` and `list_row`, so struct
+  literals of them must name the new fields. The new `Widget` methods
+  have defaults.
 - `AudioBuffer::apply_gain_ramp` works the gain of frame `i` out as
   `start + step * i` instead of adding `step` frame after frame, so a ramp
   no longer drifts on a long block, and its samples can differ in the last

@@ -300,7 +300,16 @@ our own, and nothing claimed before its test exists.
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
   done; text entry (a text field, and values typed into knobs and
   sliders, with the clipboard), popup menus with submenus, a combo box,
-  hover and tooltips done; drag and drop, scrolling and lists not started
+  hover and tooltips done; scroll views (wheel, touchpad, bars, keys,
+  nested views, Tab scrolling to what it focuses), lists of rows the
+  application keeps with only those in sight drawn (tested with 100 000),
+  selection, typing to find a row and activation, drag and drop inside
+  the interface with a typed payload, a ghost, auto-scrolling and
+  cancelling, and pictures fitted and sharp at 2x done
+  ([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)); files
+  dropped from outside the window, rows of different heights, multi-line
+  text and drag and drop by keyboard not started
+  ([TECH_DEBT](docs/TECH_DEBT.md) item 96)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,

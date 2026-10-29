@@ -315,6 +315,11 @@ reach past the editor's window: one taller than the room above and below
 its widget starts at the top and is cut at the bottom, as menus do not
 scroll yet.
 
+Scroll views, lists of rows of which only those in sight exist, drag and
+drop inside the interface, and pictures followed, as
+[ADR 0009](0009-scrolling-lists-and-drag-and-drop.md) describes. Menus
+still do not scroll.
+
 ## Consequences
 
 - Plugin authors get an interface layer with no process-wide state, one
