@@ -1,16 +1,24 @@
 //! A window with no system window behind it, for tests on every system.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::fmt;
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use manguebyte_gfx::{IRect, Pixmap};
 use manguebyte_plugin::editor::checked_scale;
 
 use crate::damage::Damage;
+use crate::dialog::{DialogKind, DialogRequest, FileDialog};
 use crate::dispatch::Origin;
-use crate::event::{Event, Handled, PhysicalSize, RawInput, TimerId};
+use crate::drag::{DragData, RawDrag};
+use crate::event::{Event, Handled, Modifiers, PhysicalPoint, PhysicalSize, RawInput, TimerId};
 use crate::window::Inner;
+
+/// How a headless window answers a dialog: with the paths chosen, or
+/// `None` for a cancel.
+type DialogAnswer = Box<dyn FnOnce(&DialogRequest) -> Option<Vec<PathBuf>>>;
 
 /// The headless backend's side of a window: a record of what the window
 /// asked the system for.
@@ -27,6 +35,10 @@ pub(crate) struct HeadlessPlatform {
     /// Where the system would show the caret, while the window has the
     /// keyboard.
     caret: Cell<Option<IRect>>,
+    /// How the next dialogs are answered, in order.
+    dialog_answers: RefCell<VecDeque<DialogAnswer>>,
+    /// The dialogs asked for, in order.
+    dialogs: RefCell<Vec<DialogRequest>>,
     /// The events the handler declined that came with a system message.
     #[cfg(test)]
     passed_on: RefCell<Vec<(Origin, Event)>>,
@@ -44,9 +56,24 @@ impl HeadlessPlatform {
             invalidations: RefCell::new(Vec::new()),
             clipboard: RefCell::new(None),
             caret: Cell::new(None),
+            dialog_answers: RefCell::new(VecDeque::new()),
+            dialogs: RefCell::new(Vec::new()),
             #[cfg(test)]
             passed_on: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Records a dialog and answers it as the test scripted, or cancels it.
+    pub(crate) fn dialog(&self, kind: DialogKind, dialog: &FileDialog) -> Option<Vec<PathBuf>> {
+        let request = DialogRequest {
+            kind,
+            dialog: dialog.clone(),
+        };
+        self.dialogs.borrow_mut().push(request.clone());
+        let answer = self.dialog_answers.borrow_mut().pop_front();
+        // Called with nothing borrowed: an answer may drive the window, as
+        // the person can while a dialog is open.
+        answer.and_then(|answer| answer(&request))
     }
 
     /// The clipboard's text, cut as the system's is read.
@@ -332,6 +359,126 @@ impl Headless {
     pub fn handler_running(&self) -> bool {
         self.with(|inner| inner.dispatcher().busy())
             .unwrap_or(false)
+    }
+
+    /// Asks an application window to close, as its close button does: the
+    /// handler gets [`Event::CloseRequested`](crate::Event::CloseRequested)
+    /// and the window stays open unless it closes itself. Returns what the
+    /// handler said, or `None` for a child window, a closed one, or a
+    /// request that waited for a running handler.
+    pub fn request_close(&self) -> Option<Handled> {
+        self.with(Inner::close_requested).flatten()
+    }
+
+    /// Resizes an application window as the person dragging its frame
+    /// does: within its limits, and not at all if it is not resizable.
+    /// Returns the size it has afterwards, or `None` once it is gone.
+    pub fn drag_frame_to(&self, size: PhysicalSize) -> Option<PhysicalSize> {
+        self.with(|inner| {
+            if let Some(frame) = inner.frame.as_ref().filter(|frame| frame.resizable) {
+                inner.on_size(frame.clamp(size, inner.scale()));
+            }
+            inner.size()
+        })
+    }
+
+    /// Moves an application window to a monitor of `scale`, as Win32's
+    /// `WM_DPICHANGED` does: the scale changes, then the window takes the
+    /// size the system suggests, the same logical size at the new scale,
+    /// within its limits. A scale outside `0.25..=8.0` is ignored. Returns
+    /// whether it was taken.
+    pub fn move_to_monitor(&self, scale: f64) -> bool {
+        if checked_scale(scale).is_none() {
+            return false;
+        }
+        self.with(|inner| {
+            if !inner.is_open() {
+                return false;
+            }
+            let old = inner.scale();
+            let size = inner.size();
+            let suggested = PhysicalSize::new(
+                ((f64::from(size.width) / old * scale).round() as u32).max(1),
+                ((f64::from(size.height) / old * scale).round() as u32).max(1),
+            );
+            let size = inner.on_dpi_changed(scale, suggested);
+            inner.on_size(size);
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// A drag carrying `data` comes over the window at `at`, as one from
+    /// another program does. Returns whether the handler takes it: never
+    /// for a window that takes no drops, a drag that carries nothing, or
+    /// a handler that is running.
+    pub fn drag_enter(&self, at: PhysicalPoint, data: DragData) -> Handled {
+        self.drag(RawDrag::Enter {
+            at,
+            data,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    /// The drag moves to `at`. Returns whether the handler takes it there.
+    pub fn drag_over(&self, at: PhysicalPoint) -> Handled {
+        self.drag(RawDrag::Over {
+            at,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    /// The drag leaves the window, or is cancelled.
+    pub fn drag_leave(&self) {
+        self.drag(RawDrag::Leave);
+    }
+
+    /// The drag is dropped at `at`. Returns whether the handler took it.
+    pub fn drop_at(&self, at: PhysicalPoint) -> Handled {
+        self.drag(RawDrag::Drop {
+            at,
+            modifiers: Modifiers::NONE,
+        })
+    }
+
+    /// Drags `data` onto the window at `at` and drops it there, in one go.
+    /// Returns whether the handler took it.
+    pub fn drop_files(&self, at: PhysicalPoint, data: DragData) -> Handled {
+        if self.drag_enter(at, data) == Handled::No {
+            self.drag_leave();
+            return Handled::No;
+        }
+        self.drop_at(at)
+    }
+
+    fn drag(&self, drag: RawDrag) -> Handled {
+        self.with(|inner| inner.drag(drag)).unwrap_or(Handled::No)
+    }
+
+    /// Answers the next dialog the window shows with `paths`, as the person
+    /// choosing them would, or cancels it with `None`. Answers are used in
+    /// the order they are given; a dialog with none left is cancelled. An
+    /// open dialog for one file, a folder dialog and a save dialog take the
+    /// first path only.
+    pub fn answer_next_dialog(&self, paths: Option<Vec<PathBuf>>) {
+        self.on_next_dialog(move |_| paths);
+    }
+
+    /// Answers the next dialog the window shows with what `answer` returns
+    /// for it. `answer` runs while the dialog is "open", with the caller
+    /// of the dialog waiting: it may give the window input, which waits for
+    /// a handler that is the caller, as it would during a system dialog.
+    pub fn on_next_dialog(
+        &self,
+        answer: impl FnOnce(&DialogRequest) -> Option<Vec<PathBuf>> + 'static,
+    ) {
+        self.platform(|p| p.dialog_answers.borrow_mut().push_back(Box::new(answer)));
+    }
+
+    /// The dialogs the window was asked to show since the last call, in
+    /// order.
+    pub fn take_dialogs(&self) -> Vec<DialogRequest> {
+        self.platform(|p| p.dialogs.take()).unwrap_or_default()
     }
 }
 

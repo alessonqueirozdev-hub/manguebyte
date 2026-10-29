@@ -1,9 +1,40 @@
 //! The Win32 backend.
 //!
-//! A window here is a `WS_CHILD` window inside the host's `HWND`, made on
-//! the host's main thread and driven by the host's message loop: the
-//! backend never runs a loop of its own. (The `testing` module, compiled
-//! only with the crate's `testing` feature, does, for tests and probes.)
+//! A plugin's window here is a `WS_CHILD` window inside the host's `HWND`,
+//! made on the host's main thread and driven by the host's message loop:
+//! for it the backend never runs a loop of its own. An application's
+//! window ([`App::open_window`](crate::App::open_window)) is an overlapped
+//! top-level window of the same class, run by [`App::run`](crate::App::run),
+//! which is the thread's `GetMessageW` loop. (The `testing` module,
+//! compiled only with the crate's `testing` feature, runs loops for tests
+//! and probes.)
+//!
+//! What a top-level window adds:
+//!
+//! - It is made hidden at a first guess of its size, then given the inside
+//!   its logical size needs at the scale of the monitor it landed on
+//!   (`AdjustWindowRectExForDpi`, looked up at run time, with
+//!   `AdjustWindowRectEx` as the fallback), and only then shown; the
+//!   handler hears nothing of the sizes it went through.
+//! - `WM_CLOSE` becomes [`Event::CloseRequested`]
+//!   and nothing else: the application closes the window, or not.
+//! - `WM_GETMINMAXINFO` gives the system the frame's limits, in outer
+//!   pixels at the window's DPI; `WM_DPICHANGED` changes the scale first
+//!   and then takes the suggested rectangle, its inside kept within the
+//!   limits; a minimised window keeps its size and back buffer.
+//! - A key, character or wheel turn the handler does not use goes to the
+//!   system's default handling (`DefWindowProcW`), not to a parent, so
+//!   Alt+F4, Alt and F10 work as in any window.
+//!
+//! Drops ([`WindowOptions::with_file_drops`](crate::WindowOptions::with_file_drops)):
+//! a window that asks registers an `IDropTarget` of its own with
+//! `RegisterDragDrop` when it is made, only on a thread that is a
+//! single-threaded COM apartment, and revokes it in `WM_DESTROY`. An
+//! [`App`](crate::App) initialises OLE for its thread; a child window never
+//! does, so in a host whose main thread has no OLE it takes no drops. The
+//! file dialogs are `IFileOpenDialog` and `IFileSaveDialog`, shown modal to
+//! the window's top-level window; on a thread without COM they initialise
+//! it for the length of the call only.
 //!
 //! The parent must be a window of this process. A child of another
 //! process's window shares that process's input queue, so either process
@@ -66,11 +97,12 @@
 //!
 //! All of the crate's `unsafe` code is in this module.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 
@@ -106,27 +138,36 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreateCaret, CreateWindowExW, DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS,
-    DLGC_WANTTAB, DefWindowProcW, DestroyCaret, DestroyWindow, GetClassInfoExW, GetClientRect,
-    GetParent, GetSystemMetrics, GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer,
-    LoadCursorW, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOWNA,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos, SetTimer, SetWindowPos,
-    ShowWindow, USER_TIMER_MINIMUM, UnregisterClassW, WM_CAPTURECHANGED, WM_CHAR,
-    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    AdjustWindowRectEx, CREATESTRUCTW, CW_USEDEFAULT, CreateCaret, CreateWindowExW,
+    DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS, DLGC_WANTTAB, DefWindowProcW, DestroyCaret,
+    DestroyWindow, GetClassInfoExW, GetClientRect, GetParent, GetSystemMetrics,
+    GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer, LoadCursorW, MINMAXINFO,
+    RegisterClassExW, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, SW_SHOWNA,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos,
+    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_TIMER_MINIMUM, UnregisterClassW,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DPICHANGED_AFTERPARENT,
+    WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
     WM_PRINTCLIENT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
+use crate::app::{AppInner, AppWindowOptions, Frame, device_size};
 use crate::convert;
+use crate::dialog::{DialogKind, FileDialog};
 use crate::dispatch::{Origin, WindowHandler, drop_quietly};
 use crate::event::{Button, Event, Handled, KeyEvent, Modifiers, PhysicalSize, RawInput, TimerId};
 use crate::pixels::BackBuffer;
 use crate::pointer::ClickSettings;
 use crate::window::{Inner, Platform, WindowError, WindowOptions};
 
+pub(crate) mod app;
+mod com;
+mod dialog;
+mod drop;
 #[cfg(feature = "testing")]
 pub mod testing;
 
@@ -140,8 +181,24 @@ static ANCHOR: u8 = 0;
 /// `GetDpiForWindow`, found at run time because older systems lack it.
 type GetDpiForWindowFn = unsafe extern "system" fn(HWND) -> u32;
 
+/// `AdjustWindowRectExForDpi`, found at run time for the same reason.
+type AdjustForDpiFn = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> i32;
+
+/// What only a top-level window of an application has.
+struct TopLevel {
+    style: u32,
+    ex_style: u32,
+    adjust: Option<AdjustForDpiFn>,
+    /// Whether showing the window activates it.
+    activate: bool,
+}
+
 /// The Win32 side of a window.
 pub(crate) struct Win32Platform {
+    /// `Some` for an application's top-level window.
+    top_level: Option<TopLevel>,
+    /// The drop target the window registered, until `WM_DESTROY`.
+    drops: RefCell<Option<drop::Registration>>,
     /// The window, until it is destroyed.
     hwnd: Cell<HWND>,
     module: HINSTANCE,
@@ -390,16 +447,29 @@ pub(crate) fn set_state_slot(hwnd: HWND, value: isize) {
     }
 }
 
-/// Makes a window inside `parent` for the shared state built here.
-pub(crate) fn open(
-    parent: NonZeroUsize,
-    options: &WindowOptions,
-    handler: Box<dyn WindowHandler>,
-) -> Result<Rc<Inner>, WindowError> {
-    let parent: HWND = ptr::with_exposed_provenance_mut(parent.get());
-    check_parent(parent)?;
-    let module = this_module()?;
-    let platform = Win32Platform {
+/// Looks up `AdjustWindowRectExForDpi` in user32 (Windows 10 1607 and
+/// later).
+fn find_adjust_for_dpi() -> Option<AdjustForDpiFn> {
+    let user32: Vec<u16> = "user32.dll\0".encode_utf16().collect();
+    // SAFETY: the name is NUL-terminated; a module that is not loaded
+    // gives null.
+    let module = unsafe { GetModuleHandleW(user32.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+    // SAFETY: the procedure name is a NUL-terminated ASCII string.
+    let found = unsafe { GetProcAddress(module, c"AdjustWindowRectExForDpi".as_ptr().cast()) }?;
+    // SAFETY: AdjustWindowRectExForDpi is documented as
+    // `BOOL (LPRECT, DWORD, BOOL, DWORD, UINT)` with the system calling
+    // convention, which is this type.
+    Some(unsafe { mem::transmute::<unsafe extern "system" fn() -> isize, AdjustForDpiFn>(found) })
+}
+
+/// A platform for a window of this binary's class, not yet made.
+fn platform(module: HMODULE, top_level: Option<TopLevel>) -> Win32Platform {
+    Win32Platform {
+        top_level,
+        drops: RefCell::new(None),
         hwnd: Cell::new(ptr::null_mut()),
         module,
         class: class_name("Window", module),
@@ -409,14 +479,160 @@ pub(crate) fn open(
         passing: Cell::new(false),
         key_passed: Cell::new(false),
         caret: Cell::new(None),
-    };
-    let inner = Rc::new(Inner::new(Platform::Win32(platform), options, handler));
+    }
+}
+
+/// Makes a window inside `parent` for the shared state built here.
+pub(crate) fn open(
+    parent: NonZeroUsize,
+    options: &WindowOptions,
+    handler: Box<dyn WindowHandler>,
+) -> Result<Rc<Inner>, WindowError> {
+    let parent: HWND = ptr::with_exposed_provenance_mut(parent.get());
+    check_parent(parent)?;
+    let module = this_module()?;
+    let inner = Rc::new(Inner::new(
+        Platform::Win32(platform(module, None)),
+        options,
+        handler,
+    ));
+    let style =
+        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | if options.visible { WS_VISIBLE } else { 0 };
     let Platform::Win32(platform) = &inner.platform else {
         unreachable!("made just above");
     };
-    let style =
-        WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | if options.visible { WS_VISIBLE } else { 0 };
+    create(
+        &inner,
+        Creation {
+            parent,
+            style,
+            ex_style: 0,
+            at: (0, 0),
+            size: options.size,
+            title: &[0],
+        },
+    )?;
+    if let Some(scale) = platform.query_scale() {
+        inner.init_system_scale(scale);
+    }
+    inner.on_size(platform.client_size());
+    if options.accepts_drops {
+        platform.register_drops(&inner);
+    }
+    Ok(inner)
+}
 
+/// Makes an application's top-level window: hidden at first, sized for the
+/// scale of the monitor it lands on, then shown if asked.
+pub(crate) fn open_top_level(
+    options: &AppWindowOptions,
+    frame: Frame,
+    ole: bool,
+    app: Rc<AppInner>,
+    handler: Box<dyn WindowHandler>,
+) -> Result<Rc<Inner>, WindowError> {
+    let module = this_module()?;
+    let style = WS_CLIPCHILDREN
+        | if options.resizable {
+            WS_OVERLAPPEDWINDOW
+        } else {
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+        };
+    let top_level = TopLevel {
+        style,
+        ex_style: 0,
+        adjust: find_adjust_for_dpi(),
+        activate: options.activate,
+    };
+    let title = com::wide(&frame.title.borrow());
+    // A first guess at the size, at scale 1; the real one follows once the
+    // window knows its monitor.
+    let guess = frame.clamp(device_size(options.size, 1.0), 1.0);
+    let window_options = WindowOptions {
+        size: guess,
+        scale: None,
+        visible: options.visible,
+        focus_on_click: true,
+        accepts_drops: options.accepts_drops,
+    };
+    let inner = Rc::new(Inner::with_frame(
+        Platform::Win32(platform(module, Some(top_level))),
+        &window_options,
+        handler,
+        Some(frame),
+        Some(app),
+    ));
+    let Platform::Win32(platform) = &inner.platform else {
+        unreachable!("made just above");
+    };
+    // Nobody hears of the sizes and scales the window goes through while it
+    // is made: what it ends with is its starting state.
+    inner.quiet.set(true);
+    let at = options
+        .position
+        .map_or((CW_USEDEFAULT, CW_USEDEFAULT), |at| (at.x, at.y));
+    let outer = platform.outer_size(guess, 96);
+    let made = create(
+        &inner,
+        Creation {
+            parent: ptr::null_mut(),
+            style,
+            ex_style: 0,
+            at,
+            size: outer,
+            title: &title,
+        },
+    );
+    if let Err(error) = made {
+        inner.quiet.set(false);
+        return Err(error);
+    }
+    if let Some(scale) = platform.query_scale() {
+        inner.init_system_scale(scale);
+    }
+    let size = inner.frame.as_ref().map_or(guess, |frame| {
+        frame.clamp(device_size(options.size, inner.scale()), inner.scale())
+    });
+    let sized = platform.set_size(size);
+    inner.on_size(platform.client_size());
+    inner.quiet.set(false);
+    if let Err(error) = sized {
+        // Nobody had the window yet: its handler hears nothing of its end.
+        if let Some(handler) = inner.dispatcher().retire() {
+            drop_quietly(handler);
+        }
+        platform.destroy();
+        return Err(error);
+    }
+    if options.accepts_drops && ole {
+        platform.register_drops(&inner);
+    }
+    if options.visible {
+        platform.set_visible(true);
+    }
+    Ok(inner)
+}
+
+/// How to make a window.
+struct Creation<'a> {
+    /// The parent, or null for a top-level window.
+    parent: HWND,
+    style: u32,
+    ex_style: u32,
+    /// Where, in the parent's client pixels or the screen's.
+    at: (i32, i32),
+    /// The size of the whole window, frame included.
+    size: PhysicalSize,
+    /// The NUL-terminated title.
+    title: &'a [u16],
+}
+
+/// Makes the system window for `inner`, registering the class first.
+fn create(inner: &Rc<Inner>, how: Creation<'_>) -> Result<HWND, WindowError> {
+    let Platform::Win32(platform) = &inner.platform else {
+        unreachable!("a Win32 window");
+    };
+    let module = platform.module;
     let mut attempts = 0;
     let hwnd = loop {
         register_class(
@@ -428,21 +644,22 @@ pub(crate) fn open(
         )?;
         // The reference the window will hold, from WM_NCCREATE to
         // WM_NCDESTROY.
-        let raw = Rc::into_raw(Rc::clone(&inner));
+        let raw = Rc::into_raw(Rc::clone(inner));
         // SAFETY: the class is registered for `module` with a
-        // NUL-terminated name; `parent` is a window of this process; the
-        // creation parameter is the pointer the window procedure expects.
+        // NUL-terminated name; `parent` is null or a window of this
+        // process; the title is NUL-terminated; the creation parameter is
+        // the pointer the window procedure expects.
         let hwnd = unsafe {
             CreateWindowExW(
-                0,
+                how.ex_style,
                 platform.class.as_ptr(),
-                ptr::null(),
-                style,
-                0,
-                0,
-                options.size.width as i32,
-                options.size.height as i32,
-                parent,
+                how.title.as_ptr(),
+                how.style,
+                how.at.0,
+                how.at.1,
+                how.size.width as i32,
+                how.size.height as i32,
+                how.parent,
                 ptr::null_mut(),
                 module,
                 raw.cast::<c_void>(),
@@ -477,11 +694,7 @@ pub(crate) fn open(
     };
     debug_assert_eq!(platform.hwnd.get(), hwnd);
     platform.created.set(true);
-    if let Some(scale) = platform.query_scale() {
-        inner.init_system_scale(scale);
-    }
-    inner.on_size(platform.client_size());
-    Ok(inner)
+    Ok(hwnd)
 }
 
 /// The window procedure of every window of the class.
@@ -599,6 +812,45 @@ unsafe fn handle_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARA
             // once: the slot is clear, so no later message finds it.
             drop(unsafe { Rc::from_raw(raw) });
             default()
+        }
+        WM_DESTROY => {
+            // OLE wants the drop target revoked while the window exists.
+            let drops = platform.drops.borrow_mut().take();
+            if let Some(drops) = drops {
+                drops.revoke();
+            }
+            default()
+        }
+        WM_CLOSE if platform.top_level.is_some() => {
+            // The application decides; the window stays until it closes it.
+            inner.close_requested();
+            0
+        }
+        WM_GETMINMAXINFO if platform.top_level.is_some() => {
+            let info = lparam as *mut MINMAXINFO;
+            if let (Some(frame), false) = (inner.frame.as_ref(), info.is_null()) {
+                // SAFETY: for WM_GETMINMAXINFO, `lparam` points to the
+                // system's MINMAXINFO, alive and ours to fill for the
+                // length of the message.
+                let info = unsafe { &mut *info };
+                platform.limit_tracking(frame, inner.scale(), info);
+            }
+            0
+        }
+        WM_DPICHANGED if platform.top_level.is_some() => {
+            let dpi = (wparam & 0xFFFF) as u32;
+            let suggested = lparam as *const RECT;
+            if let (Some(scale), false) = (convert::scale_from_dpi(dpi), suggested.is_null()) {
+                // SAFETY: for WM_DPICHANGED, `lparam` points to the
+                // suggested window rectangle, alive for the message.
+                let suggested = unsafe { *suggested };
+                platform.move_to_dpi(&inner, dpi, scale, suggested);
+            }
+            0
+        }
+        WM_SIZE if platform.top_level.is_some() && wparam == SIZE_MINIMIZED as usize => {
+            // A minimised window keeps its size and its back buffer.
+            0
         }
         WM_ERASEBKGND => 1,
         WM_PAINT => {
@@ -856,11 +1108,151 @@ impl Win32Platform {
         }
     }
 
-    /// Sends the message `origin` to the parent window. Text goes as the
-    /// character the handler declined, one `WM_CHAR` per UTF-16 unit, so a
-    /// surrogate pair reaches the parent whole.
+    /// Registers the window as a drop target, if OLE takes it.
+    fn register_drops(&self, inner: &Rc<Inner>) {
+        let Some(hwnd) = self.hwnd() else { return };
+        let registration = drop::Registration::register(hwnd, inner);
+        inner.drops.set(registration.is_some());
+        *self.drops.borrow_mut() = registration;
+    }
+
+    /// The drop target the window registered, as a COM pointer, for tests.
+    #[cfg(feature = "testing")]
+    pub(crate) fn drop_target(&self) -> Option<*mut c_void> {
+        self.drops.borrow().as_ref().map(drop::Registration::target)
+    }
+
+    /// The window's DPI now.
+    fn dpi(&self) -> u32 {
+        self.query_dpi().unwrap_or(96)
+    }
+
+    /// The outer size of a top-level window whose inside is `client`, at
+    /// `dpi`; `client` itself for a child window.
+    fn outer_size(&self, client: PhysicalSize, dpi: u32) -> PhysicalSize {
+        let Some(top) = &self.top_level else {
+            return client;
+        };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: client.width.min(i32::MAX as u32) as i32,
+            bottom: client.height.min(i32::MAX as u32) as i32,
+        };
+        // SAFETY: `rect` is a valid place; the styles are the window's.
+        let ok = unsafe {
+            match top.adjust {
+                Some(adjust) => adjust(&mut rect, top.style, 0, top.ex_style, dpi),
+                None => AdjustWindowRectEx(&mut rect, top.style, 0, top.ex_style),
+            }
+        };
+        if ok == 0 {
+            return client;
+        }
+        PhysicalSize::new(
+            (i64::from(rect.right) - i64::from(rect.left)).max(1) as u32,
+            (i64::from(rect.bottom) - i64::from(rect.top)).max(1) as u32,
+        )
+    }
+
+    /// Fills in how small and how large the person may make the window, in
+    /// outer pixels, from the frame's limits; the system's own limits stay
+    /// where the frame sets none.
+    fn limit_tracking(&self, frame: &Frame, scale: f64, info: &mut MINMAXINFO) {
+        let dpi = self.dpi();
+        let (min, max) = frame.limits(scale);
+        if frame.min.is_some() {
+            let outer = self.outer_size(min, dpi);
+            info.ptMinTrackSize = POINT {
+                x: outer.width as i32,
+                y: outer.height as i32,
+            };
+        }
+        if frame.max.is_some() {
+            let outer = self.outer_size(max, dpi);
+            info.ptMaxTrackSize = POINT {
+                x: outer.width as i32,
+                y: outer.height as i32,
+            };
+        }
+    }
+
+    /// The window moved to a monitor of `dpi`: the scale changes, then the
+    /// window takes the rectangle the system suggests, its inside within
+    /// the frame's limits.
+    fn move_to_dpi(&self, inner: &Inner, dpi: u32, scale: f64, suggested: RECT) {
+        let Some(hwnd) = self.hwnd() else { return };
+        let frame = self.outer_size(PhysicalSize::new(0, 0), dpi);
+        let width = (i64::from(suggested.right) - i64::from(suggested.left)).max(0) as u32;
+        let height = (i64::from(suggested.bottom) - i64::from(suggested.top)).max(0) as u32;
+        let client = PhysicalSize::new(
+            width.saturating_sub(frame.width).max(1),
+            height.saturating_sub(frame.height).max(1),
+        );
+        let client = inner.on_dpi_changed(scale, client);
+        let outer = self.outer_size(client, dpi);
+        // SAFETY: our own window; the size messages this sends come back to
+        // our window procedure.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                ptr::null_mut(),
+                suggested.left,
+                suggested.top,
+                outer.width as i32,
+                outer.height as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    pub(crate) fn set_title(&self, title: &str) -> Result<(), WindowError> {
+        let hwnd = self.hwnd().ok_or(WindowError::Closed)?;
+        let title = com::wide(title);
+        // SAFETY: our own window and a NUL-terminated title the system
+        // copies.
+        if unsafe { SetWindowTextW(hwnd, title.as_ptr()) } == 0 {
+            return Err(last_error("SetWindowTextW"));
+        }
+        Ok(())
+    }
+
+    /// Destroys the window now; its WM_NCDESTROY tells the shared state.
+    /// The class stays registered until the window's value is dropped.
+    pub(crate) fn close(&self) {
+        if let Some(hwnd) = self.hwnd() {
+            // SAFETY: our own window, destroyed on its own thread.
+            unsafe {
+                DestroyWindow(hwnd);
+            }
+        }
+    }
+
+    pub(crate) fn dialog(
+        &self,
+        kind: DialogKind,
+        dialog: &FileDialog,
+    ) -> Result<Option<Vec<PathBuf>>, WindowError> {
+        let hwnd = self.hwnd().ok_or(WindowError::Closed)?;
+        dialog::show(hwnd, kind, dialog)
+    }
+
+    /// Sends the message `origin` to the parent window, or, for a
+    /// top-level window, gives it to the system's default handling, which
+    /// turns Alt+F4 into a close request and Alt and F10 into the window
+    /// menu. Text goes as the character the handler declined, one
+    /// `WM_CHAR` per UTF-16 unit, so a surrogate pair reaches the parent
+    /// whole.
     fn pass_on(&self, origin: Origin, event: Option<&Event>) {
         let Some(hwnd) = self.hwnd() else { return };
+        if self.top_level.is_some() {
+            // SAFETY: the system's own message, with the parameters it
+            // came with, to the default handling of our own window.
+            unsafe {
+                DefWindowProcW(hwnd, origin.message, origin.wparam, origin.lparam);
+            }
+            return;
+        }
         if self.passing.get() {
             return;
         }
@@ -925,8 +1317,11 @@ impl Win32Platform {
         )
     }
 
+    /// Makes the window's inside `size`: the whole window, for a child,
+    /// and the inside within the frame, for a top-level window.
     pub(crate) fn set_size(&self, size: PhysicalSize) -> Result<PhysicalSize, WindowError> {
         let hwnd = self.hwnd().ok_or(WindowError::Closed)?;
+        let outer = self.outer_size(size, self.dpi());
         // SAFETY: `hwnd` is our window. The size messages this sends come
         // back to our window procedure, which queues them for a running
         // handler.
@@ -936,8 +1331,8 @@ impl Win32Platform {
                 ptr::null_mut(),
                 0,
                 0,
-                size.width as i32,
-                size.height as i32,
+                outer.width as i32,
+                outer.height as i32,
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
@@ -949,9 +1344,15 @@ impl Win32Platform {
 
     pub(crate) fn set_visible(&self, visible: bool) {
         let Some(hwnd) = self.hwnd() else { return };
+        let show = match (&self.top_level, visible) {
+            (_, false) => SW_HIDE,
+            (Some(top), true) if top.activate => SW_SHOW,
+            (Some(_), true) => SW_SHOWNOACTIVATE,
+            (None, true) => SW_SHOWNA,
+        };
         // SAFETY: `hwnd` is our window.
         unsafe {
-            ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE });
+            ShowWindow(hwnd, show);
         }
     }
 
@@ -1198,6 +1599,11 @@ impl Win32Platform {
 
     /// The system's scale for the window: its DPI over 96.
     fn query_scale(&self) -> Option<f64> {
+        convert::scale_from_dpi(self.query_dpi()?)
+    }
+
+    /// The system's DPI for the window.
+    fn query_dpi(&self) -> Option<u32> {
         let hwnd = self.hwnd()?;
         let dpi = match self.get_dpi {
             // SAFETY: the function was found under its documented name and
@@ -1221,7 +1627,7 @@ impl Win32Platform {
             }
             u32::try_from(dpi).unwrap_or(0)
         };
-        convert::scale_from_dpi(dpi)
+        (dpi != 0).then_some(dpi)
     }
 
     pub(crate) fn destroy(&self) {

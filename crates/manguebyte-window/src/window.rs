@@ -3,14 +3,18 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use manguebyte_gfx::{IRect, MAX_SIDE, Pixmap, Point, Size};
 use manguebyte_plugin::editor::{ParentWindow, WindowApi, checked_scale};
 
+use crate::app::{AppInner, Frame};
 use crate::convert::{self, Utf16Joiner};
 use crate::damage::Damage;
+use crate::dialog::{self, DialogKind, FileDialog};
 use crate::dispatch::{Dispatcher, Origin, WindowHandler, drop_quietly};
+use crate::drag::{DragData, DragState, RawDrag};
 use crate::event::{Event, Handled, PhysicalPoint, PhysicalSize, PointerEvent, RawInput, TimerId};
 use crate::headless::{Headless, HeadlessPlatform};
 use crate::pixels::BackBuffer;
@@ -245,6 +249,122 @@ macro_rules! window_methods {
         pub fn write_clipboard_text(&self, text: &str) -> Result<(), WindowError> {
             self.inner().write_clipboard(text)
         }
+
+        /// Whether this is an application window, made by
+        /// [`App::open_window`](crate::App::open_window), rather than a
+        /// child of a host's window.
+        pub fn is_app_window(&self) -> bool {
+            self.inner().frame.is_some()
+        }
+
+        /// The title of an application window, or `None` for a child
+        /// window.
+        pub fn title(&self) -> Option<String> {
+            self.inner()
+                .frame
+                .as_ref()
+                .map(|frame| frame.title.borrow().clone())
+        }
+
+        /// Gives an application window a new title. Text after a NUL
+        /// character is not shown.
+        ///
+        /// # Errors
+        ///
+        /// [`WindowError::NotAppWindow`] for a child window,
+        /// [`WindowError::Closed`], or [`WindowError::Platform`].
+        pub fn set_title(&self, title: &str) -> Result<(), WindowError> {
+            self.inner().set_title(title)
+        }
+
+        /// The smallest and the largest size an application window may
+        /// have, in device pixels at its scale now, or `None` for a child
+        /// window. [`resize`](Self::resize) keeps within them, and so does
+        /// the person dragging the frame of a resizable window.
+        pub fn size_limits(&self) -> Option<(PhysicalSize, PhysicalSize)> {
+            let inner = self.inner();
+            inner
+                .frame
+                .as_ref()
+                .map(|frame| frame.limits(inner.scale()))
+        }
+
+        /// Destroys the system window now, as the owner of an application
+        /// window does on a close request it agrees to. The handler hears
+        /// [`Event::Closed`], after this returns when asked from inside
+        /// the handler, and the window refuses every request from then on;
+        /// the value still has to be dropped. Nothing happens to a window
+        /// that is closed already.
+        pub fn close(&self) {
+            self.inner().close();
+        }
+
+        /// Whether files and text dragged onto the window reach its
+        /// handler: the window was made to take them
+        /// ([`WindowOptions::with_file_drops`],
+        /// [`AppWindowOptions::with_file_drops`](crate::AppWindowOptions::with_file_drops))
+        /// and the system took it as a drop target. On Win32 that needs OLE
+        /// initialised on the thread, which an [`App`](crate::App) does for
+        /// its own and a child window never does for a host's.
+        pub fn accepts_drops(&self) -> bool {
+            self.inner().drops.get()
+        }
+
+        /// What the drag over the window carries, from its
+        /// [`Event::DragEnter`] until its [`Event::Drop`] or
+        /// [`Event::DragLeave`] has been handled; `None` otherwise.
+        pub fn drag_data(&self) -> Option<Rc<DragData>> {
+            self.inner().drag_data()
+        }
+
+        /// Asks the person for a file to open, or several with
+        /// [`FileDialog::multiple`], in the system's dialog, modal to the
+        /// window's top-level window. Returns the files chosen, or `None`
+        /// if the person cancelled.
+        ///
+        /// The call returns when the dialog closes. Meanwhile the window
+        /// goes on answering the system from its back buffer, and events
+        /// for a handler that is the caller wait for it to return, merged
+        /// as the crate's documentation on reentrancy says. A headless
+        /// window answers what the test scripted
+        /// ([`Headless::answer_next_dialog`](crate::Headless::answer_next_dialog)).
+        ///
+        /// # Errors
+        ///
+        /// [`WindowError::Closed`], [`WindowError::Busy`] while another
+        /// dialog of the window is open, or [`WindowError::Platform`] if
+        /// the system cannot show the dialog.
+        pub fn open_files(&self, dialog: &FileDialog) -> Result<Option<Vec<PathBuf>>, WindowError> {
+            self.inner().dialog(DialogKind::OpenFiles, dialog)
+        }
+
+        /// Asks the person for a folder, as [`open_files`](Self::open_files)
+        /// asks for files.
+        ///
+        /// # Errors
+        ///
+        /// As [`open_files`](Self::open_files).
+        pub fn pick_folder(&self, dialog: &FileDialog) -> Result<Option<PathBuf>, WindowError> {
+            Ok(self
+                .inner()
+                .dialog(DialogKind::PickFolder, dialog)?
+                .and_then(|paths| paths.into_iter().next()))
+        }
+
+        /// Asks the person where to save a file, offering
+        /// [`FileDialog::file_name`], as [`open_files`](Self::open_files)
+        /// asks for files. The system asks the person before an existing
+        /// file is chosen.
+        ///
+        /// # Errors
+        ///
+        /// As [`open_files`](Self::open_files).
+        pub fn save_file(&self, dialog: &FileDialog) -> Result<Option<PathBuf>, WindowError> {
+            Ok(self
+                .inner()
+                .dialog(DialogKind::SaveFile, dialog)?
+                .and_then(|paths| paths.into_iter().next()))
+        }
     };
 }
 
@@ -271,17 +391,21 @@ pub struct WindowOptions {
     pub visible: bool,
     /// Whether a press takes the keyboard for the window.
     pub focus_on_click: bool,
+    /// Whether files and text dragged onto the window reach its handler
+    /// (see [`with_file_drops`](Self::with_file_drops)).
+    pub accepts_drops: bool,
 }
 
 impl WindowOptions {
-    /// A visible window of `size` that takes the keyboard when pressed and
-    /// uses the system's scale.
+    /// A visible window of `size` that takes the keyboard when pressed,
+    /// uses the system's scale and takes no drops.
     pub fn new(size: PhysicalSize) -> Self {
         WindowOptions {
             size,
             scale: None,
             visible: true,
             focus_on_click: true,
+            accepts_drops: false,
         }
     }
 
@@ -300,6 +424,20 @@ impl WindowOptions {
     /// The same, but a press leaves the keyboard where it is.
     pub fn without_focus_on_click(mut self) -> Self {
         self.focus_on_click = false;
+        self
+    }
+
+    /// The same, taking files and text dragged onto it: the handler hears
+    /// [`Event::DragEnter`], [`Event::DragOver`], [`Event::DragLeave`] and
+    /// [`Event::Drop`]. Off by default, because a child window that takes
+    /// drops hides whatever drop target the host has under it.
+    ///
+    /// On Win32 the window registers with OLE as a drop target, which needs
+    /// OLE initialised on the thread. A child window never initialises it
+    /// itself, because the thread is the host's: where the host has not,
+    /// the window takes no drops, and [`Window::accepts_drops`] says so.
+    pub fn with_file_drops(mut self) -> Self {
+        self.accepts_drops = true;
         self
     }
 }
@@ -324,6 +462,11 @@ pub enum WindowError {
     /// The window is in the middle of the same operation: a request made
     /// from inside one that cannot be nested.
     Busy,
+    /// What was asked only an application window can do.
+    NotAppWindow,
+    /// Options no window can have, such as a size that is not a positive
+    /// number or a minimum larger than the maximum.
+    InvalidOptions(&'static str),
     /// The system refused.
     Platform {
         /// The system call that failed.
@@ -349,6 +492,8 @@ impl fmt::Display for WindowError {
             WindowError::InvalidPeriod => f.write_str("a timer period must be at least 1 ms"),
             WindowError::Closed => f.write_str("the window was destroyed"),
             WindowError::Busy => f.write_str("the window is busy with the same request"),
+            WindowError::NotAppWindow => f.write_str("only an application window can do that"),
+            WindowError::InvalidOptions(why) => write!(f, "invalid window options: {why}"),
             WindowError::Platform { call, code } => write!(f, "{call} failed with error {code}"),
         }
     }
@@ -525,6 +670,47 @@ impl Platform {
             Platform::Win32(p) => p.show_caret(caret),
         }
     }
+
+    fn set_title(&self, title: &str) -> Result<(), WindowError> {
+        match self {
+            Platform::Headless(_) => {
+                let _ = title;
+                Ok(())
+            }
+            #[cfg(windows)]
+            Platform::Win32(p) => p.set_title(title),
+        }
+    }
+
+    /// Destroys the system window; the backend reports it through
+    /// [`Inner::on_destroyed`], from inside this call.
+    fn close(&self, inner: &Inner) {
+        match self {
+            Platform::Headless(p) => {
+                p.destroy();
+                inner.on_destroyed();
+            }
+            #[cfg(windows)]
+            Platform::Win32(p) => {
+                let _ = inner;
+                p.close();
+            }
+        }
+    }
+
+    /// Shows a dialog and returns the paths chosen, or `None` if it was
+    /// cancelled.
+    fn dialog(
+        &self,
+        kind: DialogKind,
+        dialog: &FileDialog,
+    ) -> Result<Option<Vec<PathBuf>>, WindowError> {
+        match self {
+            Platform::Headless(p) => Ok(p.dialog(kind, dialog)),
+            #[cfg(windows)]
+            Platform::Win32(p) => p.dialog(kind, dialog),
+        }
+    }
 }
 
 /// What a window and its backend share.
@@ -546,6 +732,22 @@ pub(crate) struct Inner {
     pub(crate) wants_all_keys: Cell<bool>,
     /// Where the text caret is, in device pixels, while text is typed.
     caret: Cell<Option<IRect>>,
+    /// The title and size limits of an application window; `None` for a
+    /// child window.
+    pub(crate) frame: Option<Frame>,
+    /// Whether drags reach the window: it asked for them and, on Win32,
+    /// the system took it as a drop target.
+    pub(crate) drops: Cell<bool>,
+    /// The drag over the window, if any.
+    drag: RefCell<Option<DragState>>,
+    /// Set while a dialog of the window is open.
+    dialog_open: Cell<bool>,
+    /// Set while a system window is being made: changes of size and scale
+    /// are taken without events, as the window's starting state.
+    pub(crate) quiet: Cell<bool>,
+    /// The application of an application window, kept for as long as the
+    /// window is, so that the application's thread state outlives it.
+    _app: Option<Rc<AppInner>>,
 }
 
 /// Checks the options a window is made with.
@@ -566,6 +768,18 @@ impl Inner {
         options: &WindowOptions,
         handler: Box<dyn WindowHandler>,
     ) -> Self {
+        Inner::with_frame(platform, options, handler, None, None)
+    }
+
+    /// The shared state of an application window, or of a child window
+    /// when `frame` and `app` are `None`.
+    pub(crate) fn with_frame(
+        platform: Platform,
+        options: &WindowOptions,
+        handler: Box<dyn WindowHandler>,
+        frame: Option<Frame>,
+        app: Option<Rc<AppInner>>,
+    ) -> Self {
         let mut back = BackBuffer::empty();
         back.resize(options.size);
         Inner {
@@ -585,7 +799,144 @@ impl Inner {
             focus_on_click: options.focus_on_click,
             wants_all_keys: Cell::new(false),
             caret: Cell::new(None),
+            frame,
+            drops: Cell::new(false),
+            drag: RefCell::new(None),
+            dialog_open: Cell::new(false),
+            quiet: Cell::new(false),
+            _app: app,
         }
+    }
+
+    fn set_title(&self, title: &str) -> Result<(), WindowError> {
+        let frame = self.frame.as_ref().ok_or(WindowError::NotAppWindow)?;
+        self.check_open()?;
+        let shown = title.split('\0').next().unwrap_or_default();
+        self.platform.set_title(shown)?;
+        *frame.title.borrow_mut() = shown.to_owned();
+        Ok(())
+    }
+
+    fn close(&self) {
+        if self.is_open() {
+            self.platform.close(self);
+        }
+    }
+
+    /// The person asked to close the window. Only an application window
+    /// hears of it.
+    pub(crate) fn close_requested(&self) -> Option<Handled> {
+        if self.frame.is_some() {
+            self.dispatch(Event::CloseRequested)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn dialog(
+        &self,
+        kind: DialogKind,
+        dialog: &FileDialog,
+    ) -> Result<Option<Vec<PathBuf>>, WindowError> {
+        self.check_open()?;
+        if self.dialog_open.replace(true) {
+            return Err(WindowError::Busy);
+        }
+        let result = self.platform.dialog(kind, dialog);
+        self.dialog_open.set(false);
+        Ok(dialog::chosen(kind, dialog, result?))
+    }
+
+    pub(crate) fn drag_data(&self) -> Option<Rc<DragData>> {
+        let drag = self.drag.try_borrow().ok()?;
+        drag.as_ref().map(|state| Rc::clone(&state.data))
+    }
+
+    /// Whether the handler heard of the drag over the window.
+    fn drag_told(&self) -> Option<bool> {
+        self.drag.borrow().as_ref().map(|state| state.told)
+    }
+
+    /// Delivers a drag event now, if the handler is free to answer: a
+    /// drag's answer is needed before the system's call returns, so it
+    /// cannot wait. Returns the answer, or `None` if the handler was not
+    /// asked.
+    fn drag_tell(&self, event: Event) -> Option<Handled> {
+        if !self.is_open() || self.dispatcher.busy() || self.dispatcher.poisoned() {
+            return None;
+        }
+        if matches!(event, Event::DragEnter(_)) {
+            if let Some(state) = self.drag.borrow_mut().as_mut() {
+                state.told = true;
+            }
+        }
+        self.dispatch(event)
+    }
+
+    /// A drag over the window, as the system reports it. Returns whether
+    /// the handler takes it: [`Handled::No`] when the window takes no
+    /// drops, the drag carries nothing, or the handler could not be asked
+    /// because it is running.
+    pub(crate) fn drag(&self, drag: RawDrag) -> Handled {
+        if !self.is_open() || !self.drops.get() {
+            return Handled::No;
+        }
+        let answer = match drag {
+            RawDrag::Enter {
+                at,
+                data,
+                modifiers,
+            } => {
+                // An enter with no leave before it: the old drag is over.
+                if self.drag.replace(None).is_some_and(|state| state.told) {
+                    self.dispatch(Event::DragLeave);
+                }
+                if data.is_empty() {
+                    return Handled::No;
+                }
+                *self.drag.borrow_mut() = Some(DragState {
+                    data: Rc::new(data),
+                    told: false,
+                });
+                self.drag_tell(Event::DragEnter(self.pointer_event(at, modifiers)))
+            }
+            RawDrag::Over { at, modifiers } => {
+                let pointer = self.pointer_event(at, modifiers);
+                match self.drag_told() {
+                    None => None,
+                    Some(true) => self.drag_tell(Event::DragOver(pointer)),
+                    // The handler was running when the drag came in.
+                    Some(false) => self.drag_tell(Event::DragEnter(pointer)),
+                }
+            }
+            RawDrag::Leave => {
+                // A leave needs no answer, so it may wait for the handler.
+                if self.drag.replace(None).is_some_and(|state| state.told) {
+                    self.dispatch(Event::DragLeave);
+                }
+                None
+            }
+            RawDrag::Drop { at, modifiers } => {
+                let pointer = self.pointer_event(at, modifiers);
+                if self.drag_told() == Some(false) {
+                    let _ = self.drag_tell(Event::DragEnter(pointer));
+                }
+                let answer = match self.drag_told() {
+                    Some(true) => {
+                        let answer = self.drag_tell(Event::Drop(pointer));
+                        if answer.is_none() {
+                            // Busy now: it hears the drag went away.
+                            self.dispatch(Event::DragLeave);
+                        }
+                        answer
+                    }
+                    _ => None,
+                };
+                self.drag.replace(None);
+                answer
+            }
+        };
+        answer.unwrap_or(Handled::No)
     }
 
     pub(crate) fn read_clipboard(&self) -> Result<Option<String>, WindowError> {
@@ -691,6 +1042,10 @@ impl Inner {
         if size.width > MAX_SIDE || size.height > MAX_SIDE {
             return Err(WindowError::InvalidSize(size));
         }
+        let size = match &self.frame {
+            Some(frame) => frame.clamp(size, self.scale()),
+            None => size,
+        };
         let actual = self.platform.set_size(self, size)?;
         self.on_size(actual);
         Ok(())
@@ -707,6 +1062,12 @@ impl Inner {
         }
         if let Ok(mut back) = self.back.try_borrow_mut() {
             back.resize(size);
+        }
+        if self.quiet.get() {
+            // The starting size of a window being made: all of it waits to
+            // be drawn, and nobody is told.
+            self.pending.set(Damage::of(size.bounds()));
+            return;
         }
         // What became visible: a strip on the right and one at the bottom.
         if size.width > old.width {
@@ -730,7 +1091,6 @@ impl Inner {
     }
 
     /// The system's scale when the window is made; no event.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn init_system_scale(&self, scale: f64) {
         if checked_scale(scale).is_some() {
             self.system_scale.set(scale);
@@ -745,10 +1105,24 @@ impl Inner {
         }
         let before = self.scale();
         self.system_scale.set(scale);
-        if self.scale() != before {
+        if self.scale() != before && !self.quiet.get() {
             self.scale_changed();
         }
         true
+    }
+
+    /// The system moved an application window to a monitor of `scale`, and
+    /// suggests `suggested` for its size there: what Win32's
+    /// `WM_DPICHANGED` says. The scale changes first, then the size, within
+    /// the window's limits at the new scale.
+    pub(crate) fn on_dpi_changed(&self, scale: f64, suggested: PhysicalSize) -> PhysicalSize {
+        if !self.on_system_scale(scale) {
+            return self.size();
+        }
+        match &self.frame {
+            Some(frame) => frame.clamp(suggested, self.scale()),
+            None => suggested,
+        }
     }
 
     fn set_host_scale(&self, scale: Option<f64>) -> Result<(), WindowError> {
@@ -981,6 +1355,7 @@ impl Inner {
         self.pointer.borrow_mut().reset();
         self.focused.set(false);
         self.caret.set(None);
+        self.drag.replace(None);
         self.dispatcher.dispatch(&self.cx(), Event::Closed, None);
     }
 }
@@ -1090,8 +1465,14 @@ impl Window {
             &options,
             Box::new(handler),
         ));
+        inner.drops.set(options.accepts_drops);
         let headless = Headless::new(Rc::downgrade(&inner));
         Ok((Window { inner }, headless))
+    }
+
+    /// A window over shared state a backend made.
+    pub(crate) fn from_inner(inner: Rc<Inner>) -> Window {
+        Window { inner }
     }
 
     /// The window as its handler sees it.
@@ -1103,6 +1484,14 @@ impl Window {
     /// keeps for its copy and paste. It holds the window weakly.
     pub fn clipboard(&self) -> crate::Clipboard {
         crate::Clipboard::new(&self.inner)
+    }
+
+    /// A handle that shows the system's file dialogs for this window, which
+    /// an interface keeps for its buttons: the same as
+    /// [`open_files`](Self::open_files) and its siblings. It holds the
+    /// window weakly.
+    pub fn dialogs(&self) -> crate::Dialogs {
+        crate::Dialogs::new(&self.inner)
     }
 
     /// Whether the handler panicked. The window then delivers nothing more;
@@ -1165,6 +1554,12 @@ impl WindowCx<'_> {
     #[cfg(test)]
     pub(crate) fn dispatcher_for_tests(&self) -> &Dispatcher {
         self.inner.dispatcher()
+    }
+
+    /// The backend under the window, for the testing helpers.
+    #[cfg(all(windows, feature = "testing"))]
+    pub(crate) fn platform(&self) -> &Platform {
+        &self.inner.platform
     }
 
     window_methods!();

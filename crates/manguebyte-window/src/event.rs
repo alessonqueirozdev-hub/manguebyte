@@ -169,9 +169,37 @@ pub enum Event {
     /// again, even if the system had already queued its tick.
     Timer(TimerId),
     /// The window was destroyed by someone else, normally because the host
-    /// destroyed its parent. Nothing arrives after this, and the window
-    /// refuses every request; dropping it is still required and safe.
+    /// destroyed its parent, or by its own [`close`](crate::Window::close).
+    /// Nothing arrives after this, and the window refuses every request;
+    /// dropping it is still required and safe.
     Closed,
+    /// The person asked to close an application window: its close button,
+    /// Alt+F4, its system menu or the taskbar. The window stays open; the
+    /// handler closes it with [`close`](crate::WindowCx::close) if it
+    /// agrees. A child window never hears this.
+    CloseRequested,
+    /// Something dragged from another window or program came over the
+    /// window, at `pointer`; [`drag_data`](crate::WindowCx::drag_data)
+    /// says what it carries. [`Handled::Yes`] takes it (the system shows
+    /// that it would be copied), [`Handled::No`] refuses it. Only a window
+    /// made to take drops hears this, and only of drags that carry files
+    /// or text.
+    ///
+    /// Unlike other events, a drag event is never kept for a handler that
+    /// is running (the system needs its answer at once): the drag is
+    /// refused instead, and the handler hears of it at the next move once
+    /// it is free.
+    DragEnter(PointerEvent),
+    /// The drag moved over the window. The answer is as for
+    /// [`DragEnter`](Event::DragEnter), and may change as the pointer
+    /// moves.
+    DragOver(PointerEvent),
+    /// The drag left the window, or was cancelled.
+    DragLeave,
+    /// What was dragged was dropped at `pointer`. [`Handled::Yes`] says the
+    /// handler took it. The drag's data can still be read while this is
+    /// handled.
+    Drop(PointerEvent),
 }
 
 /// Whether a handler used an event.
@@ -181,8 +209,9 @@ pub enum Event {
 /// that the host's own shortcuts keep working while the editor has the
 /// keyboard. On Win32 the window sends the same message to its parent.
 /// This holds for an event that had to wait for a running handler too: it
-/// goes on, or not, when the handler answers it. Every other event ignores
-/// the answer.
+/// goes on, or not, when the handler answers it. For a drag
+/// ([`Event::DragEnter`], [`Event::DragOver`], [`Event::Drop`]) the answer
+/// takes or refuses what is dragged. Every other event ignores the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Handled {
     /// It did.

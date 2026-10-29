@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-window"
-description = "Platform windows for the Manguebyte user interface: a child window seam, a headless backend for tests and a Win32 backend."
+description = "Platform windows for the Manguebyte user interface: child windows for plugin editors, application windows and their loop, file drops and file dialogs, with a headless backend for tests and a Win32 backend."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,18 +21,26 @@ manguebyte-plugin.workspace = true
 # and is already in Cargo.lock. Only the modules named here are compiled:
 # the clipboard needs `DataExchange` and `Memory`, and placing an input
 # method's windows at the caret needs `Ime` (functions of imm32.dll, which
-# every process with windows has loaded).
+# every process with windows has loaded). Application windows (ADR 0009)
+# add `Com`, `Com_StructuredStorage` and `Ole` for drops and OLE's set-up,
+# and `Shell` and `Shell_Common` for dropped file lists and the file
+# dialogs; the COM interfaces themselves are declared in `win32::com`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

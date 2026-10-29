@@ -100,6 +100,69 @@ fn a_thousand_windows_leave_no_objects_and_no_class_behind() {
     assert!(parent.is_open());
 }
 
+/// One application window's whole life: opened hidden with drops, shown,
+/// painted, dragged onto, asked to close, closed and dropped.
+fn app_cycle(app: &manguebyte_window::App) {
+    use manguebyte_gfx::Size;
+    use manguebyte_window::{AppWindowOptions, DragData};
+    let window = app
+        .open_window(
+            AppWindowOptions::new("Cycle", Size::new(64.0, 48.0))
+                .hidden()
+                .without_activation()
+                .with_file_drops(),
+            |cx: &WindowCx<'_>, event| {
+                match event {
+                    Event::Paint(damage) => {
+                        let mut frame = Pixmap::new(64, 48).expect("small");
+                        frame.fill(Color::rgb(40, 50, 60));
+                        cx.present(&frame, damage.rects()).expect("open");
+                    }
+                    Event::CloseRequested => cx.close(),
+                    _ => {}
+                }
+                Handled::Yes
+            },
+        )
+        .expect("an application window");
+    let hwnd = window.raw_handle().expect("open");
+    window.set_visible(true).expect("open");
+    testing::update(hwnd);
+    let drag = testing::Drag::new(&window.cx(), &DragData::files([r"C:\cycle.wav"]))
+        .expect("a drop target");
+    let at = PhysicalPoint::new(5, 6);
+    assert_ne!(drag.enter(at, 0, 1), 0);
+    assert_ne!(drag.drop_at(at, 0, 1), 0);
+    testing::send(hwnd, Message::Close);
+    assert!(!window.is_open());
+    drop(drag);
+    drop(window);
+    assert!(!testing::is_window(hwnd));
+}
+
+#[test]
+fn three_hundred_application_windows_leave_no_objects_and_no_class_behind() {
+    let _serial = serial();
+    let app = manguebyte_window::App::new().expect("Win32");
+    for _ in 0..20 {
+        app_cycle(&app);
+    }
+    testing::pump(std::time::Duration::from_millis(20));
+    let before = testing::gui_resources();
+    for _ in 0..300 {
+        app_cycle(&app);
+    }
+    testing::pump(std::time::Duration::from_millis(20));
+    let after = testing::gui_resources();
+    eprintln!("GDI and USER objects: {before:?} before 300 windows, {after:?} after");
+    assert!(
+        after.gdi <= before.gdi && after.user <= before.user,
+        "{before:?} before 300 windows, {after:?} after"
+    );
+    assert!(!testing::class_registered());
+    assert_eq!(app.open_windows(), 0);
+}
+
 #[test]
 fn a_window_outlives_its_parent() {
     let _serial = serial();

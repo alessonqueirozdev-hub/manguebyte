@@ -70,6 +70,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GWL_STYLE, GetWindowLongW, GetWindowRect, GetWindowTextW, MINMAXINFO, SC_CLOSE, WM_CLOSE,
+    WM_DPICHANGED, WM_GETMINMAXINFO, WM_SYSCOMMAND, WS_THICKFRAME,
+};
 
 #[cfg(not(target_pointer_width = "64"))]
 use windows_sys::Win32::UI::WindowsAndMessaging::{GCL_HMODULE, GetClassLongW};
@@ -612,6 +616,12 @@ pub enum Message {
         /// The virtual-key code.
         vk: u16,
     },
+    /// `WM_CLOSE`, as the close button of a top-level window sends.
+    Close,
+    /// `WM_SYSCOMMAND` with `SC_CLOSE`, as the window menu, Alt+F4 and the
+    /// taskbar send; the system's default handling turns it into
+    /// `WM_CLOSE`.
+    SysCommandClose,
 }
 
 /// Sends `message` to the window `handle` with `SendMessageW` and returns
@@ -710,6 +720,8 @@ pub fn send(handle: usize, message: Message) -> Option<isize> {
             usize::from(vk),
             (1usize | (3usize << 30)) as isize,
         ),
+        Message::Close => (WM_CLOSE, 0, 0),
+        Message::SysCommandClose => (WM_SYSCOMMAND, SC_CLOSE as usize, 0),
     };
     // SAFETY: every message here carries plain numbers (no pointers), and
     // goes to a window of our own class whose procedure reads them as such.
@@ -1216,4 +1228,610 @@ pub fn position_in_parent(handle: usize) -> Option<(i32, i32)> {
         ClientToScreen(hwnd, &mut child) != 0 && ClientToScreen(parent, &mut origin) != 0
     };
     ok.then(|| (child.x - origin.x, child.y - origin.y))
+}
+
+// Application windows.
+
+/// The title the system shows for the window `handle`, whoever made it
+/// (`GetWindowTextW`), or `None` when it is no window.
+pub fn window_title(handle: usize) -> Option<String> {
+    let hwnd: HWND = ptr::with_exposed_provenance_mut(handle);
+    // SAFETY: IsWindow accepts any value.
+    if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+        return None;
+    }
+    let mut text = [0u16; 512];
+    // SAFETY: `text` holds 512 units, which is what the call is told.
+    let len = unsafe { GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32) };
+    Some(String::from_utf16_lossy(&text[..len.max(0) as usize]))
+}
+
+/// The rectangle of the whole window `handle`, frame included, in screen
+/// pixels (`GetWindowRect`), or `None` when it is no window.
+pub fn window_rect(handle: usize) -> Option<IRect> {
+    let hwnd: HWND = ptr::with_exposed_provenance_mut(handle);
+    let mut rect = RECT::default();
+    // SAFETY: GetWindowRect fails for a handle that is no window; `rect`
+    // is a valid place.
+    if hwnd.is_null() || unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return None;
+    }
+    Some(IRect::from_edges(
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+    ))
+}
+
+/// Whether the person may resize the window `handle` by its frame
+/// (`WS_THICKFRAME`), or `None` when it is not one of this crate's.
+pub fn is_resizable(handle: usize) -> Option<bool> {
+    let hwnd = ours(handle)?;
+    // SAFETY: our own window.
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    Some(style & WS_THICKFRAME != 0)
+}
+
+/// How small and how large the person may make the window `handle`, in
+/// outer pixels, as its `WM_GETMINMAXINFO` answer says, starting from
+/// `(1, 1)` and `(100000, 100000)`; `None` when it is not one of ours.
+pub fn tracking_limits(handle: usize) -> Option<(PhysicalSize, PhysicalSize)> {
+    let hwnd = ours(handle)?;
+    let mut info = MINMAXINFO {
+        ptMinTrackSize: POINT { x: 1, y: 1 },
+        ptMaxTrackSize: POINT {
+            x: 100_000,
+            y: 100_000,
+        },
+        ..MINMAXINFO::default()
+    };
+    // SAFETY: our own window, and a MINMAXINFO that outlives the call, as
+    // the message wants.
+    unsafe {
+        SendMessageW(hwnd, WM_GETMINMAXINFO, 0, (&raw mut info).addr() as isize);
+    }
+    let size = |point: POINT| PhysicalSize::new(point.x.max(0) as u32, point.y.max(0) as u32);
+    Some((size(info.ptMinTrackSize), size(info.ptMaxTrackSize)))
+}
+
+/// Sends the window `handle` the `WM_DPICHANGED` the system sends when it
+/// moves to a monitor of `dpi`, suggesting `suggested` (screen pixels,
+/// frame included) as its new rectangle. Returns the answer, or `None`
+/// when it is not one of ours.
+pub fn dpi_changed(handle: usize, dpi: u32, suggested: IRect) -> Option<isize> {
+    let hwnd = ours(handle)?;
+    let rect = to_rect(suggested);
+    let wparam = (dpi as usize & 0xFFFF) | ((dpi as usize & 0xFFFF) << 16);
+    // SAFETY: our own window, and a RECT that outlives the call, as the
+    // message wants.
+    Some(unsafe {
+        SendMessageW(
+            hwnd,
+            WM_DPICHANGED,
+            wparam,
+            (&raw const rect).addr() as isize,
+        )
+    })
+}
+
+/// Posts `WM_QUIT` with `code` to this thread's queue
+/// (`PostQuitMessage`), as a library that ends a loop does.
+pub fn post_quit(code: i32) {
+    // SAFETY: takes a number only; it affects this thread's queue.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(code);
+    }
+}
+
+// Drops.
+
+/// OLE initialised on this thread until dropped, as a host's main thread
+/// has it, for tests of child windows that take drops.
+#[derive(Debug)]
+pub struct Ole {
+    initialised: bool,
+}
+
+impl Ole {
+    /// Initialises OLE for this thread; `is_initialised` says whether it
+    /// took.
+    pub fn initialise() -> Ole {
+        // SAFETY: the reserved argument is null; a success is balanced in
+        // drop, on this thread (the value holds no `Send` promise: it is
+        // only used where it was made).
+        let result = unsafe { windows_sys::Win32::System::Ole::OleInitialize(ptr::null()) };
+        Ole {
+            initialised: result >= 0,
+        }
+    }
+
+    /// Whether OLE took.
+    pub fn is_initialised(&self) -> bool {
+        self.initialised
+    }
+}
+
+impl Drop for Ole {
+    fn drop(&mut self) {
+        if self.initialised {
+            // SAFETY: balances the successful OleInitialize, on this thread.
+            unsafe {
+                windows_sys::Win32::System::Ole::OleUninitialize();
+            }
+        }
+    }
+}
+
+/// Whether OLE marks the window `handle` as a drop target: the window
+/// property `OleDropTargetInterface`, which `RegisterDragDrop` sets and
+/// `RevokeDragDrop` removes. The property's name is OLE's, not documented,
+/// but it is what drag sources look up, and reading it changes nothing
+/// (asking OLE itself would mean registering, which on a thread without
+/// OLE leaves the mark behind).
+pub fn is_drop_target(handle: usize) -> bool {
+    let hwnd: HWND = ptr::with_exposed_provenance_mut(handle);
+    let name: Vec<u16> = "OleDropTargetInterface\0".encode_utf16().collect();
+    // SAFETY: GetPropW accepts any window handle; the name is
+    // NUL-terminated.
+    let mark =
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetPropW(hwnd, name.as_ptr()) };
+    !mark.is_null()
+}
+
+/// A drag from another program, played against a window's registered drop
+/// target: it calls the target's `IDropTarget` methods, as OLE's drag loop
+/// does, with a real `IDataObject` that offers the drag's files as
+/// `CF_HDROP` and its text as `CF_UNICODETEXT`. Positions are given in the
+/// window's client pixels and sent in screen pixels, as OLE sends them.
+#[derive(Debug)]
+pub struct Drag {
+    target: super::com::ComPtr,
+    data: TestData,
+    hwnd: HWND,
+}
+
+/// `MK_CONTROL`, for a drag's key state.
+pub const DRAG_CONTROL: u32 = 0x0008;
+/// `MK_SHIFT`, for a drag's key state.
+pub const DRAG_SHIFT: u32 = 0x0004;
+
+impl Drag {
+    /// A drag of `data` onto `window`, or `None` when the window has no
+    /// drop target.
+    pub fn new(window: &WindowCx<'_>, data: &crate::DragData) -> Option<Drag> {
+        let hwnd = ours(window.raw_handle()?)?;
+        let crate::window::Platform::Win32(platform) = window.platform() else {
+            return None;
+        };
+        let target = platform.drop_target()?;
+        // SAFETY: the window's live target; the reference taken here is
+        // given back when the drag is dropped.
+        let target = unsafe {
+            ((**target.cast::<*const super::com::IUnknownVtbl>()).add_ref)(target);
+            super::com::ComPtr::from_raw(target)?
+        };
+        Some(Drag {
+            target,
+            data: TestData::new(data),
+            hwnd,
+        })
+    }
+
+    fn table(&self) -> &super::com::IDropTargetVtbl {
+        // SAFETY: the target is an IDropTarget.
+        unsafe { self.target.vtable::<super::com::IDropTargetVtbl>() }
+    }
+
+    fn screen(&self, at: PhysicalPoint) -> windows_sys::Win32::Foundation::POINTL {
+        let mut point = POINT { x: at.x, y: at.y };
+        // SAFETY: our own window; `point` is a valid place.
+        unsafe {
+            ClientToScreen(self.hwnd, &mut point);
+        }
+        windows_sys::Win32::Foundation::POINTL {
+            x: point.x,
+            y: point.y,
+        }
+    }
+
+    /// `IDropTarget::DragEnter` at `at` with the key state `keys`, from a
+    /// source that allows the effects `allowed`. Returns the effect the
+    /// target chose (`DROPEFFECT_COPY`, `DROPEFFECT_NONE` and so on).
+    pub fn enter(&self, at: PhysicalPoint, keys: u32, allowed: u32) -> u32 {
+        let mut effect = allowed;
+        // SAFETY: a live target and data object, and a valid place for the
+        // effect.
+        unsafe {
+            (self.table().drag_enter)(
+                self.target.as_raw(),
+                self.data.as_raw(),
+                keys,
+                self.screen(at),
+                &mut effect,
+            );
+        }
+        effect
+    }
+
+    /// `IDropTarget::DragOver`, as [`enter`](Self::enter).
+    pub fn over(&self, at: PhysicalPoint, keys: u32, allowed: u32) -> u32 {
+        let mut effect = allowed;
+        // SAFETY: as for `enter`.
+        unsafe {
+            (self.table().drag_over)(self.target.as_raw(), keys, self.screen(at), &mut effect);
+        }
+        effect
+    }
+
+    /// `IDropTarget::DragLeave`.
+    pub fn leave(&self) {
+        // SAFETY: a live target.
+        unsafe {
+            (self.table().drag_leave)(self.target.as_raw());
+        }
+    }
+
+    /// `IDropTarget::Drop`, as [`enter`](Self::enter).
+    pub fn drop_at(&self, at: PhysicalPoint, keys: u32, allowed: u32) -> u32 {
+        let mut effect = allowed;
+        // SAFETY: as for `enter`.
+        unsafe {
+            (self.table().drop)(
+                self.target.as_raw(),
+                self.data.as_raw(),
+                keys,
+                self.screen(at),
+                &mut effect,
+            );
+        }
+        effect
+    }
+
+    /// How many references to the drag's data object exist now: 1, the
+    /// drag's own, once the target has given back any it took.
+    pub fn data_references(&self) -> u32 {
+        self.data.references()
+    }
+}
+
+/// A data object of a test's, offering files and text in global memory.
+#[derive(Debug)]
+struct TestData {
+    object: *mut TestDataObject,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct TestDataObject {
+    vtable: *const super::com::IDataObjectVtbl,
+    refs: Cell<u32>,
+    files: Vec<std::path::PathBuf>,
+    text: Option<String>,
+}
+
+static TEST_DATA_VTABLE: super::com::IDataObjectVtbl = super::com::IDataObjectVtbl {
+    unknown: super::com::IUnknownVtbl {
+        query_interface: data_query_interface,
+        add_ref: data_add_ref,
+        release: data_release,
+    },
+    get_data: data_get_data,
+    get_data_here: data_get_data_here,
+    query_get_data: data_query_get_data,
+    get_canonical_format_etc: data_get_canonical,
+    set_data: data_set_data,
+    enum_format_etc: data_enum_format_etc,
+    d_advise: data_d_advise,
+    d_unadvise: data_d_unadvise,
+    enum_d_advise: data_enum_d_advise,
+};
+
+impl TestData {
+    fn new(data: &crate::DragData) -> TestData {
+        TestData {
+            object: Box::into_raw(Box::new(TestDataObject {
+                vtable: &TEST_DATA_VTABLE,
+                refs: Cell::new(1),
+                files: data.files.clone(),
+                text: data.text.clone(),
+            })),
+        }
+    }
+
+    fn as_raw(&self) -> *mut c_void {
+        self.object.cast()
+    }
+
+    fn references(&self) -> u32 {
+        // SAFETY: our reference keeps the object alive.
+        unsafe { &*self.object }.refs.get()
+    }
+}
+
+impl Drop for TestData {
+    fn drop(&mut self) {
+        // SAFETY: our reference, given back once.
+        unsafe {
+            data_release(self.as_raw());
+        }
+    }
+}
+
+/// The object behind a COM pointer to a test data object.
+///
+/// # Safety
+///
+/// `this` must point to a live `TestDataObject`.
+unsafe fn data_object<'a>(this: *mut c_void) -> &'a TestDataObject {
+    // SAFETY: the caller vouches for it.
+    unsafe { &*this.cast::<TestDataObject>() }
+}
+
+fn same_guid(a: &windows_sys::core::GUID, b: &windows_sys::core::GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+unsafe extern "system" fn data_query_interface(
+    this: *mut c_void,
+    iid: *const windows_sys::core::GUID,
+    out: *mut *mut c_void,
+) -> windows_sys::core::HRESULT {
+    if out.is_null() || iid.is_null() {
+        return windows_sys::Win32::Foundation::E_POINTER;
+    }
+    // SAFETY: COM passes a valid interface id and a valid place.
+    unsafe {
+        let iid = &*iid;
+        if same_guid(iid, &super::com::IID_IUNKNOWN) || same_guid(iid, &super::com::IID_IDATAOBJECT)
+        {
+            data_add_ref(this);
+            *out = this;
+            return 0;
+        }
+        *out = ptr::null_mut();
+    }
+    windows_sys::Win32::Foundation::E_NOINTERFACE
+}
+
+unsafe extern "system" fn data_add_ref(this: *mut c_void) -> u32 {
+    // SAFETY: called on a live object.
+    let object = unsafe { data_object(this) };
+    object.refs.set(object.refs.get() + 1);
+    object.refs.get()
+}
+
+unsafe extern "system" fn data_release(this: *mut c_void) -> u32 {
+    // SAFETY: called on a live object.
+    let refs = unsafe { data_object(this) }.refs.get().saturating_sub(1);
+    // SAFETY: as above.
+    unsafe { data_object(this) }.refs.set(refs);
+    if refs == 0 {
+        // SAFETY: the last reference; the box was made by `TestData::new`.
+        drop(unsafe { Box::from_raw(this.cast::<TestDataObject>()) });
+    }
+    refs
+}
+
+/// A movable global block holding `units`, or null.
+fn global_units(units: &[u16], header: &[u8]) -> windows_sys::Win32::Foundation::HGLOBAL {
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+    let bytes = header.len() + units.len() * 2;
+    // SAFETY: allocates a block the receiver frees with ReleaseStgMedium.
+    let global = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes) };
+    if global.is_null() {
+        return global;
+    }
+    // SAFETY: the block just made, `bytes` long, locked until below.
+    unsafe {
+        let target = GlobalLock(global).cast::<u8>();
+        if !target.is_null() {
+            ptr::copy_nonoverlapping(header.as_ptr(), target, header.len());
+            ptr::copy_nonoverlapping(
+                units.as_ptr().cast::<u8>(),
+                target.add(header.len()),
+                units.len() * 2,
+            );
+            GlobalUnlock(global);
+        }
+    }
+    global
+}
+
+unsafe extern "system" fn data_get_data(
+    this: *mut c_void,
+    format: *const windows_sys::Win32::System::Com::FORMATETC,
+    medium: *mut windows_sys::Win32::System::Com::STGMEDIUM,
+) -> windows_sys::core::HRESULT {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::TYMED_HGLOBAL;
+    use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+    if format.is_null() || medium.is_null() {
+        return windows_sys::Win32::Foundation::E_POINTER;
+    }
+    // SAFETY: called on a live object, with a valid format.
+    let (object, format) = unsafe { (data_object(this), &*format) };
+    if format.tymed & TYMED_HGLOBAL as u32 == 0 {
+        return windows_sys::Win32::Foundation::DV_E_FORMATETC;
+    }
+    let global = match format.cfFormat {
+        CF_HDROP if !object.files.is_empty() => {
+            // DROPFILES, then each path NUL-terminated, then one more NUL.
+            let mut units = Vec::new();
+            for file in &object.files {
+                units.extend(file.as_os_str().encode_wide());
+                units.push(0);
+            }
+            units.push(0);
+            let header = windows_sys::Win32::UI::Shell::DROPFILES {
+                pFiles: mem::size_of::<windows_sys::Win32::UI::Shell::DROPFILES>() as u32,
+                pt: POINT { x: 0, y: 0 },
+                fNC: 0,
+                fWide: 1,
+            };
+            // SAFETY: DROPFILES is plain data; its bytes are read only.
+            let header = unsafe {
+                std::slice::from_raw_parts(
+                    (&raw const header).cast::<u8>(),
+                    mem::size_of::<windows_sys::Win32::UI::Shell::DROPFILES>(),
+                )
+            };
+            global_units(&units, header)
+        }
+        CF_UNICODETEXT if object.text.is_some() => {
+            let units: Vec<u16> = object
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            global_units(&units, &[])
+        }
+        _ => return windows_sys::Win32::Foundation::DV_E_FORMATETC,
+    };
+    if global.is_null() {
+        return windows_sys::Win32::Foundation::E_OUTOFMEMORY;
+    }
+    // SAFETY: `medium` is a valid place; the receiver owns the block.
+    unsafe {
+        (*medium).tymed = TYMED_HGLOBAL as u32;
+        (*medium).u.hGlobal = global;
+        (*medium).pUnkForRelease = ptr::null_mut();
+    }
+    0
+}
+
+unsafe extern "system" fn data_get_data_here(
+    _this: *mut c_void,
+    _format: *const windows_sys::Win32::System::Com::FORMATETC,
+    _medium: *mut windows_sys::Win32::System::Com::STGMEDIUM,
+) -> windows_sys::core::HRESULT {
+    windows_sys::Win32::Foundation::E_NOTIMPL
+}
+
+unsafe extern "system" fn data_query_get_data(
+    this: *mut c_void,
+    format: *const windows_sys::Win32::System::Com::FORMATETC,
+) -> windows_sys::core::HRESULT {
+    use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+    if format.is_null() {
+        return windows_sys::Win32::Foundation::E_POINTER;
+    }
+    // SAFETY: called on a live object, with a valid format.
+    let (object, format) = unsafe { (data_object(this), &*format) };
+    let has = match format.cfFormat {
+        CF_HDROP => !object.files.is_empty(),
+        CF_UNICODETEXT => object.text.is_some(),
+        _ => false,
+    };
+    if has {
+        0
+    } else {
+        windows_sys::Win32::Foundation::DV_E_FORMATETC
+    }
+}
+
+unsafe extern "system" fn data_get_canonical(
+    _this: *mut c_void,
+    _format: *const windows_sys::Win32::System::Com::FORMATETC,
+    _out: *mut windows_sys::Win32::System::Com::FORMATETC,
+) -> windows_sys::core::HRESULT {
+    windows_sys::Win32::Foundation::E_NOTIMPL
+}
+
+unsafe extern "system" fn data_set_data(
+    _this: *mut c_void,
+    _format: *const windows_sys::Win32::System::Com::FORMATETC,
+    _medium: *const windows_sys::Win32::System::Com::STGMEDIUM,
+    _release: i32,
+) -> windows_sys::core::HRESULT {
+    windows_sys::Win32::Foundation::E_NOTIMPL
+}
+
+unsafe extern "system" fn data_enum_format_etc(
+    _this: *mut c_void,
+    _direction: u32,
+    out: *mut *mut c_void,
+) -> windows_sys::core::HRESULT {
+    if !out.is_null() {
+        // SAFETY: a valid place.
+        unsafe {
+            *out = ptr::null_mut();
+        }
+    }
+    windows_sys::Win32::Foundation::E_NOTIMPL
+}
+
+unsafe extern "system" fn data_d_advise(
+    _this: *mut c_void,
+    _format: *const windows_sys::Win32::System::Com::FORMATETC,
+    _flags: u32,
+    _sink: *mut c_void,
+    _connection: *mut u32,
+) -> windows_sys::core::HRESULT {
+    windows_sys::Win32::Foundation::OLE_E_ADVISENOTSUPPORTED
+}
+
+unsafe extern "system" fn data_d_unadvise(
+    _this: *mut c_void,
+    _connection: u32,
+) -> windows_sys::core::HRESULT {
+    windows_sys::Win32::Foundation::OLE_E_ADVISENOTSUPPORTED
+}
+
+unsafe extern "system" fn data_enum_d_advise(
+    _this: *mut c_void,
+    out: *mut *mut c_void,
+) -> windows_sys::core::HRESULT {
+    if !out.is_null() {
+        // SAFETY: a valid place.
+        unsafe {
+            *out = ptr::null_mut();
+        }
+    }
+    windows_sys::Win32::Foundation::OLE_E_ADVISENOTSUPPORTED
+}
+
+// Dialogs.
+
+/// A file dialog as the system holds it once configured, read back
+/// without showing it: what the tests can check, since a dialog shown in
+/// CI would wait for a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PreparedDialog {
+    /// Its `FILEOPENDIALOGOPTIONS` (`GetOptions`).
+    pub options: u32,
+    /// The file type chosen, from 1 (`GetFileTypeIndex`).
+    pub file_type_index: u32,
+    /// The folder it will start in (`GetFolder`).
+    pub folder: Option<std::path::PathBuf>,
+}
+
+/// Makes the system's dialog of `kind` and configures it for `dialog`
+/// through the same code a window shows it with, then reads it back and
+/// releases it, never showing it.
+///
+/// # Errors
+///
+/// [`WindowError::Platform`] when the system refuses a step.
+pub fn prepare_dialog(
+    kind: crate::DialogKind,
+    dialog: &crate::FileDialog,
+) -> Result<PreparedDialog, WindowError> {
+    let prepared = super::dialog::prepare(kind, dialog)?;
+    Ok(PreparedDialog {
+        options: prepared.options()?,
+        file_type_index: prepared.file_type_index()?,
+        folder: prepared.folder()?,
+    })
+}
+
+/// The options the backend adds to the system's for a dialog of `kind`
+/// asked with `dialog`.
+pub fn dialog_options(kind: crate::DialogKind, dialog: &crate::FileDialog) -> u32 {
+    super::dialog::options_for(kind, dialog)
 }
