@@ -35,6 +35,8 @@
 //! assert_eq!(params.pan.value(), 1.0);
 //! ```
 
+use std::path::PathBuf;
+
 use manguebyte_gfx::Point;
 
 pub use manguebyte_plugin::editor::{Key, KeyEvent, Modifiers};
@@ -216,6 +218,116 @@ impl Event {
             | Event::Composition(_)
             | Event::PointerLeave
             | Event::Menu(_) => None,
+        }
+    }
+}
+
+/// A drag from another window or program, as a window layer reports it to
+/// [`Root::file_drop`](crate::Root::file_drop).
+///
+/// The root runs it as a drag of its own whose
+/// [`DragPayload`](crate::DragPayload) holds the [`DropData`] and that has
+/// no source widget, so widgets take part exactly as in a drag inside the
+/// interface, through [`Widget::drag`](crate::Widget::drag): a target asks
+/// for the data with `payload.get::<DropData>()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FileDrop {
+    /// The drag came over the interface at `at`, in logical pixels.
+    Enter {
+        /// Where the pointer is.
+        at: Point,
+    },
+    /// The drag moved to `at`.
+    Over {
+        /// Where the pointer is.
+        at: Point,
+    },
+    /// The drag left the interface, or was cancelled.
+    Leave,
+    /// The drag was dropped at `at`.
+    Drop {
+        /// Where.
+        at: Point,
+    },
+}
+
+/// What a drag from another program carries: files, text, or both. A
+/// widget finds it in the drag's payload (see [`FileDrop`]).
+///
+/// ```
+/// use std::path::PathBuf;
+/// use manguebyte_ui::DropData;
+///
+/// let kit = DropData::files(["kick.wav", "snare.wav"]);
+/// assert_eq!(kit.files[1], PathBuf::from("snare.wav"));
+/// assert!(kit.has_file_with_extension(&["WAV", "flac"]));
+/// assert_eq!(kit.description(), "2 files");
+/// assert!(!DropData::text("hello").has_file_with_extension(&["wav"]));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct DropData {
+    /// The paths of the files and folders, in the order the source gave
+    /// them.
+    pub files: Vec<PathBuf>,
+    /// The text, if any.
+    pub text: Option<String>,
+}
+
+impl DropData {
+    /// A drag of `files`.
+    pub fn files<P: Into<PathBuf>>(files: impl IntoIterator<Item = P>) -> DropData {
+        DropData {
+            files: files.into_iter().map(Into::into).collect(),
+            text: None,
+        }
+    }
+
+    /// A drag of `text`.
+    pub fn text(text: impl Into<String>) -> DropData {
+        DropData {
+            files: Vec::new(),
+            text: Some(text.into()),
+        }
+    }
+
+    /// The same, with `text` as well.
+    #[must_use]
+    pub fn with_text(mut self, text: impl Into<String>) -> DropData {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Whether it carries no file and no text.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.text.is_none()
+    }
+
+    /// Whether one of the files has one of `extensions` (without the dot,
+    /// in any case), as a widget that takes only some kinds of file asks.
+    pub fn has_file_with_extension(&self, extensions: &[&str]) -> bool {
+        self.files.iter().any(|file| {
+            file.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extensions
+                        .iter()
+                        .any(|wanted| wanted.eq_ignore_ascii_case(extension))
+                })
+        })
+    }
+
+    /// What it is, in a few words, as a drag's payload describes it: the
+    /// file's name for one file, "3 files" for several, "Text" for text.
+    pub fn description(&self) -> String {
+        match self.files.as_slice() {
+            [] => "Text".to_owned(),
+            [one] => one.file_name().map_or_else(
+                || one.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            many => format!("{} files", many.len()),
         }
     }
 }

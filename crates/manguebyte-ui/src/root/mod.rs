@@ -9,6 +9,7 @@ use manguebyte_gfx::{Color, IRect, Pixmap, Point, Rect, Renderer, Scene, Size};
 use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
 mod drag;
+mod files;
 mod hover;
 mod menus;
 

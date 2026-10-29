@@ -29,9 +29,10 @@
 //! means is the target's, and the application's, business.
 //!
 //! The target side does not care where a payload came from, so the same
-//! [`DragEvent::Over`] and [`DragEvent::Drop`] can later carry things
-//! dropped from outside the window, such as files, as payloads with no
-//! source widget (see ADR 0009).
+//! [`DragEvent::Over`] and [`DragEvent::Drop`] carry files and text
+//! dragged from other programs too, as payloads holding a
+//! [`DropData`](crate::DropData), with no source widget and no ghost
+//! ([`Root::file_drop`](crate::Root::file_drop); ADR 0009 and ADR 0010).
 //!
 //! ```
 //! use manguebyte_gfx::{Point, Scene, Size};

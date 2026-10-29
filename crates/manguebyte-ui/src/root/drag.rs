@@ -12,7 +12,8 @@
 //!
 //! The source is optional so that something dragged in from outside the
 //! window, which has no source widget, can be offered to the same targets
-//! the same way.
+//! the same way: files and text from other programs come in so, through
+//! `files.rs`, with no ghost, since the system draws its own.
 
 use std::time::Duration;
 
@@ -36,9 +37,12 @@ pub(crate) struct DragState {
     /// The widget that accepted the last offer.
     target: Option<NodeId>,
     /// Where the pointer is.
-    at: Point,
-    /// The ghost's node.
-    ghost: usize,
+    pub(super) at: Point,
+    /// The ghost's node; none for a drag from outside the window, which
+    /// the system draws (see `files.rs`).
+    ghost: Option<usize>,
+    /// Whether the drag came from outside the window.
+    pub(super) external: bool,
     /// The ghost has to be placed again.
     pub(super) moved: bool,
     /// What auto-scrolling moved by less than a device pixel.
@@ -59,6 +63,19 @@ impl Root {
 
     /// Starts dragging `payload` from `source` at the pointer.
     pub(super) fn begin_drag(&mut self, source: Option<NodeId>, payload: DragPayload) {
+        let at = self.pointer.unwrap_or_default();
+        self.begin_drag_at(source, payload, at, false);
+    }
+
+    /// Starts dragging `payload` from `source` at `at`; with a ghost of
+    /// its own unless it comes from outside the window.
+    pub(super) fn begin_drag_at(
+        &mut self,
+        source: Option<NodeId>,
+        payload: DragPayload,
+        at: Point,
+        external: bool,
+    ) {
         if self.drag.is_some() {
             return;
         }
@@ -68,17 +85,18 @@ impl Root {
             self.close_menus(MenuEvent::Closed);
         }
         self.capture = None;
-        let at = self.pointer.unwrap_or_default();
-        let ghost = self
-            .tree
-            .add(View::new(Ghost::new(payload.description())), None)
-            .index();
+        let ghost = (!external).then(|| {
+            self.tree
+                .add(View::new(Ghost::new(payload.description())), None)
+                .index()
+        });
         self.drag = Some(DragState {
             source,
             payload,
             target: None,
             at,
             ghost,
+            external,
             moved: true,
             rest: Point::ZERO,
         });
@@ -129,7 +147,7 @@ impl Root {
     /// Offers the payload at `at` to the widget there and those containing
     /// it, until one accepts; the one that accepted before and does not
     /// now hears that the drag left it.
-    fn offer_drag(&mut self, at: Point) {
+    pub(super) fn offer_drag(&mut self, at: Point) {
         let Some(payload) = self.drag.as_ref().map(|drag| drag.payload.clone()) else {
             return;
         };
@@ -158,15 +176,13 @@ impl Root {
     /// Ends the drag: drops it at `at` on the widget that accepts it there,
     /// or cancels it if `at` is `None` or nothing takes it. The target
     /// hears the drop, or that the drag left it, then the source how it
-    /// ended.
-    pub(super) fn finish_drag(&mut self, at: Option<Point>) {
+    /// ended. Returns how it ended, or `None` if no drag was running.
+    pub(super) fn finish_drag(&mut self, at: Option<Point>) -> Option<DragOutcome> {
         if let Some(at) = at {
             // Where the release is, which can differ from the last move.
             self.offer_drag(at);
         }
-        let Some(drag) = self.drag.take() else {
-            return;
-        };
+        let drag = self.drag.take()?;
         let mut outcome = DragOutcome::Cancelled;
         if let Some(target) = drag.target {
             if let Some(at) = at {
@@ -182,11 +198,14 @@ impl Root {
                 self.deliver(target, |widget, cx| widget.drag(cx, &DragEvent::Left));
             }
         }
-        self.cut_tree(drag.ghost);
+        if let Some(ghost) = drag.ghost {
+            self.cut_tree(ghost);
+        }
         if let Some(source) = drag.source.filter(|id| id.index() < self.tree.main) {
             let ended = DragEvent::Ended(outcome);
             self.deliver(source, |widget, cx| widget.drag(cx, &ended));
         }
+        Some(outcome)
     }
 
     /// One frame of a running drag: scrolls the innermost scroll view
@@ -234,7 +253,7 @@ impl Root {
 
     /// Lays the ghost out beside the pointer.
     pub(super) fn place_ghost(&mut self) {
-        let Some((ghost, at)) = self.drag.as_mut().map(|drag| {
+        let Some((Some(ghost), at)) = self.drag.as_mut().map(|drag| {
             drag.moved = false;
             (drag.ghost, drag.at)
         }) else {

@@ -183,7 +183,9 @@ pub use access::{AccessEntry, AccessItem, AccessNode, Action, Actions, Role};
 pub use clipboard::{Clipboard, MemoryClipboard};
 pub use damage::MAX_DAMAGE;
 pub use drag::{DragEvent, DragOutcome, DragPayload};
-pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, MenuEvent, Modifiers};
+pub use event::{
+    Button, Composition, DropData, Event, FileDrop, Handled, Key, KeyEvent, MenuEvent, Modifiers,
+};
 pub use menu::{Menu, MenuItem};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
