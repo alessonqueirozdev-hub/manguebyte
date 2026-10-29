@@ -15,6 +15,7 @@
 //! | [`ScrollView`] | [`ScrollView`](crate::Role::ScrollView) | one child larger than itself, through a viewport, with scroll bars | the offset, by the wheel, the bars and the keys |
 //! | [`EnvelopeEditor`] | [`Group`](crate::Role::Group), its parts [`Slider`](crate::Role::Slider)s | four parameters, and curves if given, as an attack, decay, sustain and release | the parameters, by dragging the curve's corners (one gesture per parameter), the wheel, the keys and typed values |
 //! | [`PianoKeyboard`] | [`Group`](crate::Role::Group), its keys [`Button`](crate::Role::Button)s | keys over a [`KeySpan`], those held and those the application lights, and key ranges | notes, polled as [`NoteEvent`]s, from presses, glissandi, the computer's letters and assistive technology |
+//! | [`ZoneMap`] | [`List`](crate::Role::List), its zones [`ListItem`](crate::Role::ListItem)s | zones over keys and velocities, lined up with a keyboard over the same span, and where they overlap | the zones and the selection, by dragging zones and their edges, a band, the keys, and drops that make zones |
 //! | [`WaveformView`] | [`Group`](crate::Role::Group), its markers [`Slider`](crate::Role::Slider)s | a sample's channels, drawn from a [`Waveform`]'s summary, markers, a selection and a playhead | the markers (within their rules, onto zero crossings if asked), the selection and the zoom, by dragging, the wheel and the keys |
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
@@ -53,6 +54,7 @@ mod text_field;
 mod toggle;
 mod wave_data;
 mod waveform;
+mod zone_map;
 
 pub use canvas::{Canvas, CanvasCx, canvas};
 pub use combo::{ComboBox, MAX_CHOICES, combo};
@@ -74,6 +76,7 @@ pub use waveform::{
     MAX_PIXELS_PER_FRAME, Marker, MarkerKind, MarkerOrder, WaveformEvent, WaveformState,
     WaveformView, ZOOM_STEP, waveform_view,
 };
+pub use zone_map::{Zone, ZoneEvent, ZoneMap, ZoneMapState, zone_map};
 
 use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};
 

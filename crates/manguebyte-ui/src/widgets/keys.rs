@@ -69,7 +69,7 @@ pub fn note_name_portuguese(note: u8) -> String {
 /// black or white, has a column of the same width, and the white keys
 /// share the width of an octave as a piano's do. Anything that should
 /// line up with a keyboard's keys, such as a
-/// zone map above it, uses the same span over a
+/// [`ZoneMap`](crate::ZoneMap) above it, uses the same span over a
 /// rectangle of the same horizontal extent.
 ///
 /// ```
