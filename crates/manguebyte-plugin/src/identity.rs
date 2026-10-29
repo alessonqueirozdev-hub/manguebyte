@@ -59,8 +59,9 @@ pub fn is_valid_id(id: &str) -> bool {
 /// - if `info()` gives an id that [`is_valid_id`] refuses, the whole of
 ///   `INFO` is used instead.
 ///
-/// The first call takes a lock and may take as long as `info()` does;
-/// later ones take the same lock briefly. The wrappers call this when a
+/// Every call takes a lock briefly, to find the type's cell; the first
+/// then runs `info()` outside it, and takes as long as that does. Calls
+/// made meanwhile wait for its answer. The wrappers call this when a
 /// host first asks about the plugin, before any instance exists, and never
 /// on the audio thread. If `info()` panics, nothing is kept and the next
 /// call asks again.

@@ -109,8 +109,9 @@ static DESCRIPTORS: Mutex<Vec<(TypeId, &'static Descriptor)>> = Mutex::new(Vec::
 ///
 /// # Panics
 ///
-/// If `P::info` panics. The entry point [`export_lv2!`](crate::export_lv2)
-/// makes catches that, and gives the host no plugin.
+/// If `P::info` panics. The entry point that
+/// [`export_lv2!`](crate::export_lv2) makes catches that, and gives the
+/// host no plugin.
 pub fn plugin_descriptor<P: Plugin>() -> &'static Descriptor {
     let key = TypeId::of::<P>();
     {
