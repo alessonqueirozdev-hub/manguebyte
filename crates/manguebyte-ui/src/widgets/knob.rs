@@ -2,7 +2,9 @@
 
 use std::f32::consts::PI;
 
-use manguebyte_gfx::{Arc, Path, Point, Rect, Scene, Size, Stroke, TextStyle};
+use manguebyte_gfx::{
+    Arc, Circle, Extend, Path, Point, RadialGradient, Rect, Scene, Size, Stop, Stroke, TextStyle,
+};
 
 use super::adjust::{Adjust, Axis};
 use super::{
@@ -147,14 +149,13 @@ impl Widget for Knob {
         .iter()
         .map(|text| text_width(text, &value))
         .fold(0.0f32, f32::max);
-        let width = theme
-            .sizes
-            .knob
+        let pad = glow_room(theme);
+        let width = (theme.sizes.knob + 2.0 * pad)
             .max(text_width(self.name_text(), &name))
             .max(widest_value + 4.0);
         Size::new(
             width + 2.0 * MARGIN,
-            2.0 * MARGIN + line_height(&name) + GAP + theme.sizes.knob + GAP + line_height(&value),
+            2.0 * MARGIN + pad + theme.sizes.knob + GAP + line_height(&name) + line_height(&value),
         )
     }
 
@@ -172,47 +173,34 @@ impl Widget for Knob {
         let value_style = value_style(theme);
         let name_height = line_height(&name_style);
         let value_height = line_height(&value_style);
+        let pad = glow_room(theme);
 
-        // The dial, between the name and the value.
-        let top = rect.y + MARGIN + name_height + GAP;
-        let bottom = rect.bottom() - MARGIN - value_height - GAP;
+        // The dial on top, with room for its glow; the name and the value
+        // under it.
+        let top = rect.y + MARGIN + pad;
+        let bottom = rect.bottom() - MARGIN - value_height - name_height - GAP;
         let room = (bottom - top).max(0.0);
-        let diameter = theme.sizes.knob.min(room).min(width);
+        let diameter = theme.sizes.knob.min(room).min((width - 2.0 * pad).max(0.0));
         let ring = theme.sizes.knob_ring.min(diameter * 0.5).max(0.0);
         let radius = (diameter - ring) * 0.5;
         let center = Point::new(rect.x + rect.width * 0.5, top + room * 0.5);
         let value = self.adjust.binding.shown().clamp(0.0, 1.0) as f32;
         if radius > 0.0 {
-            // The track brightens a little as the pointer comes over.
-            let track = theme
-                .palette
-                .track
-                .lerp(theme.palette.text_secondary, 0.35 * cx.hover());
-            scene.stroke(
-                Arc::new(center, radius, START, SWEEP),
-                Stroke::round(ring),
-                track,
+            dial(scene, theme, (center, radius, ring), value, cx.hover());
+            focus_ring(
+                scene,
+                Circle::new(center, radius + ring * 0.5 + theme.sizes.focus_gap),
+                theme,
+                cx.focus_ring(),
             );
-            if value > 0.0 {
-                scene.stroke(
-                    Arc::new(center, radius, START, SWEEP * value),
-                    Stroke::round(ring),
-                    theme.palette.accent,
-                );
-            }
-            let angle = START + SWEEP * value;
-            let from = Arc::new(center, radius * 0.25, 0.0, 0.0).point_at(angle);
-            let to = Arc::new(center, (radius - ring).max(0.0), 0.0, 0.0).point_at(angle);
-            let mut pointer = Path::new();
-            pointer.move_to(from).line_to(to);
-            scene.stroke(&pointer, Stroke::round(2.0), theme.palette.thumb);
         }
 
         let (label, adjust) = (self.label.as_deref(), &self.adjust);
         let name = self.name.get(width, name_style, || {
             line(name_of(label, adjust), &name_style, width)
         });
-        draw_text(scene, name, Point::new(rect.x + MARGIN, rect.y + MARGIN));
+        let name_y = rect.bottom() - MARGIN - value_height - name_height;
+        draw_text(scene, name, Point::new(rect.x + MARGIN, name_y));
         let entry_box = value_line(rect, theme);
         if !self
             .adjust
@@ -224,9 +212,6 @@ impl Widget for Knob {
                 .value
                 .get(width, key, || line(&binding.text(), &value_style, width));
             draw_text(scene, value, entry_box.origin());
-        }
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
         }
     }
 
@@ -248,6 +233,81 @@ impl Widget for Knob {
     fn caret(&self, _cx: &AccessCx<'_>) -> Option<Rect> {
         self.adjust.caret()
     }
+}
+
+/// How soft the glow of a knob's value arc is: tighter than the theme's
+/// glow, as the mockup's `drop-shadow(0 0 4px)`, so that it fits in the
+/// knob's own rectangle.
+const ARC_GLOW: f32 = 4.0;
+
+/// The room a knob keeps around its dial for the glow of its value arc,
+/// beyond its margin: the glow's whole reach, or none in a theme without
+/// glow.
+fn glow_room(theme: &Theme) -> f32 {
+    if theme.elevation.glow.color.a == 0 {
+        0.0
+    } else {
+        8.0
+    }
+}
+
+/// Draws a dial at `center`: a face lit from the top left, the track and
+/// the value arcs `radius` from the centre and `ring` wide, the value arc
+/// glowing, and a pointer. `hover` lightens the face and the track.
+fn dial(
+    scene: &mut Scene,
+    theme: &Theme,
+    (center, radius, ring): (Point, f32, f32),
+    value: f32,
+    hover: f32,
+) {
+    let palette = &theme.palette;
+    // The face, a radial gradient from a light spot up and to the left.
+    let face = (radius - ring * 0.5 - 2.0).max(0.0) * 0.86;
+    if face > 0.0 {
+        let light = palette
+            .face_light
+            .lerp(palette.text_secondary, 0.12 * hover);
+        let stops = [Stop::new(0.0, light), Stop::new(1.0, palette.face_dark)];
+        let shape = Circle::new(center, face);
+        super::drop_shadow(scene, shape, theme.elevation.sm);
+        scene.fill(
+            shape,
+            RadialGradient {
+                center: Point::new(center.x - face * 0.2, center.y - face * 0.4),
+                radius: face * 1.3,
+                stops: &stops,
+                extend: Extend::Pad,
+            },
+        );
+        scene.stroke(
+            Circle::new(center, (face - 0.5).max(0.0)),
+            Stroke::new(1.0),
+            palette.hairline_strong,
+        );
+    }
+    let track = palette
+        .track
+        .lerp(palette.hairline_strong, hover.clamp(0.0, 1.0));
+    scene.stroke(
+        Arc::new(center, radius, START, SWEEP),
+        Stroke::round(ring),
+        track,
+    );
+    if value > 0.0 {
+        let arc = Arc::new(center, radius, START, SWEEP * value);
+        let glow = theme.elevation.glow;
+        if glow.color.a > 0 {
+            scene.stroke_shadow(arc, Stroke::round(ring), glow.with_blur(ARC_GLOW));
+        }
+        scene.stroke(arc, Stroke::round(ring), palette.accent);
+    }
+    let angle = START + SWEEP * value;
+    let from = Arc::new(center, 0.0, 0.0, 0.0).point_at(angle);
+    let to = Arc::new(center, (face * 0.72).max(0.0), 0.0, 0.0).point_at(angle);
+    let mut pointer = Path::new();
+    pointer.move_to(from).line_to(to);
+    scene.stroke(&pointer, Stroke::round(2.0), palette.thumb);
 }
 
 /// The line under the dial where the value is shown, and typed.

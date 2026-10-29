@@ -462,8 +462,9 @@ fn a_slider_follows_the_pointer_along_its_track() {
     let slider = ui.get(Role::Slider, "Mix");
     assert_eq!(slider.value_text(), Some("100 %"));
     // The track runs between the thumb's centres at each end: the
-    // rectangle less a margin of 2 and half the 12-pixel thumb each side.
-    let track = slider.bounds.width - 2.0 * (2.0 + 6.0);
+    // rectangle less a margin of 2, room of 4 for the thumb's shadow and
+    // half the 12-pixel thumb each side.
+    let track = slider.bounds.width - 2.0 * (2.0 + 4.0 + 6.0);
     ui.drag(slider.center(), (-track * 0.5, 0.0), 5);
     ui.frame();
     assert!(

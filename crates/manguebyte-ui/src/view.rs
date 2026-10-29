@@ -295,7 +295,8 @@ pub fn stack(children: impl Children) -> View {
     container(Arrange::Stack, None, children)
 }
 
-/// `child` on a panel: a rounded rectangle in the theme's surface colour.
+/// `child` on a panel: a card (see [`Container::panel`]) with no padding of
+/// its own.
 ///
 /// ```
 /// use manguebyte_gfx::Size;
@@ -305,15 +306,44 @@ pub fn stack(children: impl Children) -> View {
 /// let view = panel(column((label("Filter").title(), label("Low pass"))).padding(8.0)).named("Filter");
 /// let mut ui = Harness::new(view, Size::new(120.0, 60.0), 1.0);
 /// ui.frame();
-/// // A group named for assistive technology, drawn in the surface colour.
+/// // A group named for assistive technology, drawn as a card: from the
+/// // raised surface at the top to the surface at the bottom.
 /// let group = ui.get(Role::Group, "Filter");
 /// assert_eq!(group.bounds.width, 120.0);
-/// let surface = Theme::dark().palette.surface;
-/// let pixel = ui.pixels().pixel(60, 55).expect("inside").to_array();
-/// assert_eq!(pixel, [surface.r, surface.g, surface.b, 255]);
+/// let palette = Theme::dark().palette;
+/// let top = ui.pixels().pixel(60, 1).expect("inside").to_array();
+/// let bottom = ui.pixels().pixel(60, 58).expect("inside").to_array();
+/// assert!(top[0].abs_diff(palette.raised.r) <= 2, "{top:?}");
+/// assert!(bottom[0].abs_diff(palette.surface.r) <= 2, "{bottom:?}");
 /// ```
 pub fn panel(child: impl IntoView) -> View {
     View::with_children(Container::panel(), Style::stack(), (child,))
+}
+
+/// `child` on a card, with room around it: the card [`panel`] draws
+/// (raised surface, card radius, hairline, the light along its top and a
+/// soft shadow that reaches over what is around it), and 14 logical pixels
+/// of padding.
+///
+/// ```
+/// use manguebyte_gfx::Size;
+/// use manguebyte_ui::testing::Harness;
+/// use manguebyte_ui::{IntoView, Role, card, label};
+///
+/// let view = card(label("Envelope").heading()).named("Envelope card").padding(20.0);
+/// let mut ui = Harness::new(view, Size::new(200.0, 90.0), 1.0);
+/// ui.frame();
+/// let heading = ui.get(Role::Label, "Envelope");
+/// assert!(heading.bounds.x >= 14.0);
+/// // The card casts a shadow.
+/// assert!(ui.dump().contains("shadow rounded_rect("));
+/// ```
+pub fn card(child: impl IntoView) -> View {
+    View::with_children(
+        Container::panel(),
+        Style::stack().with_padding(Insets::all(14.0)),
+        (child,),
+    )
 }
 
 /// `child` on a rectangle of `color`.

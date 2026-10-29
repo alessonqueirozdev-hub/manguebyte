@@ -189,6 +189,10 @@ pub struct Root {
     last_frame: Option<Duration>,
 }
 
+/// The furthest a widget may draw beyond its rectangle (see
+/// `Widget::overflow`), in logical pixels.
+const MAX_OVERFLOW: f32 = 128.0;
+
 /// The most keys remembered as held after the interface used their press:
 /// more than hands hold at once. A key held beyond these is forgotten,
 /// and its release goes on as any other.
@@ -1014,8 +1018,11 @@ impl Root {
             Event::PointerMove { at, .. } => match self.capture {
                 Some(holder) => self.deliver(holder, |widget, cx| widget.event(cx, &event)),
                 None => {
-                    if !self.pressed {
-                        self.hover_to(Some(at).filter(|at| at.is_finite()));
+                    if !self.pressed && at.is_finite() {
+                        self.hover_to(Some(at));
+                        if let Some(hovered) = self.hover {
+                            self.deliver(hovered, |widget, cx| widget.hover_moved(cx, at));
+                        }
                     }
                     Handled::No
                 }
@@ -1105,9 +1112,13 @@ impl Root {
         let (hover, pressed_on) = (self.hover, self.pressed_on);
         let focus = self.focus.filter(|_| self.focus_visible);
         for (index, node) in self.tree.nodes.iter_mut().enumerate() {
-            // The hover, press and focus ring, eased.
+            // The hover, press and focus ring, eased. A scroll view counts
+            // as hovered while the pointer is over anything inside it, so
+            // that its bars can show.
             let id = Some(NodeId::from_index(index));
-            let states = (hover == id, pressed_on == id, focus == id);
+            let inside = node.scroll.is_some()
+                && hover.is_some_and(|at| (index..node.end).contains(&at.index()));
+            let states = (hover == id || inside, pressed_on == id, focus == id);
             let (moved, running) = node.motion.follow(states, now, &motion);
             if moved {
                 node.paint = true;
@@ -1117,6 +1128,11 @@ impl Root {
             let mut cx = UpdateCx {
                 theme: &self.theme,
                 motion,
+                amounts: (
+                    node.motion.hover.value(),
+                    node.motion.press.value(),
+                    node.motion.focus.value(),
+                ),
                 rect: node.content,
                 scroll: node.scroll,
                 scale: self.scale,
@@ -1175,6 +1191,16 @@ impl Root {
             if node.measure {
                 node.measure = false;
                 item.content = node.widget.measure(&cx);
+            }
+            let overflow = node.widget.overflow(&cx);
+            let overflow = if overflow.is_finite() {
+                overflow.clamp(0.0, MAX_OVERFLOW)
+            } else {
+                0.0
+            };
+            if overflow != node.overflow {
+                node.overflow = overflow;
+                node.paint = true;
             }
         }
         let area = Rect::new(0.0, 0.0, self.size.width, self.size.height);
@@ -1312,15 +1338,30 @@ impl Root {
                     node.motion.focus.value(),
                 ),
             };
-            // Where the widget may draw: its rectangle, and inside a scroll
-            // view only what the view lets be seen. A widget scrolled out
-            // of sight is not asked to draw at all.
+            // Where the widget may draw: its rectangle grown by its
+            // overflow, and inside a scroll view only what the view lets be
+            // seen. A widget scrolled out of sight is not asked to draw at
+            // all.
+            let (rect, device) = if node.overflow > 0.0 {
+                let reach = (f64::from(node.overflow) * f64::from(self.scale)).ceil() as i32;
+                let d = node.device;
+                (
+                    node.rect.outset(node.overflow),
+                    IRect::from_edges(
+                        d.x.saturating_sub(reach),
+                        d.y.saturating_sub(reach),
+                        (d.right() as i32).saturating_add(reach),
+                        (d.bottom() as i32).saturating_add(reach),
+                    ),
+                )
+            } else {
+                (node.rect, node.device)
+            };
             let (limit, limit_device) = match node.clip {
-                Some((clip, clip_device)) => (
-                    node.rect.intersect(&clip),
-                    node.device.intersect(&clip_device),
-                ),
-                None => (Some(node.rect), Some(node.device)),
+                Some((clip, clip_device)) => {
+                    (rect.intersect(&clip), device.intersect(&clip_device))
+                }
+                None => (Some(rect), Some(device)),
             };
             let hidden = node.clip.is_some() && (limit.is_none() || limit_device.is_none());
             if !hidden {

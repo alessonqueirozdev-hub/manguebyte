@@ -218,7 +218,7 @@ impl Adjust {
             return false;
         };
         let style = entry_style(theme);
-        field_box(scene, entry_box, theme, entry.invalid);
+        field_box(scene, entry_box, theme, entry.invalid, (1.0, 0.0));
         let inner = Rect::new(
             entry_box.x + ENTRY_PAD,
             entry_box.y,

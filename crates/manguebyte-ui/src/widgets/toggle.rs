@@ -3,19 +3,21 @@
 use manguebyte_gfx::{Align, Circle, Point, Rect, RoundedRect, Scene, Size, TextStyle};
 
 use super::{
-    Cached, MARGIN, draw_text, focus_ring, line, line_height, name_style, on_off, text_width,
+    Cached, MARGIN, draw_text, drop_shadow, focus_ring, hairline, line, line_height, name_style,
+    text_width, vertical,
 };
 use crate::access::{AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
+use crate::motion::{Animated, Lerp};
 use crate::param::{ParamBinding, ParamHandle};
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// Space between the switch and its name.
 const SPACE: f32 = 6.0;
 
-/// Space between the edge and the switch, beyond the margin, so that the
-/// focus ring does not touch it.
-const INSET: f32 = 1.0;
+/// Space between the edge and the switch, beyond the margin, for the focus
+/// ring around it.
+const INSET: f32 = 3.0;
 
 /// A switch and the parameter's name beside it.
 ///
@@ -32,6 +34,9 @@ pub struct Toggle {
     binding: ParamBinding,
     label: Option<String>,
     name: Cached<TextStyle>,
+    /// Where the thumb is, from 0 (off) to 1 (on), moving on a spring;
+    /// `None` until the first frame puts it where the value is.
+    thumb: Option<Animated<f32>>,
 }
 
 /// A switch for `param`.
@@ -73,6 +78,7 @@ impl Toggle {
             binding: ParamBinding::new(param),
             label: None,
             name: Cached::new(),
+            thumb: None,
         }
     }
 
@@ -132,6 +138,14 @@ impl Widget for Toggle {
         if self.binding.poll(cx.now()) {
             cx.request_paint();
         }
+        // The thumb slides to where the value is, on a spring.
+        let target = if self.is_on() { 1.0 } else { 0.0 };
+        let (now, spring) = (cx.now(), cx.motion().springy());
+        let thumb = self.thumb.get_or_insert_with(|| Animated::new(target));
+        if thumb.transition(target, now, spring) {
+            cx.request_paint();
+        }
+        cx.animate(thumb);
     }
 
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
@@ -148,17 +162,40 @@ impl Widget for Toggle {
             width,
             height,
         );
-        let on = self.is_on();
-        scene.fill(RoundedRect::new(pill, height * 0.5), on_off(theme, on));
+        let palette = &theme.palette;
+        let on = self
+            .thumb
+            .map_or(if self.is_on() { 1.0 } else { 0.0 }, |thumb| thumb.value());
+        let shape = RoundedRect::new(pill, height * 0.5);
+        // Off: the track, a hairline, lighter under the pointer. On: the
+        // accent's gradient, faded in as the thumb travels.
+        let off = palette.track.lerp(palette.hairline_strong, cx.hover());
+        scene.fill(shape, off);
+        hairline(scene, pill, height * 0.5, cx.scale(), palette.hairline);
+        let lit = on.clamp(0.0, 1.0);
+        if lit > 0.0 {
+            vertical(
+                scene,
+                shape,
+                (pill.y, pill.bottom()),
+                palette.accent_bright.with_opacity(lit),
+                palette.accent.with_opacity(lit),
+            );
+        }
         let radius = (height * 0.5 - 2.0).max(0.0);
-        let thumb_x = if on {
-            pill.right() - height * 0.5
-        } else {
-            pill.x + height * 0.5
-        };
-        scene.fill(
-            Circle::new(Point::new(thumb_x, middle), radius),
-            theme.palette.thumb,
+        let left = pill.x + height * 0.5;
+        let right = pill.right() - height * 0.5;
+        let thumb = Circle::new(Point::new(left.lerp(right, on), middle), radius);
+        drop_shadow(scene, thumb, super::thumb_shadow(theme));
+        scene.fill(thumb, palette.thumb);
+        focus_ring(
+            scene,
+            RoundedRect::new(
+                pill.outset(theme.sizes.focus_gap),
+                height * 0.5 + theme.sizes.focus_gap,
+            ),
+            theme,
+            cx.focus_ring(),
         );
 
         let text_x = pill.right() + SPACE;
@@ -170,9 +207,6 @@ impl Widget for Toggle {
         });
         let y = middle - line_height(&style) * 0.5;
         draw_text(scene, name, Point::new(text_x, y));
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
-        }
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {

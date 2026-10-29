@@ -7,6 +7,7 @@
 //! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel, the keys and a typed value |
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
 //! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
+//! | [`Pill`] | [`Button`](crate::Role::Button) | a label, a status dot | a count of presses the application polls, by clicking, Space and Enter |
 //! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
@@ -47,6 +48,7 @@ mod knob;
 mod label;
 mod list;
 mod meter;
+mod pill;
 mod scroll_view;
 mod slider;
 mod text_edit;
@@ -67,6 +69,7 @@ pub use knob::{Knob, knob};
 pub use label::{Label, label};
 pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view};
 pub use meter::{Meter, meter};
+pub use pill::{Pill, pill};
 pub use scroll_view::{ScrollView, ScrollViewBuilder, scroll_view};
 pub use slider::{Slider, slider};
 pub use text_field::{TextField, text_field};
@@ -78,7 +81,10 @@ pub use waveform::{
 };
 pub use zone_map::{Zone, ZoneEvent, ZoneMap, ZoneMapState, zone_map};
 
-use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};
+use manguebyte_gfx::{
+    Color, Extend, LinearGradient, Point, Rect, RoundedRect, Scene, Shadow, Shape, Stop, Stroke,
+    TextLayout, TextStyle,
+};
 
 use crate::theme::Theme;
 
@@ -139,23 +145,156 @@ impl<K: PartialEq> Cached<K> {
     }
 }
 
-/// Draws the focus ring just inside `rect`.
-pub(crate) fn focus_ring(scene: &mut Scene, rect: Rect, theme: &Theme) {
+/// Draws the focus ring along `ring`, faded in by `amount` (the root's
+/// [`focus_ring`](crate::PaintCx::focus_ring) amount): a soft line in the
+/// theme's focus colour, with a faint glow of it in a theme that glows.
+/// Nothing at 0. The caller keeps `ring` far enough inside its rectangle
+/// for the line and its glow.
+pub(crate) fn focus_ring<'s>(
+    scene: &mut Scene,
+    ring: impl Into<Shape<'s>>,
+    theme: &Theme,
+    amount: f32,
+) {
+    if amount.is_nan() || amount <= 0.0 {
+        return;
+    }
+    let ring = ring.into();
     let width = theme.sizes.focus_ring.max(0.0);
-    // Half the width, and a pixel for the rasteriser's tolerance, inside
-    // the edge: the ring never reaches past the widget's rectangle.
-    let inset = width * 0.5 + 1.0;
-    let ring = Rect::new(
-        rect.x + inset,
-        rect.y + inset,
-        (rect.width - 2.0 * inset).max(0.0),
-        (rect.height - 2.0 * inset).max(0.0),
+    let color = theme.palette.focus.with_opacity(amount);
+    glow_stroke(scene, ring, Stroke::round(width), theme, 0.5 * amount);
+    scene.stroke(ring, Stroke::round(width), color);
+}
+
+/// The theme's glow, at `strength` (0 to 1) of its opacity, around the
+/// outline of `shape` drawn with `stroke`. Nothing in a theme without
+/// glow, or at no strength.
+pub(crate) fn glow_stroke<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    stroke: Stroke,
+    theme: &Theme,
+    strength: f32,
+) {
+    let glow = theme.elevation.glow;
+    let color = glow.color.with_opacity(strength);
+    if color.a == 0 {
+        return;
+    }
+    scene.stroke_shadow(shape, stroke, glow.with_color(color));
+}
+
+/// The theme's glow in `color` (its opacity times `strength`) around the
+/// filled `shape`. Nothing in a theme without glow.
+pub(crate) fn glow_fill<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    color: Color,
+    theme: &Theme,
+    strength: f32,
+) {
+    let glow = theme.elevation.glow;
+    if glow.color.a == 0 {
+        return;
+    }
+    let alpha = f32::from(glow.color.a) / 255.0 * strength;
+    let color = color.with_opacity(alpha * f32::from(color.a) / 255.0);
+    if color.a == 0 {
+        return;
+    }
+    scene.shadow(shape, glow.with_color(color));
+}
+
+/// Draws a floating surface over `rect`: menus, tooltips, a drag's ghost.
+/// The theme's large shadow, its overlay surface with corners of
+/// `radius`, and a strong hairline.
+pub(crate) fn floating(scene: &mut Scene, rect: Rect, radius: f32, theme: &Theme, scale: f32) {
+    let radius = radius.min(rect.width * 0.5).min(rect.height * 0.5).max(0.0);
+    let shape = RoundedRect::new(rect, radius);
+    drop_shadow(scene, shape, theme.elevation.lg);
+    scene.fill(shape, theme.palette.overlay);
+    hairline(scene, rect, radius, scale, theme.palette.hairline_strong);
+}
+
+/// How far a floating surface's shadow reaches beyond it (see
+/// [`floating`]).
+pub(crate) fn floating_overflow(theme: &Theme) -> f32 {
+    let shadow = theme.elevation.lg;
+    if shadow.color.a == 0 {
+        return 0.0;
+    }
+    let offset = shadow.offset.x.abs().max(shadow.offset.y.abs());
+    (shadow.reach_exact() + offset).max(0.0).ceil()
+}
+
+/// The shadow under a small thumb (a switch's, a slider's): the theme's
+/// small elevation at half its offset and blur, so that it stays inside
+/// the control.
+pub(crate) fn thumb_shadow(theme: &Theme) -> Shadow {
+    let sm = theme.elevation.sm;
+    sm.with_offset(sm.offset.x * 0.5, sm.offset.y * 0.5)
+        .with_blur(sm.blur * 0.5)
+}
+
+/// Draws `shadow` behind `shape` unless it is fully transparent.
+pub(crate) fn drop_shadow<'s>(scene: &mut Scene, shape: impl Into<Shape<'s>>, shadow: Shadow) {
+    if shadow.color.a > 0 {
+        scene.shadow(shape, shadow);
+    }
+}
+
+/// Fills `rect` with a gradient from `top` to `bottom`.
+pub(crate) fn vertical<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    (y0, y1): (f32, f32),
+    top: Color,
+    bottom: Color,
+) {
+    if top == bottom {
+        scene.fill(shape, top);
+        return;
+    }
+    let stops = [Stop::new(0.0, top), Stop::new(1.0, bottom)];
+    scene.fill(
+        shape,
+        LinearGradient {
+            start: Point::new(0.0, y0),
+            end: Point::new(0.0, y1),
+            stops: &stops,
+            extend: Extend::Pad,
+        },
+    );
+}
+
+/// A hairline a device pixel wide just inside `rect`, with corners of
+/// `radius`: the border of a card or a control.
+pub(crate) fn hairline(scene: &mut Scene, rect: Rect, radius: f32, scale: f32, color: Color) {
+    let px = device_px(1.0, scale);
+    let edge = Rect::new(
+        rect.x + px * 0.5,
+        rect.y + px * 0.5,
+        (rect.width - px).max(0.0),
+        (rect.height - px).max(0.0),
     );
     scene.stroke(
-        RoundedRect::new(ring, theme.corners.md),
-        Stroke::round(width),
-        theme.palette.focus,
+        RoundedRect::new(edge, (radius - px * 0.5).max(0.0)),
+        Stroke::new(px),
+        color,
     );
+}
+
+/// The light caught along the top of a raised surface: a line a device
+/// pixel high inside the top edge of `rect`, cut by its corners of
+/// `radius` (CSS's `inset 0 1px 0`).
+pub(crate) fn top_highlight(scene: &mut Scene, rect: Rect, radius: f32, scale: f32, color: Color) {
+    if color.a == 0 {
+        return;
+    }
+    let px = device_px(1.0, scale);
+    scene.clipped(RoundedRect::new(rect, radius), |scene| {
+        scene.fill(Rect::new(rect.x, rect.y, rect.width, px), color);
+    });
 }
 
 /// `x`, in logical pixels, moved to the nearest edge between device
@@ -217,29 +356,20 @@ pub(crate) fn draw_text(scene: &mut Scene, layout: &TextLayout, at: Point) {
     scene.text(layout, at);
 }
 
-/// The style of a control's name, in the theme's text colour.
+/// The style of a control's name, in the theme's secondary text colour.
 pub(crate) fn name_style(theme: &Theme) -> TextStyle {
     theme
         .typography
         .label
-        .with_color(theme.palette.text)
-        .with_align(manguebyte_gfx::Align::Center)
-}
-
-/// The style of a control's value, in the theme's muted text colour.
-pub(crate) fn value_style(theme: &Theme) -> TextStyle {
-    theme
-        .typography
-        .value
         .with_color(theme.palette.text_secondary)
         .with_align(manguebyte_gfx::Align::Center)
 }
 
-/// The colour of a switch's track or a knob's arc, by state.
-pub(crate) fn on_off(theme: &Theme, on: bool) -> Color {
-    if on {
-        theme.palette.accent
-    } else {
-        theme.palette.track
-    }
+/// The style of a control's value, in the theme's text colour.
+pub(crate) fn value_style(theme: &Theme) -> TextStyle {
+    theme
+        .typography
+        .value
+        .with_color(theme.palette.text)
+        .with_align(manguebyte_gfx::Align::Center)
 }

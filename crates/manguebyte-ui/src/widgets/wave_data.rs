@@ -22,18 +22,25 @@ pub const MAX_ZERO_SEARCH: u64 = 1 << 14;
 /// block of frames, as `[low, high, low, high, ...]`.
 type Level = Vec<f32>;
 
+/// One level of a channel's energy: the sum of the squares of the samples
+/// of each block of frames.
+type Energy = Vec<f64>;
+
 /// A sample buffer of one or more channels of `f32`, as a
 /// [`waveform_view`](crate::waveform_view) shows it, with a summary of it
 /// at several resolutions.
 ///
-/// The summary keeps, for each channel, the lowest and highest sample of
-/// every block of 64 frames, of every block of 128, and so on up to one
-/// block for the whole buffer: about a sixteenth of the buffer's size on
-/// top of it. [`min_max`](Waveform::min_max) of any run of frames reads at
-/// most 126 samples at its two ends and two entries per level in between,
-/// whatever the length of the run, so a view of a ten-minute file costs
-/// what a view of a short one costs. The result is exact: the same as
-/// reading every sample of the run.
+/// The summary keeps, for each channel, the lowest and highest sample and
+/// the sum of the squares of the samples of every block of 64 frames, of
+/// every block of 128, and so on up to one block for the whole buffer:
+/// about a tenth of the buffer's size on top of it.
+/// [`min_max`](Waveform::min_max) and [`rms`](Waveform::rms) of any run of
+/// frames read at most 126 samples at its two ends and two entries per
+/// level in between, whatever the length of the run, so a view of a
+/// ten-minute file costs what a view of a short one costs. The lowest and
+/// highest are exact: the same as reading every sample of the run; the
+/// root mean square is summed in `f64` and is exact to far below what a
+/// view shows.
 ///
 /// Making the summary reads every sample once, so it belongs where a file
 /// is loaded, not in a frame. The buffer and the summary never change
@@ -55,6 +62,8 @@ pub struct Waveform {
     sample_rate: f64,
     /// For each channel, its levels from the finest.
     levels: Vec<Vec<Level>>,
+    /// For each channel, its energy at the same levels.
+    energy: Vec<Vec<Energy>>,
     /// How many samples and summary entries queries have read.
     reads: AtomicU64,
 }
@@ -64,6 +73,31 @@ fn widen(low: &mut f32, high: &mut f32, a: f32, b: f32) {
     // `min` and `max` ignore a NaN, so a NaN sample counts for nothing.
     *low = low.min(a);
     *high = high.max(b);
+}
+
+/// The square of a sample, a NaN counting as silence.
+fn square(sample: f32) -> f64 {
+    if sample.is_nan() {
+        0.0
+    } else {
+        f64::from(sample) * f64::from(sample)
+    }
+}
+
+/// The energy of one channel at the levels [`summarise`] makes.
+fn energies(samples: &[f32]) -> Vec<Energy> {
+    let mut levels: Vec<Energy> = Vec::new();
+    let finest: Energy = samples
+        .chunks(BASE)
+        .map(|block| block.iter().map(|&s| square(s)).sum())
+        .collect();
+    levels.push(finest);
+    while levels.last().is_some_and(|level| level.len() > 1) {
+        let below = levels.last().map(Vec::as_slice).unwrap_or_default();
+        let level = below.chunks(2).map(|pair| pair.iter().sum()).collect();
+        levels.push(level);
+    }
+    levels
 }
 
 /// The summary of one channel.
@@ -112,6 +146,7 @@ impl Waveform {
             .max()
             .unwrap_or(0);
         let levels = channels.iter().map(|channel| summarise(channel)).collect();
+        let energy = channels.iter().map(|channel| energies(channel)).collect();
         Waveform {
             name: String::new(),
             channels,
@@ -122,6 +157,7 @@ impl Waveform {
                 48_000.0
             },
             levels,
+            energy,
             reads: AtomicU64::new(0),
         }
     }
@@ -205,45 +241,72 @@ impl Waveform {
     /// if the run has no frames in the channel, or there is no such
     /// channel. Exact, and read from the summary (see [`Waveform`]).
     pub fn min_max(&self, channel: usize, frames: Range<usize>) -> Option<(f32, f32)> {
+        self.summary(channel, frames)
+            .map(|(low, high, _)| (low, high))
+    }
+
+    /// The root mean square of `channel` over `frames` (a NaN sample counts
+    /// as silence), or `None` as for [`min_max`](Waveform::min_max). Read
+    /// from the summary in the same way.
+    ///
+    /// ```
+    /// use manguebyte_ui::Waveform;
+    ///
+    /// let wave = Waveform::new(vec![vec![0.5, -0.5, 0.5, -0.5]], 48_000.0);
+    /// assert_eq!(wave.rms(0, 0..4), Some(0.5));
+    /// ```
+    pub fn rms(&self, channel: usize, frames: Range<usize>) -> Option<f32> {
+        self.summary(channel, frames).map(|(_, _, rms)| rms)
+    }
+
+    /// The lowest and highest sample and the root mean square of `channel`
+    /// over `frames`, read together: what one column of a view shows.
+    pub fn summary(&self, channel: usize, frames: Range<usize>) -> Option<(f32, f32, f32)> {
         let samples = self.channels.get(channel)?;
         let levels = self.levels.get(channel)?;
+        let energy = self.energy.get(channel)?;
         let mut start = frames.start;
         let mut end = frames.end.min(samples.len());
         if start >= end {
             return None;
         }
+        let count = (end - start) as f64;
         let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut sum = 0.0f64;
         let mut reads = 0u64;
-        let mut raw = |range: Range<usize>, low: &mut f32, high: &mut f32| {
+        let mut raw = |range: Range<usize>, low: &mut f32, high: &mut f32, sum: &mut f64| {
             reads += range.len() as u64;
             for &sample in &samples[range] {
                 widen(low, high, sample, sample);
+                *sum += square(sample);
             }
         };
         if end - start < 2 * BASE {
-            raw(start..end, &mut low, &mut high);
+            raw(start..end, &mut low, &mut high, &mut sum);
         } else {
             // The ends that are not whole blocks, sample by sample.
             let first = start.next_multiple_of(BASE);
             let last = end - end % BASE;
-            raw(start..first, &mut low, &mut high);
-            raw(last..end, &mut low, &mut high);
+            raw(start..first, &mut low, &mut high, &mut sum);
+            raw(last..end, &mut low, &mut high, &mut sum);
             start = first >> BASE_SHIFT;
             end = last >> BASE_SHIFT;
             // The whole blocks in between, from the coarsest levels that fit,
             // as a segment tree is read from its leaves up.
-            for level in levels {
+            for (level, energy) in levels.iter().zip(energy) {
                 if start >= end {
                     break;
                 }
                 if start % 2 == 1 {
                     widen(&mut low, &mut high, level[2 * start], level[2 * start + 1]);
+                    sum += energy[start];
                     reads += 1;
                     start += 1;
                 }
                 if end % 2 == 1 {
                     end -= 1;
                     widen(&mut low, &mut high, level[2 * end], level[2 * end + 1]);
+                    sum += energy[end];
                     reads += 1;
                 }
                 start /= 2;
@@ -251,11 +314,12 @@ impl Waveform {
             }
         }
         self.count(reads);
+        let rms = (sum / count).sqrt() as f32;
         if low > high {
             // Every sample was NaN.
-            Some((0.0, 0.0))
+            Some((0.0, 0.0, 0.0))
         } else {
-            Some((low, high))
+            Some((low, high, rms))
         }
     }
 
@@ -393,6 +457,26 @@ mod tests {
             }
             assert_eq!(wave.min_max(0, 0..len), scan(&samples, 0..len));
         }
+    }
+
+    #[test]
+    fn the_root_mean_square_agrees_with_reading_every_sample() {
+        let samples = noise(50_000, 11);
+        let wave = Waveform::new(vec![samples.clone()], 48_000.0);
+        for (from, to) in [(0, 1), (3, 70), (17, 49_999), (64, 128), (1_000, 31_000)] {
+            let exact = (samples[from..to]
+                .iter()
+                .map(|&s| f64::from(s) * f64::from(s))
+                .sum::<f64>()
+                / (to - from) as f64)
+                .sqrt();
+            let rms = f64::from(wave.rms(0, from..to).expect("frames"));
+            assert!((rms - exact).abs() < 1e-5, "{from}..{to}: {rms} {exact}");
+            // Read together with the lowest and highest, which stay exact.
+            let (low, high, _) = wave.summary(0, from..to).expect("frames");
+            assert_eq!(wave.min_max(0, from..to), Some((low, high)));
+        }
+        assert_eq!(wave.rms(0, 10..10), None);
     }
 
     #[test]

@@ -3,13 +3,14 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use manguebyte_gfx::{Align, Point, Rect, Scene, Size, Stroke};
+use manguebyte_gfx::{Align, Point, Rect, RoundedRect, Scene, Size, Stroke};
 
 use super::keys::{KeySpan, is_black, note_name};
-use super::{device_px, focus_ring, hline, line, line_height, snap_px, vline};
+use super::{focus_ring, glow_fill, hline, line, line_height, snap_px, vline};
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Button, DropData, Event, Handled, Key, KeyEvent, Modifiers};
+use crate::motion::{Animated, Lerp};
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -41,6 +42,10 @@ pub struct Zone {
     pub high_velocity: u8,
     /// The key that plays the sample at its own pitch, if any.
     pub root: Option<u8>,
+    /// Which of the theme's categorical [`hues`](crate::Palette::hues) it
+    /// is drawn in: the same for zones of the same sample. `None` takes
+    /// one from the id.
+    pub hue: Option<u8>,
 }
 
 impl Zone {
@@ -56,7 +61,16 @@ impl Zone {
             low_velocity: 0,
             high_velocity: TOP,
             root: None,
+            hue: None,
         }
+    }
+
+    /// The same zone drawn in the theme's categorical hue `index` (taken
+    /// modulo the number of hues).
+    #[must_use]
+    pub fn with_hue(mut self, index: u8) -> Zone {
+        self.hue = Some(index);
+        self
     }
 
     /// The same zone at the velocities from `low` to `high`, in either
@@ -377,6 +391,10 @@ pub struct ZoneMap {
     /// The zone the keyboard is on.
     cursor: Option<u64>,
     version: Option<u64>,
+    /// The zone under the pointer and how far its hover has come in, and
+    /// the zone it left, fading out.
+    hover_zone: Option<(u64, Animated<f32>)>,
+    fading: Option<(u64, Animated<f32>)>,
 }
 
 /// A map called `name` of the zones `state` holds, over `span`.
@@ -411,6 +429,8 @@ pub fn zone_map(name: impl Into<String>, span: KeySpan, state: ZoneMapState) -> 
         drop_at: None,
         cursor: None,
         version: None,
+        hover_zone: None,
+        fading: None,
     }
 }
 
@@ -901,10 +921,10 @@ impl ZoneMap {
         value
     }
 
-    /// Paints the grid: black keys' columns shaded, a line at each C and
-    /// at every 32 velocities.
+    /// Paints the grid, faint: black keys' columns barely shaded, a line
+    /// at each C and at every 32 velocities.
     fn paint_grid(&self, scene: &mut Scene, rect: Rect, theme: &Theme, scale: f32) {
-        scene.fill(rect, theme.palette.background);
+        let palette = &theme.palette;
         for note in self.span.notes() {
             let Some(column) = self.span.column(rect, note) else {
                 continue;
@@ -914,7 +934,7 @@ impl ZoneMap {
                 let right = snap_px(column.right(), scale);
                 scene.fill(
                     Rect::new(left, rect.y, (right - left).max(0.0), rect.height),
-                    theme.palette.surface,
+                    palette.track.with_opacity(0.2),
                 );
             } else if note % 12 == 0 && note != self.span.low() {
                 vline(
@@ -923,7 +943,7 @@ impl ZoneMap {
                     (rect.y, rect.bottom()),
                     1.0,
                     scale,
-                    theme.palette.track,
+                    palette.hairline_strong,
                 );
             }
         }
@@ -936,23 +956,78 @@ impl ZoneMap {
                 (rect.x, rect.right()),
                 1.0,
                 scale,
-                theme.palette.track,
+                palette.hairline,
             );
         }
     }
+
+    /// The text under a zone's name: its keys, and its velocities when
+    /// they are not all of them.
+    fn range_text(&self, zone: &Zone) -> String {
+        let names = &self.names;
+        let mut text = if zone.low_key == zone.high_key {
+            names(zone.low_key)
+        } else {
+            format!("{}\u{2013}{}", names(zone.low_key), names(zone.high_key))
+        };
+        if zone.low_velocity > 0 || zone.high_velocity < TOP {
+            text.push_str(&format!(
+                " \u{b7} {}\u{2013}{}",
+                zone.low_velocity, zone.high_velocity
+            ));
+        }
+        text
+    }
+
+    /// Moves the hover to zone `id`: the zone it leaves fades out.
+    fn hover_to(&mut self, cx: &mut EventCx<'_>, id: Option<u64>) {
+        if self.hover_zone.map(|(at, _)| at) == id {
+            return;
+        }
+        let (now, fast) = (cx.now(), cx.motion().fast());
+        if let Some((left, mut amount)) = self.hover_zone.take() {
+            amount.transition(0.0, now, fast);
+            self.fading = Some((left, amount));
+        }
+        self.hover_zone = id.map(|id| {
+            let mut amount = Animated::new(0.0);
+            amount.transition(1.0, now, fast);
+            (id, amount)
+        });
+        cx.request_paint();
+    }
 }
 
-/// A frame `pixels` device pixels wide just inside `area`.
-fn outline(scene: &mut Scene, area: Rect, pixels: f32, scale: f32, color: manguebyte_gfx::Color) {
-    let left = snap_px(area.x, scale);
-    let top = snap_px(area.y, scale);
-    let right = snap_px(area.right(), scale);
-    let bottom = snap_px(area.bottom(), scale);
-    let width = device_px(pixels, scale);
-    vline(scene, left, (top, bottom), pixels, scale, color);
-    vline(scene, right - width, (top, bottom), pixels, scale, color);
-    hline(scene, top, (left, right), pixels, scale, color);
-    hline(scene, bottom - width, (left, right), pixels, scale, color);
+/// The shape a zone is drawn as: its area a pixel inside each edge, so
+/// that zones side by side read apart, with round corners.
+fn zone_shape(area: Rect, theme: &Theme) -> RoundedRect {
+    let inner = Rect::new(
+        area.x + 1.0,
+        area.y + 1.0,
+        (area.width - 2.0).max(0.0),
+        (area.height - 2.0).max(0.0),
+    );
+    let radius = theme
+        .corners
+        .md
+        .min(inner.width * 0.5)
+        .min(inner.height * 0.5)
+        .max(0.0);
+    RoundedRect::new(inner, radius)
+}
+
+/// `shape`'s rectangle less `by` on each side, its corners less `by`.
+fn inset(shape: RoundedRect, by: f32) -> RoundedRect {
+    let r = shape.rect;
+    RoundedRect::new(
+        Rect::new(
+            r.x + by,
+            r.y + by,
+            (r.width - 2.0 * by).max(0.0),
+            (r.height - 2.0 * by).max(0.0),
+        ),
+        (shape.radii.top_left - by).max(0.0),
+    )
 }
 
 impl Widget for ZoneMap {
@@ -996,12 +1071,34 @@ impl Widget for ZoneMap {
             self.version = Some(version);
             cx.request_paint();
         }
+        for (_, amount) in [&mut self.hover_zone, &mut self.fading]
+            .into_iter()
+            .flatten()
+        {
+            cx.animate(amount);
+        }
+        if self.fading.as_ref().is_some_and(|(_, a)| !a.is_running()) {
+            self.fading = None;
+        }
+    }
+
+    fn hover_moved(&mut self, cx: &mut EventCx<'_>, at: Point) {
+        let zones = self.state.zones();
+        let id = self.zone_at(cx.rect(), &zones, at).map(|(id, _)| id);
+        self.hover_to(cx, id);
+    }
+
+    fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
+        if !hovered {
+            self.hover_to(cx, None);
+        }
     }
 
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
         let scale = cx.scale();
+        let palette = &theme.palette;
         self.paint_grid(scene, rect, theme, scale);
         let (zones, selected) = {
             let inner = self.state.lock();
@@ -1011,23 +1108,42 @@ impl Widget for ZoneMap {
             .iter()
             .map(|zone| Self::zone_rect(self.span, rect, zone))
             .collect();
-        let label = theme
-            .typography
-            .value
-            .with_color(theme.palette.text)
-            .with_align(Align::Start);
-        let label_height = line_height(&label);
+        let mut name_style = theme.typography.label.with_align(Align::Start);
+        name_style.size = 11.0;
+        let mut range_style = theme.typography.caption.with_align(Align::Start);
+        range_style.size = 10.0;
+        let (name_height, range_height) = (line_height(&name_style), line_height(&range_style));
+        let (hover_zone, fading) = (self.hover_zone, self.fading);
+        let hover_of = |id: u64| {
+            [hover_zone, fading]
+                .into_iter()
+                .flatten()
+                .find(|(at, _)| *at == id)
+                .map_or(0.0, |(_, amount)| amount.value())
+        };
+        let hue_of = |zone: &Zone| {
+            let index = zone.hue.map_or(zone.id as usize, usize::from);
+            palette.hues[index % palette.hues.len()]
+        };
+        // The chosen zones glow under everything.
+        for (zone, area) in zones.iter().zip(&areas) {
+            if let (Some(area), true) = (*area, selected.contains(&zone.id)) {
+                glow_fill(scene, zone_shape(area, theme), palette.accent, theme, 0.8);
+            }
+        }
         for (zone, area) in zones.iter().zip(&areas) {
             let Some(area) = *area else {
                 continue;
             };
+            let hue = hue_of(zone);
+            let shape = zone_shape(area, theme);
+            let hover = hover_of(zone.id);
             let chosen = selected.contains(&zone.id);
-            let fill = if chosen {
-                theme.palette.focus.with_alpha(0x55)
-            } else {
-                theme.palette.accent.with_alpha(0x44)
-            };
-            scene.fill(area, fill);
+            // Its fill, stronger under the pointer and when chosen.
+            let fill = hue
+                .fill
+                .lerp(hue.ring, if chosen { 0.35 } else { 0.25 * hover });
+            scene.fill(shape, fill);
             if let Some(root) = zone
                 .root
                 .filter(|&root| zone.low_key <= root && root <= zone.high_key)
@@ -1035,22 +1151,35 @@ impl Widget for ZoneMap {
                 if let Some(column) = self.span.column(area, root) {
                     let left = snap_px(column.x, scale);
                     let right = snap_px(column.right(), scale);
-                    let height = (area.height * 0.25).min(4.0);
-                    scene.fill(
-                        Rect::new(
-                            left,
-                            area.bottom() - height,
-                            (right - left).max(0.0),
-                            height,
-                        ),
-                        theme.palette.accent,
+                    let height = (area.height * 0.25).min(3.0);
+                    let mark = Rect::new(
+                        left + 1.0,
+                        area.bottom() - height - 3.0,
+                        (right - left - 2.0).max(0.0),
+                        height,
                     );
+                    scene.fill(RoundedRect::new(mark, height * 0.5), hue.color);
                 }
             }
-            if area.height >= label_height && area.width > 8.0 {
-                let text = line(&zone.name, &label, area.width - 6.0);
-                scene.clipped(area, |scene| {
-                    scene.text(&text, Point::new(area.x + 3.0, area.y + 1.0));
+            // Its name, and its range under it if both fit; nothing that
+            // would not show at least a few letters.
+            let pad = 6.0f32.min(shape.rect.width * 0.12);
+            let room = shape.rect.width - 2.0 * pad;
+            if room >= 14.0 && shape.rect.height >= name_height + 2.0 {
+                let top = shape.rect.y + 4.0f32.min((shape.rect.height - name_height) * 0.5);
+                let name = line(&zone.name, &name_style.with_color(hue.text), room);
+                let range = line(
+                    &self.range_text(zone),
+                    &range_style.with_color(hue.text.with_alpha(0xB3)),
+                    room,
+                );
+                let both =
+                    shape.rect.height >= top - shape.rect.y + name_height + range_height + 2.0;
+                scene.clipped(shape, |scene| {
+                    scene.text(&name, Point::new(shape.rect.x + pad, top));
+                    if both && !range.is_truncated() {
+                        scene.text(&range, Point::new(shape.rect.x + pad, top + name_height));
+                    }
                 });
             }
         }
@@ -1059,19 +1188,25 @@ impl Widget for ZoneMap {
             for b in &areas[first + 1..] {
                 if let (Some(a), Some(b)) = (a, b) {
                     if let Some(both) = a.intersect(b).filter(|both| !both.is_empty()) {
-                        scene.fill(both, theme.palette.danger.with_alpha(0x66));
+                        scene.fill(zone_shape(both, theme), palette.danger.with_alpha(0x59));
                     }
                 }
             }
         }
+        // Their rings: the hue's hairline, or the accent's for the chosen.
+        let ring = cx.focus_ring();
         for (zone, area) in zones.iter().zip(&areas) {
             let Some(area) = *area else {
                 continue;
             };
+            let shape = zone_shape(area, theme);
             if selected.contains(&zone.id) {
-                outline(scene, area, 2.0, scale, theme.palette.focus);
+                scene.stroke(inset(shape, 0.75), Stroke::new(1.5), palette.accent);
             } else {
-                outline(scene, area, 1.0, scale, theme.palette.accent);
+                scene.stroke(inset(shape, 0.5), Stroke::new(1.0), hue_of(zone).ring);
+            }
+            if self.cursor == Some(zone.id) {
+                focus_ring(scene, inset(shape, 2.5), theme, ring);
             }
         }
         if let Some(drop_at) = self.drop_at {
@@ -1085,21 +1220,21 @@ impl Widget for ZoneMap {
             ) {
                 let left = snap_px(first.x, scale);
                 let right = snap_px(last.right(), scale);
-                scene.fill(
-                    Rect::new(left, rect.y, (right - left).max(0.0), rect.height),
-                    theme.palette.accent.with_alpha(0x80),
+                let target = Rect::new(left, rect.y, (right - left).max(0.0), rect.height);
+                scene.fill(zone_shape(target, theme), palette.accent.with_alpha(0x4D));
+                scene.stroke(
+                    inset(zone_shape(target, theme), 0.75),
+                    Stroke::new(1.5),
+                    palette.accent,
                 );
             }
         }
         if let Some(press) = &self.press {
             if let Some(reach) = press.band {
                 let band = Rect::from_points(press.at, reach);
-                scene.fill(band, theme.palette.focus.with_alpha(0x22));
-                scene.stroke(band, Stroke::new(1.0), theme.palette.focus);
+                scene.fill(band, palette.accent_soft);
+                scene.stroke(band, Stroke::new(1.0), palette.accent.with_alpha(0x99));
             }
-        }
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
         }
     }
 

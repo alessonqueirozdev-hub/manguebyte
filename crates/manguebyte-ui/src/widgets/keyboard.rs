@@ -4,12 +4,13 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use manguebyte_gfx::{Align, Circle, Point, Rect, Scene, Size};
+use manguebyte_gfx::{Align, Circle, Color, Point, Radii, Rect, RoundedRect, Scene, Shadow, Size};
 
 use super::keys::{KeySpan, is_black, note_name};
-use super::{device_px, focus_ring, line, snap_px, value_style};
+use super::{device_px, focus_ring, glow_fill, line, snap_px, value_style, vertical};
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
+use crate::motion::{Animated, Lerp};
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// How tall the strip along the top that shows key ranges is, in logical
@@ -281,6 +282,10 @@ pub struct PianoKeyboard {
     cursor: u8,
     space: Option<u8>,
     version: Option<u64>,
+    /// The key under the pointer and how far its hover has come in, and
+    /// the key it left, fading out.
+    hover_key: Option<(u8, Animated<f32>)>,
+    fading: Option<(u8, Animated<f32>)>,
 }
 
 /// A keyboard called `name` over `span`, sharing what it plays and shows
@@ -331,10 +336,30 @@ pub fn piano_keyboard(
         cursor: if span.contains(60) { 60 } else { span.low() },
         space: None,
         version: None,
+        hover_key: None,
+        fading: None,
     }
 }
 
 impl PianoKeyboard {
+    /// Moves the hover to `key`: the key it leaves fades out.
+    fn hover_to(&mut self, cx: &mut EventCx<'_>, key: Option<u8>) {
+        if self.hover_key.map(|(at, _)| at) == key {
+            return;
+        }
+        let (now, fast) = (cx.now(), cx.motion().fast());
+        if let Some((left, mut amount)) = self.hover_key.take() {
+            amount.transition(0.0, now, fast);
+            self.fading = Some((left, amount));
+        }
+        self.hover_key = key.map(|key| {
+            let mut amount = Animated::new(0.0);
+            amount.transition(1.0, now, fast);
+            (key, amount)
+        });
+        cx.request_paint();
+    }
+
     /// The same keyboard naming notes with `names`, for people and for
     /// assistive technology: [`note_name_portuguese`](super::keys::note_name_portuguese)
     /// for one.
@@ -615,6 +640,26 @@ impl Widget for PianoKeyboard {
             self.version = Some(version);
             cx.request_paint();
         }
+        for (_, amount) in [&mut self.hover_key, &mut self.fading]
+            .into_iter()
+            .flatten()
+        {
+            cx.animate(amount);
+        }
+        if self.fading.as_ref().is_some_and(|(_, a)| !a.is_running()) {
+            self.fading = None;
+        }
+    }
+
+    fn hover_moved(&mut self, cx: &mut EventCx<'_>, at: Point) {
+        let key = self.key_at(cx.rect(), at).map(|(note, _)| note);
+        self.hover_to(cx, key);
+    }
+
+    fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
+        if !hovered {
+            self.hover_to(cx, None);
+        }
     }
 
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
@@ -624,12 +669,33 @@ impl Widget for PianoKeyboard {
         let keys = Self::keys(rect);
         let inner = self.state.lock();
         let gap = device_px(1.0, scale);
-        scene.fill(rect, theme.palette.background);
+        let palette = &theme.palette;
         let lit = |note: u8| {
             let index = usize::from(note);
             inner.down[index] || inner.sounding[index]
         };
-        let label = value_style(theme).with_color(theme.palette.key_black);
+        let (hover_key, fading) = (self.hover_key, self.fading);
+        let hover_of = |note: u8| {
+            [hover_key, fading]
+                .into_iter()
+                .flatten()
+                .find(|(at, _)| *at == note)
+                .map_or(0.0, |(_, amount)| amount.value())
+        };
+        let label = value_style(theme).with_color(palette.key_black.with_alpha(0x99));
+        // Keys rounded at their foot, as keys are.
+        let foot = |key: Rect, radius: f32| {
+            let r = radius.min(key.width * 0.4).max(0.0);
+            RoundedRect::with_radii(
+                key,
+                Radii {
+                    top_left: 0.0,
+                    top_right: 0.0,
+                    bottom_right: r,
+                    bottom_left: r,
+                },
+            )
+        };
         for note in self.span.notes().filter(|&note| !is_black(note)) {
             let Some(key) = self.span.white_key(keys, note) else {
                 continue;
@@ -637,12 +703,53 @@ impl Widget for PianoKeyboard {
             let left = snap_px(key.x, scale);
             let right = snap_px(key.right(), scale) - gap;
             let key = Rect::new(left, key.y, (right - left).max(0.0), key.height);
-            let color = if lit(note) {
-                theme.palette.accent
+            let shape = foot(key, 6.0);
+            if lit(note) {
+                glow_fill(scene, shape, palette.accent, theme, 0.9);
+                vertical(
+                    scene,
+                    shape,
+                    (key.y, key.bottom()),
+                    palette.accent_bright,
+                    palette.accent,
+                );
             } else {
-                theme.palette.key_white
-            };
-            scene.fill(key, color);
+                // A soft gradient, shaded at the top where the black keys
+                // sit, a little darker under the pointer.
+                let shade = Color::BLACK.with_opacity(0.06 * hover_of(note));
+                vertical(
+                    scene,
+                    shape,
+                    (key.y, key.bottom()),
+                    palette.key_white_shade,
+                    palette.key_white,
+                );
+                if shade.a > 0 {
+                    scene.fill(shape, shade);
+                }
+            }
+            // An edge that parts the key from a light surface behind it.
+            scene.stroke(
+                foot(
+                    Rect::new(
+                        key.x + 0.5,
+                        key.y - 0.5,
+                        (key.width - 1.0).max(0.0),
+                        key.height,
+                    ),
+                    5.5,
+                ),
+                manguebyte_gfx::Stroke::new(1.0),
+                palette.hairline,
+            );
+            // The lip at the foot of the key.
+            scene.clipped(shape, |scene| {
+                let lip = 3.0f32.min(key.height * 0.1);
+                scene.fill(
+                    Rect::new(key.x, key.bottom() - lip, key.width, lip),
+                    Color::BLACK.with_alpha(0x14),
+                );
+            });
             if note % 12 == 0 {
                 let text = line(
                     &(self.names)(note),
@@ -663,12 +770,34 @@ impl Widget for PianoKeyboard {
             let right = snap_px(key.right(), scale);
             let bottom = snap_px(key.bottom(), scale);
             let key = Rect::new(left, key.y, (right - left).max(0.0), bottom - key.y);
-            let color = if lit(note) {
-                theme.palette.accent
+            let shape = foot(key, 4.0);
+            let lift = Shadow::new(Color::BLACK.with_alpha(0x80))
+                .with_offset(0.0, 2.0)
+                .with_blur(5.0);
+            scene.shadow(shape, lift);
+            if lit(note) {
+                glow_fill(scene, shape, palette.accent, theme, 0.9);
+                vertical(
+                    scene,
+                    shape,
+                    (key.y, key.bottom()),
+                    palette.accent_bright,
+                    palette.accent,
+                );
             } else {
-                theme.palette.key_black
-            };
-            scene.fill(key, color);
+                let top = palette
+                    .key_black_top
+                    .lerp(palette.text_muted, 0.25 * hover_of(note));
+                vertical(scene, shape, (key.y, key.bottom()), top, palette.key_black);
+                // Light along the foot.
+                scene.clipped(shape, |scene| {
+                    let lip = 2.0f32.min(key.height * 0.1);
+                    scene.fill(
+                        Rect::new(key.x, key.bottom() - lip, key.width, lip),
+                        Color::WHITE.with_alpha(0x10),
+                    );
+                });
+            }
         }
         // Ranges along the top, and a dot on each root key.
         let strip = Rect::new(rect.x, rect.y, rect.width, keys.y - rect.y);
@@ -693,14 +822,18 @@ impl Widget for PianoKeyboard {
                 (right - left).max(0.0),
                 (strip.height - 2.0).max(0.0),
             );
-            scene.fill(bar, theme.palette.accent.with_alpha(0x99));
+            scene.fill(
+                RoundedRect::new(bar, bar.height * 0.5),
+                palette.accent.with_alpha(0x80),
+            );
             if let Some(root) = range.root.filter(|&root| self.span.contains(root)) {
                 if let Some(column) = self.span.column(strip, root) {
                     let left = snap_px(column.x, scale);
                     let right = snap_px(column.right(), scale);
+                    let mark = Rect::new(left, strip.y, (right - left).max(0.0), strip.height);
                     scene.fill(
-                        Rect::new(left, strip.y, (right - left).max(0.0), strip.height),
-                        theme.palette.accent,
+                        RoundedRect::new(mark, mark.width.min(mark.height) * 0.5),
+                        palette.accent,
                     );
                 }
                 if let Some(key) = self.key_rect(keys, root) {
@@ -717,18 +850,21 @@ impl Widget for PianoKeyboard {
                             center.y,
                         )
                     };
-                    scene.fill(Circle::new(center, radius), theme.palette.accent);
+                    scene.fill(Circle::new(center, radius), palette.accent);
                 }
             }
         }
         drop(inner);
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
+        let ring = cx.focus_ring();
+        if ring > 0.0 {
             if let Some(key) = self.key_rect(keys, self.cursor) {
-                let mark = Rect::new(key.x, key.bottom() - 3.0, key.width, 3.0)
-                    .intersect(&keys)
-                    .unwrap_or(key);
-                scene.fill(mark, theme.palette.accent);
+                let ring_rect = Rect::new(
+                    key.x + 1.5,
+                    key.y + 1.5,
+                    (key.width - 3.0).max(0.0),
+                    (key.height - 3.0).max(0.0),
+                );
+                focus_ring(scene, foot(ring_rect, 4.0), theme, ring);
             }
         }
     }

@@ -1,9 +1,9 @@
 //! A control that picks one of a parameter's values from a menu.
 
-use manguebyte_gfx::{Align, Path, Point, Rect, RoundedRect, Scene, Size, Stroke, TextStyle};
+use manguebyte_gfx::{Align, Path, Point, Rect, Scene, Size, Stroke, TextStyle};
 
 use super::text_field::{PAD_X, PAD_Y, field_box};
-use super::{Cached, GAP, MARGIN, focus_ring, line, line_height, name_style, text_width};
+use super::{Cached, GAP, MARGIN, line, line_height, name_style, text_width};
 use crate::access::{AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, MenuEvent};
 use crate::menu::{Menu, MenuItem};
@@ -235,13 +235,14 @@ impl Widget for ComboBox {
         scene.text(name, Point::new(rect.x + MARGIN, rect.y + MARGIN));
 
         let outer = value_box(rect, theme);
-        field_box(scene, outer, theme, false);
-        if self.open {
-            scene.fill(
-                RoundedRect::new(outer, theme.corners.sm),
-                theme.palette.track.with_alpha(0x80),
-            );
-        }
+        let open = if self.open { 1.0 } else { 0.0 };
+        field_box(
+            scene,
+            outer,
+            theme,
+            false,
+            (cx.focus_ring().max(open), cx.hover().max(open)),
+        );
         let style = box_style(theme);
         let room = (outer.width - 2.0 * PAD_X - ARROW).max(0.0);
         let key = (binding.shown().to_bits(), binding.shows_sent(), style);
@@ -259,9 +260,6 @@ impl Widget for ComboBox {
             .line_to(Point::new(x, middle + 2.0))
             .line_to(Point::new(x + 4.0, middle - 2.0));
         scene.stroke(&arrow, Stroke::round(1.5), theme.palette.text_secondary);
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
-        }
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {

@@ -100,7 +100,7 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 /// The background of the editors' theme, as the screen shows it.
-const BACKGROUND: [u8; 4] = [0x16, 0x18, 0x1c, 0xff];
+const BACKGROUND: [u8; 4] = [0x10, 0x11, 0x16, 0xff];
 
 // --- Loading a plugin binary ---------------------------------------------
 

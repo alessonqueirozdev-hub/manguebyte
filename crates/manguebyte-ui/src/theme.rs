@@ -350,7 +350,7 @@ impl Theme {
                 fine_factor: 10.0,
                 scroll_bar: 10.0,
                 scroll_line: 40.0,
-                list_row: 24.0,
+                list_row: 32.0,
             },
             corners: Corners {
                 sm: 4.0,

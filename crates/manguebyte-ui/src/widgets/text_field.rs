@@ -5,9 +5,10 @@ use std::rc::Rc;
 use manguebyte_gfx::{Align, Point, Rect, RoundedRect, Scene, Size, Stroke, TextStyle};
 
 use super::text_edit::{DEFAULT_MAX_CHARS, Outcome, TextEdit};
-use super::{Cached, MARGIN, focus_ring, line, line_height};
+use super::{Cached, MARGIN, line, line_height};
 use crate::access::{AccessNode, Actions, Role};
 use crate::event::{Button, Event, Handled};
+use crate::motion::Lerp;
 use crate::source::State;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
@@ -240,22 +241,39 @@ pub(crate) fn field_style(theme: &Theme) -> TextStyle {
 
 /// Draws a field's box: the background inside a border, in the warning
 /// colour if `invalid`.
-pub(crate) fn field_box(scene: &mut Scene, outer: Rect, theme: &Theme, invalid: bool) {
+///
+/// `active`, from 0 to 1, turns the border to the focus colour and
+/// thickens it: 1 while text is being typed, the focus ring's amount
+/// otherwise; `hover` lightens the face.
+pub(crate) fn field_box(
+    scene: &mut Scene,
+    outer: Rect,
+    theme: &Theme,
+    invalid: bool,
+    (active, hover): (f32, f32),
+) {
     let palette = &theme.palette;
-    let radius = theme.corners.sm;
-    scene.fill(RoundedRect::new(outer, radius), palette.background);
+    let radius = theme.corners.md.min(outer.height * 0.5);
+    let face = palette.raised.lerp(palette.overlay, hover.clamp(0.0, 1.0));
+    scene.fill(RoundedRect::new(outer, radius), face);
+    let active = active.clamp(0.0, 1.0);
     let border = if invalid {
         palette.danger
     } else {
-        palette.track
+        palette.hairline_strong.lerp(palette.focus, active)
     };
+    let width = 1.0 + 0.5 * active;
     let edge = Rect::new(
-        outer.x + 0.5,
-        outer.y + 0.5,
-        (outer.width - 1.0).max(0.0),
-        (outer.height - 1.0).max(0.0),
+        outer.x + width * 0.5,
+        outer.y + width * 0.5,
+        (outer.width - width).max(0.0),
+        (outer.height - width).max(0.0),
     );
-    scene.stroke(RoundedRect::new(edge, radius), Stroke::new(1.0), border);
+    scene.stroke(
+        RoundedRect::new(edge, (radius - width * 0.5).max(0.0)),
+        Stroke::new(width),
+        border,
+    );
 }
 
 impl Widget for TextField {
@@ -293,7 +311,14 @@ impl Widget for TextField {
         let rect = cx.rect();
         let style = field_style(theme);
         let (outer, inner) = TextField::boxes(rect, &style);
-        field_box(scene, outer, theme, self.invalid);
+        let typing = if cx.is_focused() { 1.0 } else { 0.0 };
+        field_box(
+            scene,
+            outer,
+            theme,
+            self.invalid,
+            (typing, cx.hover() * 0.5),
+        );
         if self.edit.text().is_empty() && !self.edit.is_composing() {
             if let Some(placeholder) = &self.placeholder {
                 let muted = style.with_color(theme.palette.text_secondary);
@@ -305,9 +330,6 @@ impl Widget for TextField {
         }
         self.edit
             .paint(scene, inner, &style, theme, cx.is_focused());
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
-        }
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {

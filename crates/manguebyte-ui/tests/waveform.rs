@@ -370,9 +370,12 @@ fn every_lane_shows_its_own_channel() {
     ))));
     let mut ui = Harness::new(waveform_view("Stereo", state), Size::new(240.0, 120.0), 1.0);
     ui.frame();
-    let accent = manguebyte_ui::Theme::dark().palette.accent;
+    // The waveform is the accent, in a gradient: strongly red where it is
+    // drawn, against a dark background.
     let is_accent = |x: u32, y: u32| {
-        ui.pixels().pixel(x, y).map(|p| p.to_array()) == Some([accent.r, accent.g, accent.b, 255])
+        ui.pixels()
+            .pixel(x, y)
+            .is_some_and(|p| p.red() > 150 && p.red() > p.blue() + 60)
     };
     let group = ui.get(Role::Group, "Stereo");
     let top = group.bounds.y as u32;

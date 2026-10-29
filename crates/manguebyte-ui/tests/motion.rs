@@ -159,3 +159,66 @@ fn the_focus_ring_eases_in_after_the_keyboard_and_not_after_a_press() {
     assert!(!ui.root().focus_visible());
     ui.release(drive.center());
 }
+
+#[test]
+fn a_shadow_that_spills_past_its_widget_is_drawn_again_with_it() {
+    use manguebyte_ui::{card, column, label, pill};
+    for scale in [1.0, 1.25, 2.0] {
+        // A primary pill, whose shadow reaches below it over the card
+        // under it, and lifts with the hover.
+        let view = column((
+            row((pill("Undo"), pill("Export").primary())).spacing(12.0),
+            card(label("Below")).flex(1.0),
+        ))
+        .spacing(4.0)
+        .padding(20.0);
+        let mut ui = Harness::new(view, Size::new(260.0, 160.0), scale);
+        ui.set_motion(true);
+        ui.frame();
+        let export = ui.get(Role::Button, "Export");
+        ui.move_to(export.center());
+        let mut beyond = false;
+        for _ in 0..12 {
+            ui.advance_ms(16);
+            beyond |= ui
+                .last_damage()
+                .iter()
+                .any(|rect| !export.device.contains_rect(rect));
+            // Every frame, partial as it is, equals a whole repaint.
+            assert!(ui.pixels() == &ui.render_fresh(), "{scale}x");
+        }
+        assert!(beyond, "{scale}x: the shadow's reach was drawn again too");
+        assert!(!ui.root().is_animating());
+        assert!(ui.dump().contains("shadow rounded_rect("));
+    }
+}
+
+#[test]
+fn a_press_shows_no_focus_ring_and_the_keyboard_does() {
+    let params = params();
+    let mut ui = knobs(&params);
+    ui.set_motion(false);
+    let focus = Theme::dark().palette.focus;
+    let ring = format!(
+        "join round solid(#{:02x}{:02x}{:02x}{:02x})",
+        focus.r, focus.g, focus.b, focus.a
+    );
+    let cutoff = ui.get(Role::Slider, "Cutoff");
+    ui.click(cutoff.center());
+    ui.frame();
+    let knob = ui.get(Role::Slider, "Cutoff");
+    assert!(knob.is_focused());
+    assert!(!ui.dump_of(&knob).contains(&ring), "no ring after a press");
+    // Tab moves on and the ring shows; Shift+Tab brings it back with it.
+    ui.tab();
+    ui.shift_tab();
+    ui.frame();
+    let knob = ui.get(Role::Slider, "Cutoff");
+    assert!(knob.is_focused());
+    assert!(
+        ui.dump_of(&knob).contains(&ring),
+        "the ring after the keyboard"
+    );
+    // Assistive technology is told about the focus either way.
+    ui.assert_accessible();
+}

@@ -4,12 +4,15 @@
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use manguebyte_gfx::{Align, Path, Point, Rect, RoundedRect, Scene, Size, Stroke};
+use manguebyte_gfx::{
+    Align, Extend, LinearGradient, Path, Point, Rect, RoundedRect, Scene, Size, Stop, Stroke,
+};
 
 use super::wave_data::{MAX_ZERO_SEARCH, Waveform};
 use super::{focus_ring, hline, line, line_height, snap_px, value_style, vline};
 use crate::access::{AccessItem, AccessNode, AccessRange, Action, Actions, Role, selection_color};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
+use crate::motion::Lerp;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -502,33 +505,60 @@ impl Geometry {
 /// The lowest and highest sample of `channel` over the frames that `count`
 /// columns of a view of `start..end` show, as fractions of the height from
 /// the bottom, for [`Scene::columns`].
-fn columns(
-    wave: &Waveform,
-    channel: usize,
-    start: f64,
-    end: f64,
-    count: usize,
-) -> (Vec<f32>, Vec<f32>) {
+fn columns(wave: &Waveform, channel: usize, start: f64, end: f64, count: usize) -> Columns {
     let span = end - start;
-    let (mut low, mut high) = (Vec::with_capacity(count), Vec::with_capacity(count));
+    let mut columns = Columns {
+        low: Vec::with_capacity(count),
+        high: Vec::with_capacity(count),
+        core_low: Vec::with_capacity(count),
+        core_high: Vec::with_capacity(count),
+    };
+    let mut spans = Vec::with_capacity(count);
+    let mut energy = Vec::with_capacity(count);
     for column in 0..count {
         let from = (start + span * column as f64 / count as f64).floor() as usize;
         let to = (start + span * (column + 1) as f64 / count as f64).floor() as usize;
         // Each column takes in the last frame of the one before, so that
         // neighbouring columns join.
         let frames = from.saturating_sub(1)..to.max(from + 1);
-        let (l, h) = wave.min_max(channel, frames).unwrap_or((0.0, 0.0));
-        low.push((l + 1.0) * 0.5);
-        high.push((h + 1.0) * 0.5);
+        let (l, h, rms) = wave.summary(channel, frames).unwrap_or((0.0, 0.0, 0.0));
+        columns.low.push((l + 1.0) * 0.5);
+        columns.high.push((h + 1.0) * 0.5);
+        spans.push((l, h));
+        energy.push(rms * rms);
     }
-    (low, high)
+    // The core: the root mean square either side of the middle, over a
+    // few columns either way so that it reads as a smooth body rather
+    // than as each column's share of a cycle, and within each span.
+    for (column, &(l, h)) in spans.iter().enumerate() {
+        let near = &energy[column.saturating_sub(CORE_REACH)..(column + CORE_REACH + 1).min(count)];
+        let rms = (near.iter().sum::<f32>() / near.len() as f32).sqrt();
+        columns.core_low.push((l.max(-rms) + 1.0) * 0.5);
+        columns.core_high.push((h.min(rms) + 1.0) * 0.5);
+    }
+    columns
+}
+
+/// How many columns either way a column's core is averaged over.
+const CORE_REACH: usize = 4;
+
+/// A channel's columns: the span of each, from its lowest to highest
+/// sample, and its core, the root mean square either side of the middle,
+/// as fractions of the lane from its bottom.
+#[derive(Debug, Clone)]
+struct Columns {
+    low: Vec<f32>,
+    high: Vec<f32>,
+    core_low: Vec<f32>,
+    core_high: Vec<f32>,
 }
 
 /// How one channel is drawn.
 #[derive(Debug, Clone)]
 enum Shape {
-    /// A span per device pixel column, from its lowest to highest sample.
-    Columns(Vec<f32>, Vec<f32>),
+    /// A span per device pixel column, from its lowest to highest sample,
+    /// with a brighter core.
+    Columns(Columns),
     /// A line through the samples, zoomed in further than a frame per
     /// device pixel.
     Line(Path),
@@ -568,7 +598,7 @@ enum Press {
 fn marker_color(theme: &Theme, kind: MarkerKind) -> manguebyte_gfx::Color {
     match kind {
         MarkerKind::Edge => theme.palette.text,
-        MarkerKind::Loop => theme.palette.success,
+        MarkerKind::Loop => theme.palette.hues[1].color,
         MarkerKind::Cue => theme.palette.text_secondary,
     }
 }
@@ -955,9 +985,7 @@ impl WaveformView {
                 .enumerate()
                 .map(|(channel, lane)| {
                     if per_column >= 1.0 {
-                        let (low, high) =
-                            columns(wave, channel, geometry.start, geometry.end, count);
-                        Shape::Columns(low, high)
+                        Shape::Columns(columns(wave, channel, geometry.start, geometry.end, count))
                     } else {
                         Shape::Line(sample_line(wave, channel, geometry, *lane))
                     }
@@ -1093,9 +1121,15 @@ impl Widget for WaveformView {
         let theme = cx.theme();
         let rect = cx.rect();
         let scale = cx.scale();
-        scene.fill(
-            RoundedRect::new(rect, theme.corners.sm),
-            theme.palette.background,
+        let palette = &theme.palette;
+        let ring = RoundedRect::new(
+            Rect::new(
+                rect.x + 1.5,
+                rect.y + 1.5,
+                (rect.width - 3.0).max(0.0),
+                (rect.height - 3.0).max(0.0),
+            ),
+            theme.corners.lg,
         );
         let (wave, geometry, selection, markers, playhead) = {
             let inner = self.state.lock();
@@ -1112,9 +1146,7 @@ impl Widget for WaveformView {
             let text = line("No sample", &style.with_align(Align::Center), rect.width);
             let y = rect.y + (rect.height - text.size().height) * 0.5;
             scene.text(&text, Point::new(rect.x, y));
-            if cx.is_focused() {
-                focus_ring(scene, rect, theme);
-            }
+            focus_ring(scene, ring, theme, cx.focus_ring());
             return;
         };
         let area = geometry.area;
@@ -1122,7 +1154,30 @@ impl Widget for WaveformView {
         let focused = cx.is_focused();
         let cursor = self.cursor;
         let shapes = self.shapes(&wave, &geometry, scale);
+        // The loop, a faint band of its markers' colour between them.
+        let looped = {
+            let mut frames = markers
+                .iter()
+                .filter(|marker| marker.kind == MarkerKind::Loop)
+                .map(|marker| marker.frame);
+            match (frames.next(), frames.next()) {
+                (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                _ => None,
+            }
+        };
+        let loop_color = marker_color(theme, MarkerKind::Loop);
         scene.clipped(area, |scene| {
+            if let Some((from, to)) = looped {
+                let left = geometry.x_of(from as f64);
+                let right = geometry.x_of(to as f64);
+                scene.fill(
+                    RoundedRect::new(
+                        Rect::new(left, area.y, (right - left).max(0.0), area.height),
+                        theme.corners.md,
+                    ),
+                    loop_color.with_alpha(0x12),
+                );
+            }
             if let Some(selection) = &selection {
                 let left = snap_px(geometry.x_of(selection.start as f64), scale);
                 let right = snap_px(geometry.x_of(selection.end as f64), scale);
@@ -1139,14 +1194,38 @@ impl Widget for WaveformView {
                     (lane.x, lane.right()),
                     1.0,
                     scale,
-                    theme.palette.track,
+                    palette.hairline_strong,
                 );
                 match shape {
-                    Shape::Columns(low, high) => {
-                        scene.columns(*lane, low, high, theme.palette.accent);
+                    Shape::Columns(columns) => {
+                        // The span, deepest at the edges and brightest in
+                        // the middle, and its core, brighter still.
+                        let edge = palette.accent.with_alpha(0x8C);
+                        let middle = palette
+                            .accent
+                            .lerp(palette.accent_bright, 0.6)
+                            .with_alpha(0xE6);
+                        let stops = [
+                            Stop::new(0.0, edge),
+                            Stop::new(0.5, middle),
+                            Stop::new(1.0, edge),
+                        ];
+                        let span = LinearGradient {
+                            start: Point::new(lane.x, lane.y),
+                            end: Point::new(lane.x, lane.bottom()),
+                            stops: &stops,
+                            extend: Extend::Pad,
+                        };
+                        scene.columns(*lane, &columns.low, &columns.high, span);
+                        scene.columns(
+                            *lane,
+                            &columns.core_low,
+                            &columns.core_high,
+                            palette.accent_bright.with_alpha(0xF2),
+                        );
                     }
                     Shape::Line(path) => {
-                        scene.stroke(path, Stroke::new(1.0), theme.palette.accent);
+                        scene.stroke(path, Stroke::round(1.5), palette.accent_bright);
                     }
                 }
             }
@@ -1157,7 +1236,7 @@ impl Widget for WaveformView {
                     (lane.x, lane.right()),
                     1.0,
                     scale,
-                    theme.palette.track,
+                    palette.hairline,
                 );
             }
         });
@@ -1173,31 +1252,46 @@ impl Widget for WaveformView {
                 continue;
             }
             let color = marker_color(theme, marker.kind);
-            let pixels = if focused && index == cursor { 2.0 } else { 1.0 };
+            let lit = focused && index == cursor;
+            let pixels = if lit { 2.0 } else { 1.0 };
             // A marker at the very end is drawn just inside.
             let x = x.min(rect.right() - super::device_px(pixels, scale));
             vline(scene, x, (rect.y, rect.bottom()), pixels, scale, color);
+            // Its name on a pill of its colour at the top: right of the
+            // line if there is room before the next marker, left of it if
+            // not.
             let next = xs
                 .iter()
                 .copied()
                 .find(|&other| other > x + 0.5)
                 .unwrap_or(rect.right());
-            let room = next - x - 4.0;
-            let label_style = style.with_color(color);
-            let (left, width) = if room >= 24.0 {
-                (x + 3.0, room)
+            let chip_style = theme
+                .typography
+                .chip
+                .with_color(palette.background)
+                .with_align(Align::Start);
+            let text = line(&marker.name, &chip_style, 120.0);
+            let width = text.size().width + 10.0;
+            let strip = geometry.strip;
+            let height = (strip.height - 1.0).max(0.0);
+            let left = if next - x >= width + 4.0 {
+                x
             } else {
-                let width = (x - rect.x - 3.0).clamp(0.0, 80.0);
-                (x - 3.0 - width, width)
+                (x - width + super::device_px(pixels, scale)).max(rect.x)
             };
-            let style = if room >= 24.0 {
-                label_style
-            } else {
-                label_style.with_align(Align::End)
-            };
-            let text = line(&marker.name, &style, width);
-            scene.clipped(geometry.strip, |scene| {
-                scene.text(&text, Point::new(left, geometry.strip.y + 1.0));
+            let chip = Rect::new(left, strip.y, width, height);
+            scene.fill(RoundedRect::new(chip, height * 0.5), color);
+            if lit {
+                focus_ring(
+                    scene,
+                    RoundedRect::new(chip, height * 0.5),
+                    theme,
+                    cx.focus_ring(),
+                );
+            }
+            let y = strip.y + (height - text.size().height) * 0.5;
+            scene.clipped(chip, |scene| {
+                scene.text(&text, Point::new(left + 5.0, y));
             });
         }
         if let Some(playhead) = playhead {
@@ -1207,15 +1301,13 @@ impl Widget for WaveformView {
                     scene,
                     x,
                     (area.y, area.bottom()),
-                    1.0,
+                    2.0,
                     scale,
-                    theme.palette.thumb,
+                    palette.thumb.with_alpha(0xC0),
                 );
             }
         }
-        if focused {
-            focus_ring(scene, rect, theme);
-        }
+        focus_ring(scene, ring, theme, cx.focus_ring());
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {

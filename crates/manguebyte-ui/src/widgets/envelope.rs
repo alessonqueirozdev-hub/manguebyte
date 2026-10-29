@@ -1,12 +1,15 @@
 //! An envelope editor: attack, decay, sustain and release drawn as a
 //! curve whose corners are dragged.
 
-use manguebyte_gfx::{Align, Circle, Path, Point, Rect, RoundedRect, Scene, Size, Stroke};
+use manguebyte_gfx::{Align, Circle, Color, Path, Point, Rect, Scene, Size, Stroke};
 
 use super::adjust::{Adjust, Axis};
-use super::{GAP, MARGIN, focus_ring, hline, line, line_height, value_style};
+use super::{
+    GAP, MARGIN, focus_ring, glow_stroke, hline, line, line_height, value_style, vertical,
+};
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
+use crate::motion::Lerp;
 use crate::param::ParamHandle;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
@@ -628,57 +631,61 @@ impl Widget for EnvelopeEditor {
         let scale = cx.scale();
         let shape = self.shape(rect, theme);
         let graph = shape.graph;
-        scene.fill(
-            RoundedRect::new(rect, theme.corners.sm),
-            theme.palette.background,
-        );
-        hline(
-            scene,
-            graph.y,
-            (graph.x, graph.right()),
-            1.0,
-            scale,
-            theme.palette.track,
-        );
-        hline(
-            scene,
-            graph.bottom(),
-            (graph.x, graph.right()),
-            1.0,
-            scale,
-            theme.palette.track,
-        );
+        let palette = &theme.palette;
+        for y in [graph.y, graph.bottom()] {
+            hline(
+                scene,
+                y,
+                (graph.x, graph.right()),
+                1.0,
+                scale,
+                palette.hairline,
+            );
+        }
+        // Under the curve, the accent fading to nothing at the bottom; the
+        // curve itself bright and glowing.
         let outline = shape.path();
         let mut area = outline.clone();
         area.line_to(shape.points[0]).close();
-        scene.fill(&area, theme.palette.accent.with_alpha(0x40));
-        scene.stroke(&outline, Stroke::round(2.0), theme.palette.accent);
+        let glows = theme.elevation.glow.color.a > 0;
+        let top = palette.accent.with_alpha(if glows { 0x73 } else { 0x2E });
+        vertical(
+            scene,
+            &area,
+            (graph.y, graph.bottom()),
+            top,
+            palette.accent.with_alpha(0),
+        );
+        let line_color = palette.accent.lerp(palette.accent_bright, 0.35);
+        glow_stroke(scene, &outline, Stroke::round(2.5), theme, 0.8);
+        scene.stroke(&outline, Stroke::round(2.5), line_color);
         let focused = cx.is_focused();
+        let ring = cx.focus_ring();
         let active: &[(usize, Axis)] = self.drag.map_or(&[], |drag| drag.handle.parts());
         for handle in self.handles() {
             let point = shape.handle(handle);
             let parts = handle.parts();
             let is_active = active.first() == parts.first();
             let is_current = focused && parts.iter().any(|&(part, _)| part == self.current);
-            let radius = if matches!(handle, Handle::Curve(_)) {
-                HANDLE - 1.0
+            let curve = matches!(handle, Handle::Curve(_));
+            // Corners: white with a rim of the accent, filled with it while
+            // dragged. Curve handles: small and quiet.
+            let radius = if curve { HANDLE - 1.0 } else { HANDLE + 1.0 };
+            let circle = Circle::new(point, radius);
+            if curve {
+                scene.fill(circle, palette.text_secondary);
             } else {
-                HANDLE
-            };
-            let color = if is_active {
-                theme.palette.accent
-            } else if matches!(handle, Handle::Curve(_)) {
-                theme.palette.text_secondary
-            } else {
-                theme.palette.thumb
-            };
-            scene.fill(Circle::new(point, radius), color);
+                let face = if is_active {
+                    palette.accent
+                } else {
+                    Color::WHITE
+                };
+                super::drop_shadow(scene, circle, theme.elevation.sm);
+                scene.fill(circle, face);
+                scene.stroke(circle, Stroke::new(2.5), palette.accent);
+            }
             if is_current {
-                scene.stroke(
-                    Circle::new(point, radius + 2.0),
-                    Stroke::new(1.5),
-                    theme.palette.focus,
-                );
+                focus_ring(scene, Circle::new(point, radius + 3.5), theme, ring);
             }
         }
         // The line under the curve: the part chosen and its value, or the
@@ -696,9 +703,6 @@ impl Widget for EnvelopeEditor {
                 let layout = line(&text, &style, readout.width);
                 scene.text(&layout, readout.origin());
             }
-        }
-        if focused {
-            focus_ring(scene, rect, theme);
         }
     }
 

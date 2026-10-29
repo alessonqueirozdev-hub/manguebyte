@@ -138,7 +138,13 @@ fn a_knob_drag_damages_only_the_knob() {
     let at = knob.center();
     ui.press(at);
     ui.frame();
-    assert!(damage_inside(&ui, knob.device), "the focus ring");
+    // A press shows no focus ring (it shows after the keyboard is used),
+    // so nothing needs drawing yet; whatever is drawn is the knob's.
+    assert!(
+        ui.last_damage()
+            .iter()
+            .all(|d| knob.device.contains_rect(d))
+    );
     for step in 1..=5 {
         ui.move_to(manguebyte_gfx::Point::new(at.x, at.y - 7.0 * step as f32));
         let summary = ui.frame();

@@ -161,9 +161,30 @@ pub trait Widget: 'static {
     /// The pointer came over the widget (`true`), with no button held, or
     /// went off it (`false`): only the innermost widget under the pointer
     /// is hovered. It is drawn again either way, and can show it with
-    /// [`PaintCx::is_hovered`]. Nothing unless overridden.
+    /// [`PaintCx::is_hovered`] and [`PaintCx::hover`]. Nothing unless
+    /// overridden.
     fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
         let _ = (cx, hovered);
+    }
+
+    /// The pointer moved to `at`, in logical pixels, over the widget while
+    /// it is hovered (with no button held): for a widget that lights the
+    /// part of itself under the pointer, such as a row, a key or a zone.
+    /// It asks to be drawn again if that part changed. Nothing unless
+    /// overridden.
+    fn hover_moved(&mut self, cx: &mut EventCx<'_>, at: Point) {
+        let _ = (cx, at);
+    }
+
+    /// How far beyond its rectangle, in logical pixels, the widget draws:
+    /// the reach of a shadow or a glow around it, such as a card's. The
+    /// root clips what the widget draws to its rectangle grown by this,
+    /// and draws that much around it again when it changes, so a shadow
+    /// that spills over its neighbours is never cut and never left behind.
+    /// Asked whenever layout runs. Zero unless overridden.
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        let _ = cx;
+        0.0
     }
 
     /// Where the text caret is, in logical pixels, while the widget is
@@ -226,6 +247,8 @@ pub(crate) struct Requests {
 pub struct UpdateCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) motion: Motion,
+    /// The root's amounts for the widget: hover, press, focus ring.
+    pub(crate) amounts: (f32, f32, f32),
     pub(crate) rect: Rect,
     pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
@@ -265,6 +288,18 @@ impl UpdateCx<'_> {
     /// jump when the theme or the system turns motion off.
     pub fn motion(&self) -> Motion {
         self.motion
+    }
+
+    /// How far the hover has come in this frame (see [`PaintCx::hover`]).
+    /// For a scroll view, the pointer anywhere over its content counts.
+    pub fn hover(&self) -> f32 {
+        self.amounts.0
+    }
+
+    /// How far the focus ring has come in this frame (see
+    /// [`PaintCx::focus_ring`]).
+    pub fn focus_ring(&self) -> f32 {
+        self.amounts.2
     }
 
     /// Moves `value` on to this frame's time; while it changes the widget

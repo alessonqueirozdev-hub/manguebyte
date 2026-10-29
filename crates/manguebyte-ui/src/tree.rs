@@ -63,6 +63,8 @@ pub(crate) struct Node {
     pub(crate) scroll: Option<ScrollMetrics>,
     /// How far its hover, press and focus ring have come in.
     pub(crate) motion: NodeMotion,
+    /// How far beyond its rectangle it draws (see `Widget::overflow`).
+    pub(crate) overflow: f32,
 }
 
 /// Every widget, in tree order, with the layout tree beside it.
@@ -134,6 +136,7 @@ impl Tree {
                 _ => None,
             },
             motion: NodeMotion::new(),
+            overflow: 0.0,
         });
         self.layout
             .push(LayoutNode::new(style, Default::default(), Vec::new()));

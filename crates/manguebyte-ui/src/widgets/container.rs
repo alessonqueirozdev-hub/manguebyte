@@ -2,7 +2,9 @@
 
 use manguebyte_gfx::{Color, RoundedRect, Scene, Size};
 
+use super::{drop_shadow, hairline, top_highlight, vertical};
 use crate::access::{AccessNode, Role};
+use crate::theme::Theme;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, Widget};
 
 /// What a container is filled with.
@@ -10,8 +12,19 @@ use crate::widget::{AccessCx, MeasureCx, PaintCx, Widget};
 enum Fill {
     Nothing,
     Color(Color),
-    /// The theme's surface colour, with its large corners.
+    /// A card: the theme's raised surface fading to its surface, a
+    /// hairline, the light along its top and its shadow.
     Panel,
+}
+
+/// How far a card's shadow reaches beyond it in `theme`.
+fn card_overflow(theme: &Theme) -> f32 {
+    let shadow = theme.elevation.md;
+    if shadow.color.a == 0 {
+        return 0.0;
+    }
+    let offset = shadow.offset.x.abs().max(shadow.offset.y.abs());
+    (shadow.reach_exact() + offset).max(0.0).ceil()
 }
 
 /// The widget behind [`row`](crate::row), [`column`](crate::column),
@@ -34,8 +47,11 @@ impl Container {
         }
     }
 
-    /// A container drawn as a panel: the theme's surface colour, with its
-    /// large corners. [`panel`](crate::panel) puts one view on it; with
+    /// A container drawn as a card: the theme's raised surface fading down
+    /// to its surface, with the card radius, a hairline border, the light
+    /// along its top edge and the card shadow, which reaches over what is
+    /// around it (see [`Widget::overflow`]). [`panel`](crate::panel) and
+    /// [`card`](crate::card) put one view on it; with
     /// [`View::with_children`](crate::View::with_children) it can hold a
     /// row of them.
     ///
@@ -55,7 +71,8 @@ impl Container {
     /// assert_eq!(inward.bounds.x, 4.0);
     /// assert!(out.bounds.x >= inward.bounds.right() + 5.0);
     /// assert!(group.bounds.contains(out.center()));
-    /// assert!(ui.dump().contains("rounded_rect(0 0 100 30 radii 18 18 18 18)"));
+    /// // A card: a shadow, the surface, rounded to half its height at most.
+    /// assert!(ui.dump().contains("shadow rounded_rect(0 0 100 30 radii 15 15 15 15)"));
     /// ```
     pub fn panel() -> Container {
         Container { fill: Fill::Panel }
@@ -71,6 +88,13 @@ impl Widget for Container {
         Size::default()
     }
 
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        match self.fill {
+            Fill::Panel => card_overflow(cx.theme()),
+            Fill::Nothing | Fill::Color(_) => 0.0,
+        }
+    }
+
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let rect = cx.rect();
         match self.fill {
@@ -78,10 +102,23 @@ impl Widget for Container {
             Fill::Color(color) => scene.fill(rect, color),
             Fill::Panel => {
                 let theme = cx.theme();
-                scene.fill(
-                    RoundedRect::new(rect, theme.corners.xl),
-                    theme.palette.surface,
+                let palette = &theme.palette;
+                let radius = theme
+                    .corners
+                    .xl
+                    .min(rect.width * 0.5)
+                    .min(rect.height * 0.5);
+                let shape = RoundedRect::new(rect, radius);
+                drop_shadow(scene, shape, theme.elevation.md);
+                vertical(
+                    scene,
+                    shape,
+                    (rect.y, rect.bottom()),
+                    palette.raised,
+                    palette.surface,
                 );
+                hairline(scene, rect, radius, cx.scale(), palette.hairline);
+                top_highlight(scene, rect, radius, cx.scale(), palette.highlight);
             }
         }
     }

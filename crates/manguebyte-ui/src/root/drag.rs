@@ -27,7 +27,7 @@ use crate::scroll::{auto_scroll, snap};
 use crate::tree::NodeId;
 use crate::view::View;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, Widget};
-use crate::widgets::{Cached, line, line_height, text_width};
+use crate::widgets::{Cached, floating, floating_overflow, line, line_height, text_width};
 
 /// A drag in progress.
 pub(crate) struct DragState {
@@ -335,6 +335,10 @@ impl Widget for Ghost {
         AccessNode::new(Role::DragItem, self.text.as_str())
     }
 
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        floating_overflow(cx.theme())
+    }
+
     fn measure(&mut self, cx: &MeasureCx<'_>) -> Size {
         let style = ghost_style(cx.theme());
         Size::new(
@@ -347,7 +351,7 @@ impl Widget for Ghost {
         let theme = cx.theme();
         let rect = cx.rect();
         let radius = theme.corners.md;
-        scene.fill(RoundedRect::new(rect, radius), theme.palette.surface);
+        floating(scene, rect, radius, theme, cx.scale());
         let edge = Rect::new(
             rect.x + 0.75,
             rect.y + 0.75,

@@ -1,11 +1,14 @@
 //! A view that scrolls over one child larger than itself.
 
+use std::time::Duration;
+
 use manguebyte_gfx::{Point, Scene, Size};
 
 use crate::access::{AccessNode, AccessRange, Action, Actions, Role};
 use crate::event::{Button, Event, Handled};
 use crate::layout::{Arrange, Style};
-use crate::scroll::{Bars, Geometry, ScrollMetrics, paint_bars};
+use crate::motion::Animated;
+use crate::scroll::{Bars, Geometry, ScrollMetrics, follow_bars, paint_bars};
 use crate::source::State;
 use crate::view::{IntoView, View};
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
@@ -41,6 +44,11 @@ use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub struct ScrollView {
     name: String,
     bars: Bars,
+    /// How far the bars have faded in.
+    shown: Animated<f32>,
+    /// When the view last scrolled, and where it was then.
+    scrolled_at: Option<Duration>,
+    last_offset: Option<Point>,
     /// Where the application keeps the offset, if it does.
     position: Option<State<Point>>,
     /// The version of `position` last acted on.
@@ -129,6 +137,9 @@ impl IntoView for ScrollViewBuilder {
         let widget = ScrollView {
             name: self.name,
             bars: Bars::default(),
+            shown: Animated::new(0.0),
+            scrolled_at: None,
+            last_offset: None,
             position: self.position,
             seen: None,
             written: Point::ZERO,
@@ -196,6 +207,14 @@ impl Widget for ScrollView {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        if let Some(metrics) = cx.scroll() {
+            if self.last_offset.is_some_and(|last| last != metrics.offset) {
+                self.scrolled_at = Some(cx.now());
+            }
+            self.last_offset = Some(metrics.offset);
+        }
+        let held = self.bars.dragging();
+        follow_bars(cx, &mut self.shown, self.scrolled_at, held);
         let (Some(position), Some(metrics)) = (&self.position, cx.scroll()) else {
             return;
         };
@@ -220,7 +239,13 @@ impl Widget for ScrollView {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         if let Some(metrics) = cx.scroll() {
             let geometry = Self::geometry(&metrics, cx.theme().sizes.scroll_bar);
-            paint_bars(scene, &geometry, cx.theme(), cx.is_focused());
+            let shown = self.shown.value();
+            paint_bars(
+                scene,
+                &geometry,
+                cx.theme(),
+                (shown, cx.hover(), cx.focus_ring()),
+            );
         }
     }
 

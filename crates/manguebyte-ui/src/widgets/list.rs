@@ -10,7 +10,8 @@ use manguebyte_gfx::{Align, Point, Rect, RoundedRect, Scene, Size, Stroke, TextS
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
-use crate::scroll::{AUTO_STEP, Bars, Geometry, auto_scroll, paint_bars, snap};
+use crate::motion::{Animated, Lerp};
+use crate::scroll::{AUTO_STEP, Bars, Geometry, auto_scroll, follow_bars, paint_bars, snap};
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 use crate::widgets::{focus_ring, line};
@@ -63,17 +64,59 @@ pub trait ListData: 'static {
     /// it.
     fn revision(&self) -> u64;
 
+    /// Which of the theme's categorical [`hues`](crate::Palette::hues)
+    /// to show before `row`'s name, as a small rounded swatch: the colour
+    /// of the zones a sample plays, say (see
+    /// [`Zone::with_hue`](crate::Zone::with_hue)). Taken modulo the number
+    /// of hues. `None`, the default, for no swatch.
+    fn hue(&self, row: usize) -> Option<u8> {
+        let _ = row;
+        None
+    }
+
+    /// Text shown at the end of `row`, small and muted, with tabular
+    /// figures: the keys a sample is mapped to, a length. `None`, the
+    /// default, for none.
+    fn detail(&self, row: usize) -> Option<String> {
+        let _ = row;
+        None
+    }
+
     /// Draws the content of `row` into `scene`, inside
-    /// [`RowCx::rect`]. The list has already drawn the row's selection
-    /// behind it. Draws the row's name unless overridden.
+    /// [`RowCx::rect`]. The list has already drawn the row's hover and
+    /// selection behind it. Draws the row's [`hue`](ListData::hue),
+    /// name and [`detail`](ListData::detail) unless overridden.
     fn paint_row(&self, row: usize, cx: &RowCx<'_>, scene: &mut Scene) {
         let style = cx.text_style();
         let rect = cx.rect();
         let pad = ROW_PAD.min(rect.width * 0.5);
-        let width = (rect.width - 2.0 * pad).max(0.0);
+        let mut left = rect.x + pad;
+        let mut right = rect.right() - pad;
+        if let Some(hue) = self.hue(row) {
+            let hues = &cx.theme().palette.hues;
+            let color = hues[usize::from(hue) % hues.len()].color;
+            let height = (rect.height - 12.0).clamp(4.0, 22.0);
+            let swatch = Rect::new(left, rect.y + (rect.height - height) * 0.5, 6.0, height);
+            scene.fill(RoundedRect::new(swatch, 3.0), color);
+            left += 6.0 + 9.0;
+        }
+        if let Some(detail) = self.detail(row) {
+            let theme = cx.theme();
+            let caption = theme
+                .typography
+                .caption
+                .with_color(theme.palette.text_muted)
+                .with_align(Align::End);
+            let room = ((right - left) * 0.5).max(0.0);
+            let text = line(&detail, &caption, room);
+            let y = rect.y + (rect.height - text.size().height) * 0.5;
+            scene.text(&text, Point::new(right - room, y));
+            right -= text.size().width.min(room) + 8.0;
+        }
+        let width = (right - left).max(0.0);
         let text = line(&self.name(row), &style, width);
         let y = rect.y + (rect.height - text.size().height) * 0.5;
-        scene.text(&text, Point::new(rect.x + pad, y));
+        scene.text(&text, Point::new(left, y));
     }
 
     /// What dragging `rows` carries, in tree order of the rows: `None`,
@@ -99,6 +142,7 @@ pub struct RowCx<'a> {
     scale: f32,
     selected: bool,
     cursor: bool,
+    hover: f32,
 }
 
 impl RowCx<'_> {
@@ -127,13 +171,21 @@ impl RowCx<'_> {
         self.cursor
     }
 
-    /// The style of a row's text: the theme's label type in its text
-    /// colour, which reads on the row's selection too.
+    /// How far the pointer's hover over the row has come in, from 0 to 1.
+    pub fn hover(&self) -> f32 {
+        self.hover
+    }
+
+    /// The style of a row's text: the theme's label type, in its secondary
+    /// text colour, brightening to its text colour as the row is hovered
+    /// or when it is selected. Both read on the row's selection.
     pub fn text_style(&self) -> TextStyle {
+        let palette = &self.theme.palette;
+        let lit = if self.selected { 1.0 } else { self.hover };
         self.theme
             .typography
             .label
-            .with_color(self.theme.palette.text)
+            .with_color(palette.text_secondary.lerp(palette.text, lit))
             .with_align(Align::Start)
     }
 }
@@ -371,7 +423,7 @@ impl std::fmt::Debug for ListState {
 }
 
 /// Space between a row's edges and its text.
-const ROW_PAD: f32 = 6.0;
+const ROW_PAD: f32 = 10.0;
 
 /// How far the pointer moves with the button held before the rows under it
 /// are dragged.
@@ -439,6 +491,17 @@ pub struct ListView {
     auto_rest: f64,
     typed: String,
     typed_at: Duration,
+    /// The row under the pointer and how far its hover has come in, and
+    /// the row it left, fading out.
+    hover_row: Option<(usize, Animated<f32>)>,
+    fading: Option<(usize, Animated<f32>)>,
+    /// The row last selected, its tint fading in.
+    fresh: Option<(usize, Animated<f32>)>,
+    /// The scroll bar: how far it has faded in, and when the list last
+    /// scrolled.
+    bar: Animated<f32>,
+    scrolled_at: Option<Duration>,
+    last_offset: Option<f64>,
 }
 
 /// A list called `name` of the rows `data` keeps, sharing its selection and
@@ -462,8 +525,9 @@ pub struct ListView {
 /// let state = ListState::new();
 /// let mut ui = Harness::new(list_view("Notes", Notes, state.clone()), Size::new(120.0, 100.0), 1.0);
 /// ui.frame();
-/// // Only the rows that can be seen are there: four of 24 pixels, and part of a fifth.
-/// assert_eq!(ui.find_all(manguebyte_ui::Role::ListItem, "E").len(), 1);
+/// // Only the rows that can be seen are there: three of 32 pixels, and part of a fourth.
+/// assert_eq!(ui.find_all(manguebyte_ui::Role::ListItem, "D#").len(), 1);
+/// assert!(ui.find(Role::ListItem, "E").is_none());
 /// assert!(ui.find(Role::ListItem, "B").is_none());
 ///
 /// ui.click(ui.get(Role::ListItem, "D").center());
@@ -494,6 +558,12 @@ pub fn list_view(name: impl Into<String>, data: impl ListData, state: ListState)
         auto_rest: 0.0,
         typed: String::new(),
         typed_at: Duration::ZERO,
+        hover_row: None,
+        fading: None,
+        fresh: None,
+        bar: Animated::new(0.0),
+        scrolled_at: None,
+        last_offset: None,
     }
 }
 
@@ -503,6 +573,24 @@ fn command(modifiers: Modifiers) -> bool {
 }
 
 impl ListView {
+    /// Moves the hover to `row`: the row it leaves fades out.
+    fn hover_to(&mut self, cx: &mut EventCx<'_>, row: Option<usize>) {
+        if self.hover_row.map(|(at, _)| at) == row {
+            return;
+        }
+        let (now, fast) = (cx.now(), cx.motion().fast());
+        if let Some((left, mut amount)) = self.hover_row.take() {
+            amount.transition(0.0, now, fast);
+            self.fading = Some((left, amount));
+        }
+        self.hover_row = row.map(|row| {
+            let mut amount = Animated::new(0.0);
+            amount.transition(1.0, now, fast);
+            (row, amount)
+        });
+        cx.request_paint();
+    }
+
     /// The state it shares with the application.
     pub fn state(&self) -> &ListState {
         &self.state
@@ -918,8 +1006,56 @@ impl Widget for ListView {
         }
         let version = self.state.version();
         if self.version != Some(version) {
+            // A row newly selected where the keyboard is fades its tint in.
+            let (cursor, selected) = {
+                let inner = self.state.lock();
+                let cursor = inner.cursor;
+                (
+                    cursor,
+                    cursor.is_some_and(|row| inner.selection.contains(row)),
+                )
+            };
+            let first = self.version.is_none();
+            if let (Some(row), true, false) = (cursor, selected, first) {
+                if self.fresh.as_ref().is_none_or(|(fresh, _)| *fresh != row) {
+                    let mut tint = Animated::new(0.0);
+                    tint.transition(1.0, cx.now(), cx.motion().base());
+                    self.fresh = Some((row, tint));
+                }
+            }
             self.version = Some(version);
             cx.request_paint();
+        }
+        // Hover and selection tints, and the scroll bar.
+        for (_, amount) in [&mut self.hover_row, &mut self.fading, &mut self.fresh]
+            .into_iter()
+            .flatten()
+        {
+            cx.animate(amount);
+        }
+        if self.fading.as_ref().is_some_and(|(_, a)| !a.is_running()) {
+            self.fading = None;
+        }
+        let offset = self.state.scroll_offset();
+        if self.last_offset.is_some_and(|last| last != offset) {
+            self.scrolled_at = Some(cx.now());
+        }
+        self.last_offset = Some(offset);
+        let held = self.bars.dragging();
+        follow_bars(cx, &mut self.bar, self.scrolled_at, held);
+    }
+
+    fn hover_moved(&mut self, cx: &mut EventCx<'_>, at: Point) {
+        let theme = cx.theme();
+        let geometry = self.geometry(cx.rect(), theme, self.state.scroll_offset());
+        let row = Self::row_at(&geometry, at.y, Self::row_height(theme), self.len)
+            .filter(|_| geometry.viewport.contains(at));
+        self.hover_to(cx, row);
+    }
+
+    fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
+        if !hovered {
+            self.hover_to(cx, None);
         }
     }
 
@@ -928,10 +1064,16 @@ impl Widget for ListView {
         let rect = cx.rect();
         let height = Self::row_height(theme);
         let geometry = self.geometry(rect, theme, self.state.scroll_offset());
-        scene.fill(
-            RoundedRect::new(rect, theme.corners.sm),
-            theme.palette.background,
-        );
+        let palette = &theme.palette;
+        let (hover_row, fading, fresh) = (self.hover_row, self.fading, self.fresh);
+        let hover_of = |row: usize| {
+            [hover_row, fading]
+                .into_iter()
+                .flatten()
+                .find(|(at, _)| *at == row)
+                .map_or(0.0, |(_, amount)| amount.value())
+        };
+        let ring = cx.focus_ring();
         let (selection, cursor) = {
             let inner = self.state.lock();
             let visible = Self::visible(&geometry, height, self.len);
@@ -949,8 +1091,35 @@ impl Widget for ListView {
             let (visible, selected) = &selection;
             for (row, &is_selected) in visible.clone().zip(selected) {
                 let row_rect = Self::row_rect(&geometry, row, height);
+                // A rounded body a little inside the row, so that rows next
+                // to each other read apart.
+                let body = Rect::new(
+                    row_rect.x + 2.0,
+                    row_rect.y + 1.0,
+                    (row_rect.width - 4.0).max(0.0),
+                    (row_rect.height - 2.0).max(0.0),
+                );
+                let shape = RoundedRect::new(body, theme.corners.md.min(body.height * 0.5));
+                let hover = hover_of(row);
+                if hover > 0.0 && !is_selected {
+                    scene.fill(shape, palette.track.with_opacity(0.6 * hover));
+                }
                 if is_selected {
-                    scene.fill(row_rect, theme.palette.track);
+                    let tint = fresh
+                        .filter(|(at, _)| *at == row)
+                        .map_or(1.0, |(_, amount)| amount.value());
+                    scene.fill(shape, palette.accent_soft.with_opacity(tint));
+                    let edge = Rect::new(
+                        body.x + 0.5,
+                        body.y + 0.5,
+                        (body.width - 1.0).max(0.0),
+                        (body.height - 1.0).max(0.0),
+                    );
+                    scene.stroke(
+                        RoundedRect::new(edge, (shape.radii.top_left - 0.5).max(0.0)),
+                        Stroke::new(1.0),
+                        palette.accent.with_alpha(0x40).with_opacity(tint),
+                    );
                 }
                 let is_cursor = focused && cursor == Some(row);
                 let row_cx = RowCx {
@@ -959,16 +1128,20 @@ impl Widget for ListView {
                     scale: cx.scale(),
                     selected: is_selected,
                     cursor: is_cursor,
+                    hover,
                 };
                 data.paint_row(row, &row_cx, scene);
                 if is_cursor {
-                    let ring = Rect::new(
-                        row_rect.x + 1.0,
-                        row_rect.y + 1.0,
-                        (row_rect.width - 2.0).max(0.0),
-                        (row_rect.height - 2.0).max(0.0),
+                    let inner = RoundedRect::new(
+                        Rect::new(
+                            body.x + 1.0,
+                            body.y + 1.0,
+                            (body.width - 2.0).max(0.0),
+                            (body.height - 2.0).max(0.0),
+                        ),
+                        (shape.radii.top_left - 1.0).max(0.0),
                     );
-                    scene.stroke(ring, Stroke::new(1.0), theme.palette.focus);
+                    focus_ring(scene, inner, theme, ring);
                 }
             }
             if let Some(gap) = drop_at.filter(|&gap| gap <= len) {
@@ -978,10 +1151,12 @@ impl Widget for ListView {
                 scene.fill(line, theme.palette.accent);
             }
         });
-        paint_bars(scene, &geometry, theme, focused);
-        if focused {
-            focus_ring(scene, rect, theme);
-        }
+        paint_bars(
+            scene,
+            &geometry,
+            theme,
+            (self.bar.value(), cx.hover(), ring),
+        );
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {

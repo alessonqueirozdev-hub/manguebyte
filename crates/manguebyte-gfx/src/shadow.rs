@@ -152,6 +152,23 @@ impl Shadow {
     pub fn reach(&self) -> f32 {
         self.drawn_spread().max(0.0) + 1.5 * self.drawn_blur() + 1.0
     }
+
+    /// The same reach for a rectangle, a rounded rectangle or a circle
+    /// filled, which a negative spread shrinks exactly: the spread, which
+    /// may be negative, plus one and a half times the blur, plus one. It
+    /// may be negative, when the shadow lies wholly under the shape.
+    ///
+    /// ```
+    /// use manguebyte_gfx::{Color, Shadow};
+    ///
+    /// // A card's shadow: 18 down, 40 soft, shrunk by 24.
+    /// let card = Shadow::new(Color::BLACK).with_offset(0.0, 18.0).with_blur(40.0).with_spread(-24.0);
+    /// assert_eq!(card.reach(), 61.0);
+    /// assert_eq!(card.reach_exact(), 37.0);
+    /// ```
+    pub fn reach_exact(&self) -> f32 {
+        self.drawn_spread() + 1.5 * self.drawn_blur() + 1.0
+    }
 }
 
 /// The size of the boxes that stand in for a Gaussian of standard

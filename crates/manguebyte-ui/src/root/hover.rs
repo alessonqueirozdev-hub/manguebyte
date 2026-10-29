@@ -13,14 +13,14 @@
 
 use std::time::Duration;
 
-use manguebyte_gfx::{Align, Point, Rect, RoundedRect, Scene, Size, Stroke, TextStyle};
+use manguebyte_gfx::{Align, Point, Rect, Scene, Size, TextStyle};
 
 use super::Root;
 use crate::access::{AccessNode, Role};
 use crate::tree::NodeId;
 use crate::view::View;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, Widget};
-use crate::widgets::{Cached, line, line_height, text_width};
+use crate::widgets::{Cached, floating, floating_overflow, line, line_height, text_width};
 
 /// How long the pointer rests on a view before its tooltip shows.
 pub const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
@@ -193,6 +193,10 @@ impl Widget for TooltipBox {
         AccessNode::new(Role::Tooltip, self.text.as_str())
     }
 
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        floating_overflow(cx.theme())
+    }
+
     fn measure(&mut self, cx: &MeasureCx<'_>) -> Size {
         let style = tip_style(cx.theme());
         Size::new(
@@ -204,19 +208,7 @@ impl Widget for TooltipBox {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let radius = theme.corners.sm;
-        scene.fill(RoundedRect::new(rect, radius), theme.palette.overlay);
-        let edge = Rect::new(
-            rect.x + 0.5,
-            rect.y + 0.5,
-            (rect.width - 1.0).max(0.0),
-            (rect.height - 1.0).max(0.0),
-        );
-        scene.stroke(
-            RoundedRect::new(edge, radius),
-            Stroke::new(1.0),
-            theme.palette.hairline_strong,
-        );
+        floating(scene, rect, theme.corners.md, theme, cx.scale());
         let style = tip_style(theme);
         let width = (rect.width - 2.0 * TIP_PAD).max(0.0);
         let text = &self.text;

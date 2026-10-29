@@ -49,8 +49,10 @@ pub(crate) fn shape_bounds(scene: &Scene, shape: StoredShape) -> Option<Rect> {
 /// The bounds of a shadow of `shape` (filled, or drawn with `stroke`) in
 /// the shape's coordinates, or `None` if it draws nothing: the shape's
 /// bounds (with the stroke's reach), moved by the offset and grown by the
-/// shadow's [`reach`](Shadow::reach). The renderer draws no shadow pixel
-/// outside them.
+/// shadow's [`reach`](Shadow::reach), or, for a rectangle, a rounded
+/// rectangle or a circle filled, which a negative spread shrinks exactly,
+/// by its [`reach_exact`](Shadow::reach_exact). The renderer draws no
+/// shadow pixel outside them.
 pub(crate) fn shadow_bounds(
     scene: &Scene,
     shape: StoredShape,
@@ -61,6 +63,7 @@ pub(crate) fn shadow_bounds(
         return None;
     }
     let mut local = shape_bounds(scene, shape)?;
+    let mut reach = shadow.reach();
     if let Some(stroke) = stroke {
         if !(stroke.width > 0.0 && stroke.width.is_finite()) {
             return None;
@@ -68,9 +71,14 @@ pub(crate) fn shadow_bounds(
         local = local.outset(stroke.drawn_reach());
     } else if !has_area(&local) {
         return None;
+    } else if matches!(
+        shape,
+        StoredShape::Rect(_) | StoredShape::RoundedRect(_) | StoredShape::Circle(_)
+    ) {
+        reach = shadow.reach_exact();
     }
-    let bounds = local.translate(shadow.offset).outset(shadow.reach());
-    bounds.is_finite().then_some(bounds)
+    let bounds = local.translate(shadow.offset).outset(reach);
+    (bounds.is_finite() && has_area(&bounds)).then_some(bounds)
 }
 
 /// Whether a rectangle has area. A line has none, so filling one adds

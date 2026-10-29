@@ -15,6 +15,7 @@ use std::time::Duration;
 use manguebyte_gfx::{Point, Rect, RoundedRect, Scene, Size};
 
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
+use crate::motion::Lerp;
 use crate::theme::Theme;
 
 /// Where a scroll node is scrolled to, and how far it can go.
@@ -475,44 +476,99 @@ fn keys(geometry: &Geometry, key: Key, line: f64, scale: f32) -> Outcome {
     ))
 }
 
-/// Draws the bars of `geometry`: each track faint, its thumb if the
-/// content overflows, both in the focus colour when the view has the
-/// keyboard focus, which shows there because the content covers the rest
-/// of the view.
-pub(crate) fn paint_bars(scene: &mut Scene, geometry: &Geometry, theme: &Theme, focused: bool) {
+/// How long scroll bars stay after the view last scrolled, before they
+/// fade.
+pub(crate) const BAR_LINGER: Duration = Duration::from_millis(900);
+
+/// Draws the bars of `geometry`, thin and round, faded in by `shown` (0 to
+/// 1): a view's bars appear while it scrolls, while the pointer is over it
+/// and while its focus shows, and fade otherwise. `hover`, the pointer
+/// over the view, widens the thumb and shows the track; `focus` tints the
+/// thumb with the focus colour. Nothing is drawn while `shown` is 0.
+pub(crate) fn paint_bars(
+    scene: &mut Scene,
+    geometry: &Geometry,
+    theme: &Theme,
+    (shown, hover, focus): (f32, f32, f32),
+) {
+    if shown.is_nan() || shown <= 0.0 {
+        return;
+    }
     let palette = &theme.palette;
-    let track_color = if focused {
-        palette.focus.with_alpha(0x55)
-    } else {
-        palette.track.with_alpha(0x66)
+    let (hover, focus) = (hover.clamp(0.0, 1.0), focus.clamp(0.0, 1.0));
+    let thumb_color = palette
+        .text_muted
+        .lerp(palette.text_secondary, hover)
+        .lerp(palette.focus, focus)
+        .with_opacity(shown * (0.55 + 0.35 * hover.max(focus)));
+    let track_color = palette.track.with_opacity(shown * hover);
+    // A thin bar along the far edge of the gutter, wider under the pointer.
+    let thin = |rect: Rect, vertical: bool| {
+        let gutter = if vertical { rect.width } else { rect.height };
+        let width = (4.0 + 2.0 * hover).min(gutter);
+        let margin = ((gutter - width) * 0.5).clamp(0.0, 2.0);
+        let along = 2.0f32.min(if vertical { rect.height } else { rect.width } * 0.1);
+        if vertical {
+            Rect::new(
+                rect.right() - margin - width,
+                rect.y + along,
+                width,
+                (rect.height - 2.0 * along).max(0.0),
+            )
+        } else {
+            Rect::new(
+                rect.x + along,
+                rect.bottom() - margin - width,
+                (rect.width - 2.0 * along).max(0.0),
+                width,
+            )
+        }
     };
-    let thumb_color = if focused {
-        palette.focus
-    } else {
-        palette.text_secondary
-    };
-    // A margin inside the gutter, so that a bar never touches the content.
-    let inset = |rect: Rect| {
-        let by = (rect.width.min(rect.height) * 0.2).min(2.0);
-        Rect::new(
-            rect.x + by,
-            rect.y + by,
-            (rect.width - 2.0 * by).max(0.0),
-            (rect.height - 2.0 * by).max(0.0),
-        )
-    };
-    let radius = theme.corners.sm;
-    for (track, thumb) in [
-        (geometry.track_y(), geometry.thumb_y()),
-        (geometry.track_x(), geometry.thumb_x()),
+    for (track, thumb, vertical) in [
+        (geometry.track_y(), geometry.thumb_y(), true),
+        (geometry.track_x(), geometry.thumb_x(), false),
     ] {
         let Some(track) = track else {
             continue;
         };
-        scene.fill(RoundedRect::new(inset(track), radius), track_color);
-        if let Some(thumb) = thumb {
-            scene.fill(RoundedRect::new(inset(thumb), radius), thumb_color);
+        if track_color.a > 0 {
+            let bar = thin(track, vertical);
+            let radius = bar.width.min(bar.height) * 0.5;
+            scene.fill(RoundedRect::new(bar, radius), track_color);
         }
+        if let Some(thumb) = thumb {
+            let bar = thin(thumb, vertical);
+            let radius = bar.width.min(bar.height) * 0.5;
+            scene.fill(RoundedRect::new(bar, radius), thumb_color);
+        }
+    }
+}
+
+/// Whether a view's bars should show: it scrolled less than
+/// [`BAR_LINGER`] ago, the pointer is over it, a bar is being dragged, or
+/// its focus shows. Moves `shown` towards that and asks for frames while
+/// it moves or the linger runs.
+pub(crate) fn follow_bars(
+    cx: &mut crate::widget::UpdateCx<'_>,
+    shown: &mut crate::motion::Animated<f32>,
+    scrolled_at: Option<Duration>,
+    held: bool,
+) {
+    let now = cx.now();
+    let lingering = scrolled_at.is_some_and(|at| now.saturating_sub(at) < BAR_LINGER);
+    let wanted = lingering || held || cx.hover() > 0.5 || cx.focus_ring() > 0.5;
+    let target = if wanted { 1.0 } else { 0.0 };
+    let transition = if wanted {
+        cx.motion().fast()
+    } else {
+        cx.motion().slow()
+    };
+    if shown.transition(target, now, transition) {
+        cx.request_paint();
+    }
+    cx.animate(shown);
+    if lingering {
+        cx.request_frame();
     }
 }
 

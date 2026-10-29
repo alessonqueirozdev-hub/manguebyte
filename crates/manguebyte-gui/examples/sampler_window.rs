@@ -26,11 +26,12 @@ use manguebyte_gfx::{Scene, Size};
 use manguebyte_gui::open_app_window;
 use manguebyte_params::{FloatParam, FloatRange, ParamSet, param_set};
 use manguebyte_ui::access::{AccessNode, Role};
+use manguebyte_ui::layout::{Align, Justify};
 use manguebyte_ui::{
     AccessCx, DragPayload, DropData, IntoView, KeyRange, KeySpan, KeyboardState, ListData,
-    ListEvent, ListState, MeasureCx, NoteEvent, PaintCx, ParamHandle, Theme, UpdateCx, Waveform,
-    WaveformEvent, WaveformState, Widget, ZoneEvent, ZoneMapState, column, envelope, label,
-    list_view, piano_keyboard, row, waveform_view, zone_map,
+    ListEvent, ListState, MeasureCx, NoteEvent, PaintCx, ParamHandle, Theme, UpdateCx, View,
+    Waveform, WaveformEvent, WaveformState, Widget, ZoneEvent, ZoneMapState, card, column,
+    envelope, knob, label, list_view, piano_keyboard, pill, row, waveform_view, zone_map,
 };
 use manguebyte_window::{App, AppWindowOptions};
 
@@ -131,6 +132,26 @@ impl Session {
                     if let Some(picked) = payload.get::<Picked>() {
                         let mut map = self.zone_samples.borrow_mut();
                         map.extend(ids.iter().copied().zip(picked.0.iter().copied()));
+                        // Each zone in its sample's hue, as the list shows it.
+                        let hues: Vec<(u64, usize)> = map.clone();
+                        drop(map);
+                        let zones = self
+                            .zones
+                            .zones()
+                            .into_iter()
+                            .map(|zone| {
+                                let sample = hues.iter().find(|(id, _)| *id == zone.id);
+                                match sample {
+                                    Some(&(_, row)) if zone.hue.is_none() => {
+                                        zone.with_hue(u8::try_from(row).unwrap_or(0))
+                                    }
+                                    _ => zone,
+                                }
+                            })
+                            .collect();
+                        let selected = self.zones.selected();
+                        self.zones.set_zones(zones);
+                        self.zones.set_selected(selected);
                     }
                     if let Some(files) = payload.get::<DropData>() {
                         println!("files dropped, not loaded: {:?}", files.files);
@@ -201,6 +222,10 @@ impl ListData for SampleList {
         0
     }
 
+    fn hue(&self, row: usize) -> Option<u8> {
+        u8::try_from(row).ok()
+    }
+
     fn drag_payload(&self, rows: &[usize]) -> Option<DragPayload> {
         let description = match rows {
             [row] => self.name(*row),
@@ -208,6 +233,11 @@ impl ListData for SampleList {
         };
         Some(DragPayload::new(Picked(rows.to_vec()), description))
     }
+}
+
+/// A card's heading and the small print at its other end.
+fn header(title: &str, meta: &str) -> View {
+    row((label(title).heading().flex(1.0), label(meta).caption())).align(Align::Center)
 }
 
 /// Runs the application's poll once a frame.
@@ -254,63 +284,101 @@ fn main() {
     let names = Rc::clone(&session);
     let view = column((
         row((
-            label("Sampler").title().flex(1.0),
-            Poller(Rc::clone(&session)),
-        )),
-        waveform_view("Sample", session.wave.clone()).height(150.0),
-        row((
-            list_view(
-                "Samples",
-                SampleList(Rc::clone(&session)),
-                session.list.clone(),
-            )
-            .width(150.0),
             column((
-                zone_map("Zones", span, session.zones.clone())
-                    .takes(move |payload| {
-                        if let Some(picked) = payload.get::<Picked>() {
-                            return Some(
-                                picked
-                                    .0
-                                    .iter()
-                                    .filter_map(|&row| names.samples.get(row))
-                                    .map(|wave| wave.name().to_owned())
-                                    .collect(),
-                            );
-                        }
-                        let files = payload.get::<DropData>()?;
-                        let names: Vec<String> = files
-                            .files
-                            .iter()
-                            .filter_map(|file| file.file_name())
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .collect();
-                        (!names.is_empty()).then_some(names)
-                    })
-                    .flex(1.0),
-                piano_keyboard("Keyboard", span, session.keys.clone()).height(80.0),
-            ))
-            .flex(1.0),
-            envelope(
-                "Amp envelope",
-                handle(|p| &p.attack),
-                handle(|p| &p.decay),
-                handle(|p| &p.sustain),
-                handle(|p| &p.release),
-            )
-            .width(220.0),
+                label("Mangue Sampler").title(),
+                label("Drag samples onto the keys").caption(),
+            )),
+            Poller(Rc::clone(&session)).flex(1.0),
+            pill("Undo"),
+            pill("Export plugin").primary(),
         ))
-        .spacing(10.0)
+        .spacing(12.0)
+        .align(Align::Center),
+        card(
+            column((
+                header("Sample", "markers, loop, zoom with Ctrl and the wheel"),
+                waveform_view("Sample", session.wave.clone()).height(150.0),
+            ))
+            .spacing(10.0),
+        ),
+        row((
+            card(
+                column((
+                    header("Samples", ""),
+                    list_view(
+                        "Samples",
+                        SampleList(Rc::clone(&session)),
+                        session.list.clone(),
+                    )
+                    .flex(1.0),
+                ))
+                .spacing(8.0),
+            )
+            .width(200.0),
+            card(
+                column((
+                    header("Zone map", "note \u{d7} velocity"),
+                    zone_map("Zones", span, session.zones.clone())
+                        .takes(move |payload| {
+                            if let Some(picked) = payload.get::<Picked>() {
+                                return Some(
+                                    picked
+                                        .0
+                                        .iter()
+                                        .filter_map(|&row| names.samples.get(row))
+                                        .map(|wave| wave.name().to_owned())
+                                        .collect(),
+                                );
+                            }
+                            let files = payload.get::<DropData>()?;
+                            let names: Vec<String> = files
+                                .files
+                                .iter()
+                                .filter_map(|file| file.file_name())
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .collect();
+                            (!names.is_empty()).then_some(names)
+                        })
+                        .flex(1.0),
+                    piano_keyboard("Keyboard", span, session.keys.clone()).height(96.0),
+                ))
+                .spacing(10.0),
+            )
+            .flex(1.0),
+            card(
+                column((
+                    header("Envelope", "ADSR"),
+                    envelope(
+                        "Amp envelope",
+                        handle(|p| &p.attack),
+                        handle(|p| &p.decay),
+                        handle(|p| &p.sustain),
+                        handle(|p| &p.release),
+                    )
+                    .flex(1.0),
+                    row((
+                        knob(handle(|p| &p.attack)),
+                        knob(handle(|p| &p.decay)),
+                        knob(handle(|p| &p.sustain)),
+                        knob(handle(|p| &p.release)),
+                    ))
+                    .justify(Justify::SpaceBetween),
+                ))
+                .spacing(10.0),
+            )
+            .width(320.0),
+        ))
+        .spacing(14.0)
         .flex(1.0),
     ))
-    .spacing(10.0)
-    .padding(12.0);
+    .spacing(14.0)
+    .padding(20.0);
 
     let set: Arc<dyn ParamSet> = params.clone();
     let window = match open_app_window(
         &app,
-        AppWindowOptions::new("Manguebyte sampler", Size::new(900.0, 560.0))
-            .with_min_size(Size::new(720.0, 440.0)),
+        AppWindowOptions::new("Manguebyte sampler", Size::new(1100.0, 680.0))
+            .with_min_size(Size::new(900.0, 560.0)),
         Theme::default(),
         Some(set),
         view,

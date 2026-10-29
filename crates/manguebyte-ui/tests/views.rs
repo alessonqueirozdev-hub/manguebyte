@@ -48,6 +48,16 @@ fn damage_inside(ui: &Harness, rect: IRect) -> bool {
 
 // Scroll views.
 
+/// A harness whose lists have rows of 24 logical pixels, as the tests of
+/// lists count them.
+fn rows_of_24(view: impl IntoView, size: Size, scale: f32) -> Harness {
+    let mut ui = Harness::new(view, size, scale);
+    let mut theme = manguebyte_ui::Theme::dark();
+    theme.sizes.list_row = 24.0;
+    ui.set_theme(theme);
+    ui
+}
+
 #[test]
 fn a_scroll_view_moves_its_child_and_shows_and_lets_press_only_what_is_in_sight() {
     let mut ui = Harness::new(scroll_view("Rows", rows(20)), Size::new(120.0, 100.0), 1.0);
@@ -479,7 +489,7 @@ fn row_center(ui: &Harness, name: &str) -> Point {
 fn clicks_select_one_row_ctrl_adds_and_shift_extends() {
     let state = ListState::new();
     let (view, _shelf) = list_of(&DRUMS, &state);
-    let mut ui = Harness::new(view, Size::new(160.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 120.0), 1.0);
     ui.frame();
     // 120 tall: five rows of 24.
     assert_eq!(
@@ -528,7 +538,7 @@ fn clicks_select_one_row_ctrl_adds_and_shift_extends() {
 fn the_keyboard_moves_selects_extends_and_selects_everything() {
     let state = ListState::new();
     let (view, _shelf) = list_of(&DRUMS, &state);
-    let mut ui = Harness::new(view, Size::new(160.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 120.0), 1.0);
     ui.frame();
     assert!(ui.tab());
     assert!(ui.key(Key::Down));
@@ -569,7 +579,7 @@ fn the_keyboard_moves_selects_extends_and_selects_everything() {
 fn a_double_click_and_enter_activate_and_typing_finds_a_row() {
     let state = ListState::new();
     let (view, _shelf) = list_of(&DRUMS, &state);
-    let mut ui = Harness::new(view, Size::new(160.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 120.0), 1.0);
     ui.frame();
     ui.double_click(row_center(&ui, "Clap"));
     assert!(matches!(
@@ -597,7 +607,7 @@ fn a_double_click_and_enter_activate_and_typing_finds_a_row() {
 fn assistive_technology_selects_a_row_and_moves_the_keyboard_to_one() {
     let state = ListState::new();
     let (view, _shelf) = list_of(&DRUMS, &state);
-    let mut ui = Harness::new(view, Size::new(160.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 120.0), 1.0);
     ui.frame();
     let hat = ui.get(Role::ListItem, "Hat");
     assert!(hat.node.actions.press && hat.node.actions.focus);
@@ -620,7 +630,7 @@ fn a_list_in_a_scroll_view_leaves_the_wheel_to_it_at_its_ends() {
         "Page",
         column((list.height(96.0), label("Below").height(300.0))),
     );
-    let mut ui = Harness::new(view, Size::new(160.0, 200.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 200.0), 1.0);
     ui.frame();
     let list = ui.get(Role::List, "Samples").center();
     // 8 rows of 24 in 96: 96 to go.
@@ -676,7 +686,7 @@ fn a_hundred_thousand_rows_cost_what_the_rows_in_sight_cost() {
     // frame's time here is drawing the list's pixels, which an unoptimised
     // build does slowly and which do not depend on the number of rows.
     let started = Instant::now();
-    let mut ui = Harness::new(
+    let mut ui = rows_of_24(
         list_view("Library", data, state.clone()),
         Size::new(240.0, 240.0),
         2.0,
@@ -754,7 +764,7 @@ fn rows_dragged_within_a_list_are_reordered_where_they_are_dropped() {
     for scale in [1.0, 1.5] {
         let state = ListState::new();
         let (view, shelf) = list_of(&DRUMS[..5], &state);
-        let mut ui = Harness::new(view, Size::new(160.0, 150.0), scale);
+        let mut ui = rows_of_24(view, Size::new(160.0, 150.0), scale);
         ui.frame();
         let kick = row_center(&ui, "Kick");
         ui.press(kick);
@@ -817,7 +827,7 @@ fn selected_rows_move_from_one_list_to_another() {
         .flex(1.0),
     ))
     .spacing(10.0);
-    let mut ui = Harness::new(view, Size::new(330.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(330.0, 120.0), 1.0);
     ui.frame();
     ui.click(row_center(&ui, "Snare"));
     ui.set_modifiers(CONTROL);
@@ -928,7 +938,7 @@ fn probes() -> (Harness, Rc<RefCell<Vec<String>>>) {
         probe("Refuser", false),
     ))
     .spacing(20.0);
-    let mut ui = Harness::new(view, Size::new(240.0, 40.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(240.0, 40.0), 1.0);
     ui.frame();
     (ui, log)
 }
@@ -1049,7 +1059,7 @@ fn the_ghost_is_drawn_over_everything_and_moving_it_damages_only_where_it_was_an
             },
             label("Neighbour").flex(1.0),
         ));
-        let mut ui = Harness::new(view, Size::new(240.0, 80.0), scale);
+        let mut ui = rows_of_24(view, Size::new(240.0, 80.0), scale);
         ui.frame();
         start(&mut ui);
         let neighbour = ui.get(Role::Label, "Neighbour");
@@ -1091,7 +1101,7 @@ fn a_drag_near_a_scroll_views_edge_scrolls_it_and_stops_away_from_the_edge() {
         },
         scroll_view("Rows", rows(40)).flex(1.0),
     ));
-    let mut ui = Harness::new(view, Size::new(240.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(240.0, 120.0), 1.0);
     ui.frame();
     start(&mut ui);
     let view = ui.get(Role::ScrollView, "Rows");
@@ -1126,7 +1136,7 @@ fn a_drag_near_a_lists_edge_scrolls_the_list() {
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let state = ListState::new();
     let (view, _shelf) = list_of(&names, &state);
-    let mut ui = Harness::new(view, Size::new(160.0, 120.0), 1.0);
+    let mut ui = rows_of_24(view, Size::new(160.0, 120.0), 1.0);
     ui.frame();
     let first = row_center(&ui, "Take 0");
     ui.press(first);

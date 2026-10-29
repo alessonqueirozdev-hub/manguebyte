@@ -2,12 +2,14 @@
 
 use std::fmt::Write as _;
 
-use manguebyte_gfx::{Point, Rect, RoundedRect, Scene, Size, TextStyle};
+use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Size, TextStyle};
 
 use super::{
     Cached, GAP, MARGIN, draw_text, line, line_height, name_style, text_width, value_style,
+    vertical,
 };
 use crate::access::{AccessNode, AccessRange, Role};
+use crate::motion::Lerp;
 use crate::source::Source;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -255,10 +257,8 @@ impl Widget for Meter {
         let height = (bottom - top).max(0.0);
         let bar = theme.sizes.meter_width.min(width).max(0.0);
         let well = Rect::new(rect.x + (rect.width - bar) * 0.5, top, bar, height);
-        scene.fill(
-            RoundedRect::new(well, theme.corners.sm),
-            theme.palette.track,
-        );
+        let radius = bar * 0.5;
+        scene.fill(RoundedRect::new(well, radius), theme.palette.track);
         let level = (height - 2.0).max(0.0) * self.fraction();
         if level > 0.0 {
             let warning = self.warning.is_some_and(|at| self.shown >= at);
@@ -267,13 +267,19 @@ impl Widget for Meter {
             } else {
                 theme.palette.success
             };
-            scene.fill(
-                Rect::new(
-                    well.x + 1.0,
-                    well.bottom() - 1.0 - level,
-                    (bar - 2.0).max(0.0),
-                    level,
-                ),
+            // The level, round at both ends, a little lighter at its top.
+            let fill = Rect::new(
+                well.x + 1.0,
+                well.bottom() - 1.0 - level,
+                (bar - 2.0).max(0.0),
+                level,
+            );
+            let shape = RoundedRect::new(fill, (radius - 1.0).max(0.0));
+            vertical(
+                scene,
+                shape,
+                (fill.y, fill.bottom()),
+                color.lerp(Color::WHITE, 0.2),
                 color,
             );
         }

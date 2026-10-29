@@ -20,6 +20,10 @@ enum Kind {
     Label,
     Title,
     Value,
+    /// A card's heading, in the secondary text colour.
+    Heading,
+    /// Small print, in the muted text colour.
+    Caption,
     Custom(TextStyle),
 }
 
@@ -114,6 +118,22 @@ impl Label {
         self
     }
 
+    /// The same label as a card's heading: the theme's heading style, in
+    /// its secondary text colour.
+    #[must_use]
+    pub fn heading(mut self) -> Label {
+        self.kind = Kind::Heading;
+        self
+    }
+
+    /// The same label as small print beside something: the theme's caption
+    /// style, in its muted text colour.
+    #[must_use]
+    pub fn caption(mut self) -> Label {
+        self.kind = Kind::Caption;
+        self
+    }
+
     /// The same label in `style`, whose colour is used unless
     /// [`color`](Label::color) says otherwise.
     #[must_use]
@@ -159,6 +179,14 @@ impl Label {
             Kind::Label => (typography.label, false),
             Kind::Title => (typography.title, false),
             Kind::Value => (typography.value, false),
+            Kind::Heading => (
+                typography.heading.with_color(theme.palette.text_secondary),
+                true,
+            ),
+            Kind::Caption => (
+                typography.caption.with_color(theme.palette.text_muted),
+                true,
+            ),
             Kind::Custom(style) => (style, true),
         };
         let color = match (self.color, self.muted, own_color) {

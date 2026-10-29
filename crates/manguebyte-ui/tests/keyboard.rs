@@ -184,14 +184,28 @@ fn keys_the_application_lights_are_drawn_lit_and_said_to_sound() {
                 .pixel((at.x * scale) as u32, (at.y * scale) as u32)
                 .map(|p| p.to_array())
         };
-        let rgb = |c: Color| Some([c.r, c.g, c.b, 255]);
+        // Keys are soft gradients, so a pixel near the foot of a key is
+        // near the colour the gradient ends on.
+        let near = |p: Option<[u8; 4]>, c: Color| {
+            p.is_some_and(|p| {
+                p[0].abs_diff(c.r) <= 12 && p[1].abs_diff(c.g) <= 12 && p[2].abs_diff(c.b) <= 12
+            })
+        };
         let d4 = ui.get(Role::Button, "D4");
-        let low = Point::new(d4.center().x, d4.bounds.bottom() - 4.0);
-        assert_eq!(pixel(&ui, low), rgb(white), "{scale}x");
+        let low = Point::new(d4.center().x, d4.bounds.bottom() - 6.0);
+        assert!(
+            near(pixel(&ui, low), white),
+            "{scale}x: {:?}",
+            pixel(&ui, low)
+        );
         state.set_sounding([62, 66]);
         let summary = ui.frame();
         assert!(summary.painted > 0);
-        assert_eq!(pixel(&ui, low), rgb(accent), "{scale}x");
+        assert!(
+            near(pixel(&ui, low), accent),
+            "{scale}x: {:?}",
+            pixel(&ui, low)
+        );
         assert_eq!(
             ui.get(Role::Button, "D4").value_text(),
             Some("up, sounding")
@@ -223,7 +237,6 @@ fn keys_the_application_lights_are_drawn_lit_and_said_to_sound() {
 #[test]
 fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
     let palette = manguebyte_ui::Theme::dark().palette;
-    let white = palette.key_white;
     for scale in [1.0, 1.25, 2.0] {
         let state = KeyboardState::new();
         let mut ui = Harness::new(
@@ -232,18 +245,21 @@ fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
             scale,
         );
         ui.frame();
-        // Along a row below the black keys, every pixel is a key's white
-        // or the gap's colour, the background, never a blend of them.
+        // Along a row below the black keys, every pixel is the keys'
+        // colour there (their gradient's, the same on each key) or the
+        // gap's colour, the background, never a blend of them.
         let y = (80.0 * scale) as u32;
         let track = palette.background;
         let width = (1040.0 * scale) as u32;
+        let key = ui.pixels().pixel(0, y).map(|p| p.to_array());
+        assert!(key.is_some_and(|p| p[0] > 200), "{key:?}");
         let mut gaps = 0;
         for x in 0..width {
             let p = ui.pixels().pixel(x, y).map(|p| p.to_array());
             if p == Some([track.r, track.g, track.b, 255]) {
                 gaps += 1;
             } else {
-                assert_eq!(p, Some([white.r, white.g, white.b, 255]), "{scale}x at {x}");
+                assert_eq!(p, key, "{scale}x at {x}");
             }
         }
         // 52 white keys: a gap of one device pixel after each.
