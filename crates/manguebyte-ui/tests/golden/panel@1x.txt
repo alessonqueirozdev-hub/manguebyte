@@ -2,9 +2,7 @@ fill rect(0 0 400 300) solid(#101116ff)
 shadow rounded_rect(0 0 400 300 radii 18 18 18 18) offset 0 18 blur 40 spread -24 solid(#000000b3)
 fill rounded_rect(0 0 400 300 radii 18 18 18 18) linear(0 0, 0 300, pad [0 #1c1f28ff, 1 #16181fff])
 stroke rounded_rect(0.5 0.5 399 299 radii 17.5 17.5 17.5 17.5) width 1 cap butt join miter 4 solid(#ffffff0f)
-clip rounded_rect(0 0 400 300 radii 18 18 18 18) {
-  fill rect(0 0 400 1) solid(#ffffff0a)
-}
+fill path(evenodd M 0 19 L 0 18 C 0 8.058874 8.058874 0 18 0 L 382 0 C 391.94113 0 400 8.058874 400 18 L 400 19 Z M 0 19 L 0 19 C 0 9.058874 8.058874 1 18 1 L 382 1 C 391.94113 1 400 9.058874 400 19 L 400 19 Z) solid(#ffffff0a)
 text "Filter" size 16 weight 600 opsz 16 solid(#eef0f6ff) [31 12 32.820313, 158 21.382813 32.820313, 174 25.515625 32.820313, 211 29.867188 32.820313, 137 35.351563 32.820313, 200 44.75 32.820313]
 fill rounded_rect(302 17 34 20 radii 10 10 10 10) solid(#ffffff14)
 stroke rounded_rect(302.5 17.5 33 19 radii 9.5 9.5 9.5 9.5) width 1 cap butt join miter 4 solid(#ffffff0f)

@@ -248,6 +248,13 @@ fn box_pass(
     line: &mut [u16],
 ) {
     let size = (before + after + 1) as u64;
+    // Dividing by `2 * size` as a multiplication by its reciprocal, rounded
+    // up, and a shift: exact for every numerator here, which is below 2^18
+    // times the size, against a shift of 46 (see Granlund and Montgomery,
+    // "Division by invariant integers using multiplication").
+    let divisor = u128::from(2 * size);
+    let magic = (1u128 << 46).div_ceil(divisor);
+    let divide = |n: u64| ((u128::from(n) * magic) >> 46) as u16;
     for (i, slot) in line[..count].iter_mut().enumerate() {
         *slot = data[i * stride];
     }
@@ -257,7 +264,7 @@ fn box_pass(
         .map(|&v| u64::from(v))
         .sum();
     for i in 0..count {
-        data[i * stride] = ((sum * 2 + size) / (size * 2)) as u16;
+        data[i * stride] = divide(sum * 2 + size);
         // Slide: add entry i + after + 1, drop entry i - before.
         if let Some(&v) = line.get(i + after + 1).filter(|_| i + after + 1 < count) {
             sum += u64::from(v);
@@ -518,6 +525,24 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_reciprocal_divides_exactly() {
+        for size in [1u64, 2, 3, 5, 38, 75, 76, 1000, 4097] {
+            let divisor = u128::from(2 * size);
+            let magic = (1u128 << 46).div_ceil(divisor);
+            let largest = 2 * 65_535 * size + size;
+            let step = (largest / 9_973).max(1);
+            let mut n = 0;
+            while n <= largest {
+                let q = ((u128::from(n) * magic) >> 46) as u64;
+                assert_eq!(q, n / (2 * size), "{n} / {}", 2 * size);
+                n += step;
+            }
+            let q = ((u128::from(largest) * magic) >> 46) as u64;
+            assert_eq!(q, largest / (2 * size));
         }
     }
 

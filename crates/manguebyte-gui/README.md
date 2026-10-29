@@ -18,6 +18,9 @@ Documentation: <https://docs.rs/manguebyte-gui>
   program or a plugin run as one, with close requests the application
   answers, files dropped onto widgets and the system's file dialogs
   (ADR 0010). Windows only for now.
+- Frames run from one window timer, about 60 a second; a frame where
+  nothing changed presents nothing, and motion follows the system's
+  setting in real windows (ADR 0011).
 
 `examples/app_window.rs` lists the files dropped on it and has buttons for
 the open, folder and save dialogs:

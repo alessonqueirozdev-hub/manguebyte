@@ -998,6 +998,15 @@ impl ZoneMap {
     }
 }
 
+/// A zone's label, waiting to be placed.
+struct ZoneLabel {
+    chosen: bool,
+    area: f32,
+    rect: Rect,
+    name: manguebyte_gfx::TextLayout,
+    range: Option<manguebyte_gfx::TextLayout>,
+}
+
 /// The shape a zone is drawn as: its area a pixel inside each edge, so
 /// that zones side by side read apart, with round corners.
 fn zone_shape(area: Rect, theme: &Theme) -> RoundedRect {
@@ -1121,6 +1130,7 @@ impl Widget for ZoneMap {
                 .find(|(at, _)| *at == id)
                 .map_or(0.0, |(_, amount)| amount.value())
         };
+        let mut labels: Vec<ZoneLabel> = Vec::new();
         let hue_of = |zone: &Zone| {
             let index = zone.hue.map_or(zone.id as usize, usize::from);
             palette.hues[index % palette.hues.len()]
@@ -1162,7 +1172,10 @@ impl Widget for ZoneMap {
                 }
             }
             // Its name, and its range under it if both fit; nothing that
-            // would not show at least a few letters.
+            // would not show at least a few letters. Each line is cut to the
+            // zone's width and kept only if the zone is tall enough for it,
+            // so nothing reaches out of the zone; labels are placed after
+            // the rings, so that no two overlap.
             let pad = 6.0f32.min(shape.rect.width * 0.12);
             let room = shape.rect.width - 2.0 * pad;
             if room >= 14.0 && shape.rect.height >= name_height + 2.0 {
@@ -1175,12 +1188,24 @@ impl Widget for ZoneMap {
                 );
                 let both =
                     shape.rect.height >= top - shape.rect.y + name_height + range_height + 2.0;
-                scene.clipped(shape, |scene| {
-                    scene.text(&name, Point::new(shape.rect.x + pad, top));
-                    if both && !range.is_truncated() {
-                        scene.text(&range, Point::new(shape.rect.x + pad, top + name_height));
-                    }
-                });
+                let range = (both && !range.is_truncated()).then_some(range);
+                let width = name
+                    .size()
+                    .width
+                    .max(range.as_ref().map_or(0.0, |r| r.size().width))
+                    .min(room);
+                let height = name_height + if range.is_some() { range_height } else { 0.0 };
+                let at = Point::new(shape.rect.x + pad, top);
+                // A name cut to a letter or two says nothing.
+                if !(name.is_truncated() && room < 36.0) {
+                    labels.push(ZoneLabel {
+                        chosen,
+                        area: shape.rect.width * shape.rect.height,
+                        rect: Rect::new(at.x, at.y, width, height),
+                        name,
+                        range,
+                    });
+                }
             }
         }
         // Overlaps, over the zones.
@@ -1207,6 +1232,23 @@ impl Widget for ZoneMap {
             }
             if self.cursor == Some(zone.id) {
                 focus_ring(scene, inset(shape, 2.5), theme, ring);
+            }
+        }
+        // The labels, the chosen zones' first and then the largest: one
+        // that would overlap a label already placed is left out.
+        labels.sort_by(|a, b| b.chosen.cmp(&a.chosen).then(b.area.total_cmp(&a.area)));
+        let mut placed: Vec<Rect> = Vec::with_capacity(labels.len());
+        for label in &labels {
+            if placed
+                .iter()
+                .any(|other| other.intersect(&label.rect).is_some_and(|r| !r.is_empty()))
+            {
+                continue;
+            }
+            placed.push(label.rect);
+            scene.text(&label.name, label.rect.origin());
+            if let Some(range) = &label.range {
+                scene.text(range, Point::new(label.rect.x, label.rect.y + name_height));
             }
         }
         if let Some(drop_at) = self.drop_at {

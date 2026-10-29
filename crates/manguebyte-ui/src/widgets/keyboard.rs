@@ -683,6 +683,12 @@ impl Widget for PianoKeyboard {
                 .map_or(0.0, |(_, amount)| amount.value())
         };
         let label = value_style(theme).with_color(palette.key_black.with_alpha(0x99));
+        // The gaps between the white keys: a hairline that parts them on a
+        // light surface as on a dark one.
+        scene.fill(
+            Rect::new(keys.x, keys.y, keys.width, (keys.height - 6.0).max(0.0)),
+            palette.hairline_strong,
+        );
         // Keys rounded at their foot, as keys are.
         let foot = |key: Rect, radius: f32| {
             let r = radius.min(key.width * 0.4).max(0.0);
@@ -728,28 +734,12 @@ impl Widget for PianoKeyboard {
                     scene.fill(shape, shade);
                 }
             }
-            // An edge that parts the key from a light surface behind it.
-            scene.stroke(
-                foot(
-                    Rect::new(
-                        key.x + 0.5,
-                        key.y - 0.5,
-                        (key.width - 1.0).max(0.0),
-                        key.height,
-                    ),
-                    5.5,
-                ),
-                manguebyte_gfx::Stroke::new(1.0),
-                palette.hairline,
+            // The lip at the foot of the key, as round as the key there.
+            let lip = 3.0f32.min(key.height * 0.1);
+            scene.fill(
+                foot(Rect::new(key.x, key.bottom() - lip, key.width, lip), 6.0),
+                Color::BLACK.with_alpha(0x14),
             );
-            // The lip at the foot of the key.
-            scene.clipped(shape, |scene| {
-                let lip = 3.0f32.min(key.height * 0.1);
-                scene.fill(
-                    Rect::new(key.x, key.bottom() - lip, key.width, lip),
-                    Color::BLACK.with_alpha(0x14),
-                );
-            });
             if note % 12 == 0 {
                 let text = line(
                     &(self.names)(note),
@@ -790,13 +780,11 @@ impl Widget for PianoKeyboard {
                     .lerp(palette.text_muted, 0.25 * hover_of(note));
                 vertical(scene, shape, (key.y, key.bottom()), top, palette.key_black);
                 // Light along the foot.
-                scene.clipped(shape, |scene| {
-                    let lip = 2.0f32.min(key.height * 0.1);
-                    scene.fill(
-                        Rect::new(key.x, key.bottom() - lip, key.width, lip),
-                        Color::WHITE.with_alpha(0x10),
-                    );
-                });
+                let lip = 2.0f32.min(key.height * 0.1);
+                scene.fill(
+                    foot(Rect::new(key.x, key.bottom() - lip, key.width, lip), 4.0),
+                    Color::WHITE.with_alpha(0x10),
+                );
             }
         }
         // Ranges along the top, and a dot on each root key.

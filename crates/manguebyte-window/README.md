@@ -24,6 +24,8 @@ Documentation: <https://docs.rs/manguebyte-window>
   (`open_files`, `pick_folder`, `save_file`).
 - A headless backend for all of it on every system, which tests drive and
   script (`Headless`, `HeadlessApp`).
+- `system_motion()`: whether the person lets interfaces animate (Windows'
+  "Animation effects" setting), which the interface follows (ADR 0011).
 
 Backends: Win32 (ADR 0007 and ADR 0010 say what it does and does not do
 to a process) and headless. macOS and Linux are not built yet.

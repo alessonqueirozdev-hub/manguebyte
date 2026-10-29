@@ -11,10 +11,20 @@ Documentation: <https://docs.rs/manguebyte-ui>
 ## What is in it
 
 - A retained widget tree built from views (`row`, `column`, `stack`,
-  `panel`), laid out by a pure function, drawn on the CPU through
+  `panel`, `card`), laid out by a pure function, drawn on the CPU through
   `manguebyte-gfx` with damage tracking: a steady interface draws nothing,
-  and a partial repaint equals a full one bit for bit.
-- Widgets: `label`, `knob`, `slider`, `toggle`, `combo`, `meter`,
+  and a partial repaint equals a full one bit for bit, shadows that spill
+  past a widget included.
+- Design tokens (ADR 0011): layered surfaces, three levels of text, one
+  accent, categorical hues, semantic roles, elevation, radius, spacing,
+  type and motion, in a deep dark theme with glow (the default) and a
+  light editorial one, switchable at run time.
+- Motion: `Animated` values eased on the frame clock, polled, with no
+  timer of their own. Hover, press, focus and selection ease in and out,
+  only the widget that moves is drawn again, and nothing moves when the
+  theme or the system turns motion off. The focus ring shows after the
+  keyboard, not after a click.
+- Widgets: `label`, `knob`, `slider`, `toggle`, `pill`, `combo`, `meter`,
   `canvas`, `text_field`, `image` (a picture fitted to its rectangle, with
   a version per density), `scroll_view` (a viewport with scroll bars, the
   wheel, the keys and nested views) and `list_view` (rows the application
@@ -45,14 +55,18 @@ cargo run -p manguebyte-ui --example views_demo -- <folder>
 ```
 
 `examples/sampler_screen.rs` composes the audio widgets into a
-sampler's screen (a list of samples, the waveform, a zone map above a
-keyboard, an envelope), drives it headless and writes it to PNG files
-at scales 2 and 1.25; `manguebyte-gui`'s `sampler_window` opens the same
-screen in a window on Windows:
+sampler's screen of cards (a title bar with pills, a list of samples, the
+waveform, a zone map above a keyboard, an envelope and its knobs), draws
+it in both themes at 1x, 1.25x and 2x, drives it headless and writes it
+all to PNG files; `manguebyte-gui`'s `sampler_window` opens the same
+screen in a window on Windows. `examples/design_bench.rs` measures what
+the design costs (a whole repaint, an idle frame, a hover transition, a
+shadow blurred and cached):
 
 ```text
 cargo run -p manguebyte-ui --example sampler_screen -- <folder>
 cargo run -p manguebyte-gui --example sampler_window
+cargo run -p manguebyte-ui --example design_bench --release
 ```
 
 ## Licence

@@ -494,3 +494,24 @@ fn edits_draw_only_the_map_and_equal_a_whole_repaint() {
         assert_eq!(ui.frames_rendered_during(|ui| ui.advance_ms(200)), 0);
     }
 }
+
+#[test]
+fn labels_of_overlapping_zones_never_overlap_and_tiny_zones_go_unlabelled() {
+    // Two zones over each other, and one a key wide.
+    let (ui, _state) = open(
+        vec![
+            Zone::new(1, "Strings", 50, 60),
+            Zone::new(2, "Brass", 52, 63),
+            Zone::new(3, "Bell", 66, 66),
+        ],
+        1.0,
+    );
+    let dump = ui.dump();
+    // The larger of the two that overlap keeps its label, the other gives
+    // way; a zone one key (10 pixels) wide has no room for one.
+    assert!(dump.contains("text \"Brass\""), "{dump}");
+    assert!(!dump.contains("text \"Strings\""), "{dump}");
+    assert!(!dump.contains("text \"Bell"), "{dump}");
+    // The range is said under the name.
+    assert!(dump.contains("text \"E3\u{2013}D#4\""), "{dump}");
+}

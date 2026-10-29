@@ -236,7 +236,6 @@ fn keys_the_application_lights_are_drawn_lit_and_said_to_sound() {
 
 #[test]
 fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
-    let palette = manguebyte_ui::Theme::dark().palette;
     for scale in [1.0, 1.25, 2.0] {
         let state = KeyboardState::new();
         let mut ui = Harness::new(
@@ -247,16 +246,21 @@ fn white_keys_are_parted_by_whole_device_pixels_at_every_scale() {
         ui.frame();
         // Along a row below the black keys, every pixel is the keys'
         // colour there (their gradient's, the same on each key) or the
-        // gap's colour, the background, never a blend of them.
+        // gaps' colour (a hairline over the background), never a blend of
+        // them.
         let y = (80.0 * scale) as u32;
-        let track = palette.background;
         let width = (1040.0 * scale) as u32;
         let key = ui.pixels().pixel(0, y).map(|p| p.to_array());
         assert!(key.is_some_and(|p| p[0] > 200), "{key:?}");
+        let gap = (0..width)
+            .map(|x| ui.pixels().pixel(x, y).map(|p| p.to_array()))
+            .find(|&p| p != key)
+            .expect("a gap");
+        assert!(gap.is_some_and(|p| p[0] < 100), "{gap:?}");
         let mut gaps = 0;
         for x in 0..width {
             let p = ui.pixels().pixel(x, y).map(|p| p.to_array());
-            if p == Some([track.r, track.g, track.b, 255]) {
+            if p == gap {
                 gaps += 1;
             } else {
                 assert_eq!(p, key, "{scale}x at {x}");

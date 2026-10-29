@@ -1290,9 +1290,8 @@ impl Widget for WaveformView {
                 );
             }
             let y = strip.y + (height - text.size().height) * 0.5;
-            scene.clipped(chip, |scene| {
-                scene.text(&text, Point::new(left + 5.0, y));
-            });
+            // The chip is as wide as its text.
+            scene.text(&text, Point::new(left + 5.0, y));
         }
         if let Some(playhead) = playhead {
             let x = geometry.x_of(playhead as f64);

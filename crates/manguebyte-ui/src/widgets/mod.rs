@@ -291,10 +291,47 @@ pub(crate) fn top_highlight(scene: &mut Scene, rect: Rect, radius: f32, scale: f
     if color.a == 0 {
         return;
     }
+    // A thin band along the top edge, as round as the corners: the
+    // rectangle's top less the same rectangle a pixel lower, drawn as one
+    // outline filled even-odd (no clip, which costs a mask).
     let px = device_px(1.0, scale);
-    scene.clipped(RoundedRect::new(rect, radius), |scene| {
-        scene.fill(Rect::new(rect.x, rect.y, rect.width, px), color);
-    });
+    let r = radius.min(rect.width * 0.5).min(rect.height * 0.5).max(0.0);
+    let band = Rect::new(rect.x, rect.y, rect.width, (r + px).min(rect.height));
+    let mut path = manguebyte_gfx::Path::new();
+    top_rounded(&mut path, band, r);
+    top_rounded(
+        &mut path,
+        Rect::new(band.x, band.y + px, band.width, (band.height - px).max(0.0)),
+        r,
+    );
+    path.set_fill_rule(manguebyte_gfx::FillRule::EvenOdd);
+    scene.fill(&path, color);
+}
+
+/// Adds to `path` the outline of `rect` with its top corners rounded by
+/// `r` (each corner a cubic close to a quarter circle) and its bottom
+/// corners square.
+fn top_rounded(path: &mut manguebyte_gfx::Path, rect: Rect, r: f32) {
+    // How far a cubic's controls lie along the tangents for a quarter
+    // circle.
+    const K: f32 = 0.552_284_8;
+    let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
+    let r = r.min(rect.height).min(rect.width * 0.5).max(0.0);
+    path.move_to(Point::new(x0, y1))
+        .line_to(Point::new(x0, y0 + r))
+        .cubic_to(
+            Point::new(x0, y0 + r - K * r),
+            Point::new(x0 + r - K * r, y0),
+            Point::new(x0 + r, y0),
+        )
+        .line_to(Point::new(x1 - r, y0))
+        .cubic_to(
+            Point::new(x1 - r + K * r, y0),
+            Point::new(x1, y0 + r - K * r),
+            Point::new(x1, y0 + r),
+        )
+        .line_to(Point::new(x1, y1))
+        .close();
 }
 
 /// `x`, in logical pixels, moved to the nearest edge between device
