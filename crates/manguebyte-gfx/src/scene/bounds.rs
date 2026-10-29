@@ -2,7 +2,9 @@
 
 use super::{Command, Scene, StoredShape, TEXT_TOLERANCE};
 use crate::geom::{Rect, Transform};
+use crate::paint::Stroke;
 use crate::path::bounds_of;
+use crate::shadow::Shadow;
 
 enum Frame {
     Clip(Option<Rect>),
@@ -41,6 +43,33 @@ pub(crate) fn shape_bounds(scene: &Scene, shape: StoredShape) -> Option<Rect> {
         }
         StoredShape::Path { points, .. } => bounds_of(&scene.points[points.range()])?,
     };
+    bounds.is_finite().then_some(bounds)
+}
+
+/// The bounds of a shadow of `shape` (filled, or drawn with `stroke`) in
+/// the shape's coordinates, or `None` if it draws nothing: the shape's
+/// bounds (with the stroke's reach), moved by the offset and grown by the
+/// shadow's [`reach`](Shadow::reach). The renderer draws no shadow pixel
+/// outside them.
+pub(crate) fn shadow_bounds(
+    scene: &Scene,
+    shape: StoredShape,
+    stroke: Option<Stroke>,
+    shadow: &Shadow,
+) -> Option<Rect> {
+    if shadow.color.a == 0 || !shadow.offset.is_finite() {
+        return None;
+    }
+    let mut local = shape_bounds(scene, shape)?;
+    if let Some(stroke) = stroke {
+        if !(stroke.width > 0.0 && stroke.width.is_finite()) {
+            return None;
+        }
+        local = local.outset(stroke.drawn_reach());
+    } else if !has_area(&local) {
+        return None;
+    }
+    let bounds = local.translate(shadow.offset).outset(shadow.reach());
     bounds.is_finite().then_some(bounds)
 }
 
@@ -87,6 +116,14 @@ pub(super) fn bounds(scene: &Scene) -> Option<Rect> {
                     continue;
                 }
                 let local = shape_bounds(scene, shape).map(|b| b.outset(stroke.drawn_reach()));
+                add(local, &transform, &clip);
+            }
+            Command::Shadow {
+                shape,
+                stroke,
+                shadow,
+            } => {
+                let local = shadow_bounds(scene, shape, stroke, &shadow);
                 add(local, &transform, &clip);
             }
             Command::Image { to, .. } => {

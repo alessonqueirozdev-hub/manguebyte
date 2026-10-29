@@ -111,6 +111,27 @@ pub(super) fn dump(scene: &Scene) -> String {
                 out.push(' ');
                 write_paint(&mut out, scene, paint);
             }
+            Command::Shadow {
+                shape,
+                stroke,
+                shadow,
+            } => {
+                out.push_str("shadow ");
+                write_shape(&mut out, scene, shape);
+                if let Some(stroke) = stroke {
+                    out.push(' ');
+                    write_stroke(&mut out, &stroke);
+                }
+                out.push_str(" offset ");
+                write_point(&mut out, shadow.offset);
+                out.push_str(" blur ");
+                write_number(&mut out, shadow.blur);
+                out.push_str(" spread ");
+                write_number(&mut out, shadow.spread);
+                out.push_str(" solid(");
+                write_color(&mut out, shadow.color);
+                out.push(')');
+            }
             Command::PushClip(shape) => {
                 out.push_str("clip ");
                 write_shape(&mut out, scene, shape);

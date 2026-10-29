@@ -17,7 +17,8 @@
 //!   encoding and decoding.
 //! - **[`Scene`]**: a display list a widget records: fills and strokes of
 //!   shapes and [`Path`]s with solid colours or gradients ([`Paint`]),
-//!   [`Image`]s, text, clips, transforms, opacity layers, and
+//!   soft [`Shadow`]s and glows of shapes and strokes, [`Image`]s, text,
+//!   clips, transforms, opacity layers, and
 //!   [`Scene::columns`], the primitive for waveforms, spectra and meters.
 //!   [`Scene::dump`] prints it as exact text for tests.
 //! - **[Text](text)**: a [`TextStyle`] (size, weight, optical size,
@@ -27,7 +28,8 @@
 //! - **[`Renderer`]**: draws a scene into a pixmap at a scale factor, either
 //!   whole or only inside damage rectangles; a partial render changes
 //!   nothing outside the damage and draws every pixel inside it exactly as
-//!   a whole render would. It keeps a bounded cache of glyph masks. The
+//!   a whole render would. It keeps bounded caches of glyph masks and of
+//!   blurred shadow masks, so a shadow is blurred once, not every frame. The
 //!   rasteriser behind it is a private seam; today it is `tiny-skia`, and
 //!   no type of it appears here.
 //! - **[`snapshot`]**: golden-image and dump comparison for tests.
@@ -89,6 +91,7 @@ mod path;
 mod pixmap;
 mod raster;
 mod scene;
+mod shadow;
 pub mod snapshot;
 pub mod text;
 mod trig;
@@ -101,6 +104,7 @@ pub use path::{FillRule, Path, Segment};
 pub use pixmap::{ImageError, MAX_SIDE, Pixmap};
 pub use raster::Renderer;
 pub use scene::{Layer, MAX_DEPTH, Scene, Shape};
+pub use shadow::{Shadow, ShadowCacheStats};
 pub use text::{
     Align, Caret, FontMetrics, Glyph, GlyphCacheStats, Line, OpticalSize, TYPEFACE_LICENCE,
     TextLayout, TextStyle,

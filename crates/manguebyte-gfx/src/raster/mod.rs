@@ -13,6 +13,7 @@ use std::fmt;
 use crate::geom::{IRect, Transform};
 use crate::pixmap::Pixmap;
 use crate::scene::Scene;
+use crate::shadow::{ShadowCache, ShadowCacheStats};
 use crate::text::{GlyphCache, GlyphCacheStats};
 
 /// Draws a scene into a pixmap.
@@ -21,15 +22,22 @@ pub(crate) trait Raster: Send {
     /// pixels. With `damage`, only the pixels inside its rectangles change,
     /// and each of them comes out as a render of the whole would draw it;
     /// the rectangles are disjoint, not empty, and lie inside `target`.
-    /// Glyph masks are looked up in, and added to, `glyphs`.
+    /// Glyph masks are looked up in, and added to, `glyphs`, and blurred
+    /// shadow masks in `shadows`.
     fn render(
         &mut self,
         scene: &Scene,
         target: &mut Pixmap,
         transform: Transform,
         damage: Option<&[IRect]>,
-        glyphs: &mut GlyphCache,
+        caches: Caches<'_>,
     );
+}
+
+/// The caches a renderer keeps between renders.
+pub(crate) struct Caches<'a> {
+    pub(crate) glyphs: &'a mut GlyphCache,
+    pub(crate) shadows: &'a mut ShadowCache,
 }
 
 /// More damage rectangles than this, before or after they are made
@@ -82,9 +90,37 @@ const MAX_PASSES: usize = 16;
 /// assert_eq!(pixels.pixel(0, 0).expect("inside").alpha(), 255);
 /// assert_eq!(pixels.pixel(1, 0).expect("inside").alpha(), 0);
 /// ```
+///
+/// Shadows ([`Scene::shadow`]) are drawn from a cache of blurred masks in
+/// the same way: the mask of a shadow is drawn and blurred once, kept under
+/// its shape, size, blur and scale, and blended from the cache whenever the
+/// same shadow is drawn again, until the shadow changes or the budget (16
+/// MiB unless [`set_shadow_cache_limit`](Renderer::set_shadow_cache_limit)
+/// says otherwise) has to make room. The blur is three passes of box
+/// filters each way on whole numbers, so shadows come out the same, bit
+/// for bit, on every machine, and a shadow is never drawn beyond its
+/// [`reach`](crate::Shadow::reach), so a partial render that covers it
+/// equals a whole one.
+///
+/// ```
+/// use manguebyte_gfx::{Color, Pixmap, Rect, Renderer, RoundedRect, Scene, Shadow};
+///
+/// let card = RoundedRect::new(Rect::new(10.0, 10.0, 40.0, 30.0), 8.0);
+/// let mut scene = Scene::new();
+/// scene.shadow(card, Shadow::new(Color::BLACK.with_alpha(0x80)).with_blur(12.0));
+/// scene.fill(card, Color::hex(0x1C1F28));
+/// let mut pixels = Pixmap::new(120, 100).expect("small");
+/// let mut renderer = Renderer::new();
+/// renderer.render(&scene, &mut pixels, 2.0);
+/// renderer.render(&scene, &mut pixels, 2.0);
+/// // Blurred once, drawn twice.
+/// let shadows = renderer.shadow_cache();
+/// assert_eq!((shadows.misses, shadows.hits), (1, 1));
+/// ```
 pub struct Renderer {
     raster: Box<dyn Raster>,
     glyphs: GlyphCache,
+    shadows: ShadowCache,
     passes: Vec<IRect>,
     work: Vec<IRect>,
     next: Vec<IRect>,
@@ -108,6 +144,7 @@ impl Renderer {
         Renderer {
             raster: Box::new(skia::Skia::new()),
             glyphs: GlyphCache::default(),
+            shadows: ShadowCache::default(),
             passes: Vec::new(),
             work: Vec::new(),
             next: Vec::new(),
@@ -126,7 +163,10 @@ impl Renderer {
             target,
             Transform::scale(scale, scale),
             None,
-            &mut self.glyphs,
+            Caches {
+                glyphs: &mut self.glyphs,
+                shadows: &mut self.shadows,
+            },
         );
     }
 
@@ -176,15 +216,26 @@ impl Renderer {
         }
         let transform = Transform::scale(scale, scale);
         if self.passes[..] == [target.bounds()] {
-            self.raster
-                .render(scene, target, transform, None, &mut self.glyphs);
+            self.raster.render(
+                scene,
+                target,
+                transform,
+                None,
+                Caches {
+                    glyphs: &mut self.glyphs,
+                    shadows: &mut self.shadows,
+                },
+            );
         } else {
             self.raster.render(
                 scene,
                 target,
                 transform,
                 Some(&self.passes),
-                &mut self.glyphs,
+                Caches {
+                    glyphs: &mut self.glyphs,
+                    shadows: &mut self.shadows,
+                },
             );
         }
     }
@@ -224,6 +275,25 @@ impl Renderer {
     /// holds, keeping the budget and the counts.
     pub fn clear_glyph_cache(&mut self) {
         self.glyphs.clear();
+    }
+
+    /// How many blurred shadow masks the renderer holds, how many bytes
+    /// they take (never more than the budget), and how often a shadow was
+    /// drawn from one (`hits`) or had to be blurred first (`misses`).
+    pub fn shadow_cache(&self) -> ShadowCacheStats {
+        self.shadows.stats()
+    }
+
+    /// Sets the shadow cache's budget in bytes, dropping the masks used
+    /// least recently until what it holds fits. A budget of 0 keeps
+    /// nothing: every shadow is blurred afresh each time it is drawn.
+    pub fn set_shadow_cache_limit(&mut self, bytes: usize) {
+        self.shadows.set_limit(bytes);
+    }
+
+    /// Drops every shadow mask, keeping the budget and the counts.
+    pub fn clear_shadow_cache(&mut self) {
+        self.shadows.clear();
     }
 }
 

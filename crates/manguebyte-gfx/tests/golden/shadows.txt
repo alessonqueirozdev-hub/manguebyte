@@ -1,0 +1,20 @@
+fill rect(0 0 120 90) solid(#101116ff)
+shadow rounded_rect(10 8 50 34 radii 9 9 9 9) offset 0 9 blur 20 spread -6 solid(#000000b3)
+fill rounded_rect(10 8 50 34 radii 9 9 9 9) solid(#1c1f28ff)
+shadow arc(88 26 14 2.3561945 2.8274336) width 3 cap round join round offset 0 0 blur 8 spread 0 solid(#ff7a3db0)
+stroke arc(88 26 14 2.3561945 2.8274336) width 3 cap round join round solid(#ff7a3dff)
+shadow path(nonzero M 8 80 L 20 56 C 26 66 32 70 42 70 L 56 82) width 2 cap round join round offset 0 0 blur 6 spread 0 solid(#ff7a3dff)
+stroke path(nonzero M 8 80 L 20 56 C 26 66 32 70 42 70 L 56 82) width 2 cap round join round solid(#ff9a5cff)
+shadow rect(66 52 14 10) offset 2 2 blur 0 spread 0 solid(#2fd3c0ff)
+fill rect(66 52 14 10) solid(#e8e9eeff)
+shadow circle(98 70 6) offset 0 0 blur 10 spread 2 solid(#8b7bffff)
+fill circle(98 70 6) solid(#ffffffff)
+clip rect(62 64 20 26) {
+  layer opacity 0.6 {
+    shadow rounded_rect(66 72 12 10 radii 3 3 3 3) offset 0 0 blur 6 spread 0 solid(#ff5c9aff)
+  }
+}
+transform matrix(0.9553365 0.29552022 -0.29552022 0.9553365 19.421013 -28.50093) {
+  shadow rect(98 46 12 8) offset 0 0 blur 4 spread 0 solid(#00000099)
+  fill rect(98 46 12 8) solid(#242834ff)
+}

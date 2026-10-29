@@ -44,16 +44,18 @@
 
 use tiny_skia as sk;
 
-use super::Raster;
+use super::{Caches, Raster};
 use crate::color::{Color, mul_div_255};
-use crate::geom::{IRect, Point, Rect, Transform};
+use crate::geom::{Circle, IRect, Point, Radii, Rect, RoundedRect, Transform};
 use crate::image::Sampling;
 use crate::paint::{Cap, Extend, Join, Stop, Stroke};
 use crate::path::{FillRule, Verb};
 use crate::pixmap::{ImageError, MAX_SIDE, Pixmap};
 use crate::scene::{
-    Command, MAX_DEPTH, Scene, StoredGlyph, StoredPaint, StoredShape, TEXT_TOLERANCE, shape_bounds,
+    Command, MAX_DEPTH, Scene, StoredGlyph, StoredPaint, StoredShape, TEXT_TOLERANCE,
+    shadow_bounds, shape_bounds,
 };
+use crate::shadow::{Shadow, ShadowCache, ShadowMask, blur, box_reach, box_size};
 use crate::text::font::{Coords, Face};
 use crate::text::{GlyphCache, GlyphKey, Mask};
 
@@ -188,6 +190,11 @@ pub(crate) struct Skia {
     face: Face,
     /// The coverage of a run of glyphs drawn from masks, over its box.
     coverage: Vec<u8>,
+    /// What identifies a shadow's mask in the cache, and the blur's
+    /// scratch buffers.
+    shadow_key: Vec<u32>,
+    blur_work: Vec<u16>,
+    blur_line: Vec<u16>,
     /// Drawing commands not skipped, counted for tests.
     #[cfg(test)]
     drawn: usize,
@@ -217,6 +224,9 @@ impl Skia {
             owners: Vec::new(),
             face: Face::embedded(),
             coverage: Vec::new(),
+            shadow_key: Vec::new(),
+            blur_work: Vec::new(),
+            blur_line: Vec::new(),
             #[cfg(test)]
             drawn: 0,
             #[cfg(test)]
@@ -967,7 +977,7 @@ impl Raster for Skia {
         target: &mut Pixmap,
         transform: Transform,
         damage: Option<&[IRect]>,
-        glyphs: &mut GlyphCache,
+        mut caches: Caches<'_>,
     ) {
         if !transform.is_finite() || target.is_empty() {
             return;
@@ -983,7 +993,7 @@ impl Raster for Skia {
         let Some(damage) = damage else {
             // A whole render draws straight into the target's own buffer,
             // which never leaves it, so a panic cannot leave it short.
-            self.pass(scene, target.data_mut(), transform, None, glyphs);
+            self.pass(scene, target.data_mut(), transform, None, &mut caches);
             return;
         };
         self.plan(damage);
@@ -1006,7 +1016,7 @@ impl Raster for Skia {
             {
                 copy(target.data(), &mut scratch, width, *rect);
             }
-            self.pass(scene, &mut scratch, transform, Some(window), glyphs);
+            self.pass(scene, &mut scratch, transform, Some(window), &mut caches);
             let pixels = target.data_mut();
             for (rect, _) in damage
                 .iter()
@@ -1071,7 +1081,7 @@ impl Skia {
         base: &mut [u8],
         transform: Transform,
         window: Option<Window>,
-        glyphs: &mut GlyphCache,
+        caches: &mut Caches<'_>,
     ) {
         let mut walk = Walk {
             width: self.size.0,
@@ -1086,7 +1096,7 @@ impl Skia {
         self.transforms.clear();
         self.frames.clear();
         for command in &scene.commands {
-            self.command(scene, base, &mut walk, *command, glyphs);
+            self.command(scene, base, &mut walk, *command, caches);
         }
         // Close whatever is still open, so open layers are composited.
         while let Some(frame) = self.frames.last().copied() {
@@ -1095,7 +1105,7 @@ impl Skia {
                 Kind::Transform => Command::PopTransform,
                 Kind::Layer => Command::PopLayer,
             };
-            self.command(scene, base, &mut walk, pop, glyphs);
+            self.command(scene, base, &mut walk, pop, caches);
         }
     }
 
@@ -1117,7 +1127,7 @@ impl Skia {
         base: &mut [u8],
         walk: &mut Walk,
         command: Command,
-        glyphs: &mut GlyphCache,
+        caches: &mut Caches<'_>,
     ) {
         match command {
             Command::PushTransform(by) => {
@@ -1186,6 +1196,25 @@ impl Skia {
                     self.stroke(scene, base, walk, shape, &stroke, paint);
                 }
             }
+            Command::Shadow {
+                shape,
+                stroke,
+                shadow,
+            } => {
+                let Some(local) = shadow_bounds(scene, shape, stroke, &shadow) else {
+                    return;
+                };
+                if walk.reaches(walk.transform.map_rect(&local)) {
+                    self.drawing();
+                    self.shadow(
+                        scene,
+                        base,
+                        walk,
+                        (shape, stroke, shadow, local),
+                        caches.shadows,
+                    );
+                }
+            }
             Command::Image {
                 image,
                 to,
@@ -1230,7 +1259,7 @@ impl Skia {
                 if walk.reaches(walk.transform.map_rect(&ink.outset(TEXT_TOLERANCE))) {
                     self.drawing();
                     let run = &scene.glyphs[run.range()];
-                    self.text(base, walk, run, (size, coords, color, ink), glyphs);
+                    self.text(base, walk, run, (size, coords, color, ink), caches.glyphs);
                 }
             }
         }
@@ -2016,6 +2045,372 @@ impl Skia {
         }
     }
 
+    /// Draws a shadow: the outline of the shape (or of its stroke), moved,
+    /// grown, in device pixels, filled into a mask and blurred, or the
+    /// mask kept from an earlier render; then the mask blended in the
+    /// shadow's colour within `bounds` (in the shape's coordinates, see
+    /// `shadow_bounds`). Nothing here depends on the pass's window but
+    /// which pixels are blended, so a partial render draws what a whole
+    /// one does.
+    fn shadow(
+        &mut self,
+        scene: &Scene,
+        base: &mut [u8],
+        walk: &Walk,
+        (shape, stroke, shadow, bounds): (StoredShape, Option<Stroke>, Shadow, Rect),
+        cache: &mut ShadowCache,
+    ) {
+        let t = Transform::translate(shadow.offset.x, shadow.offset.y).then(walk.transform);
+        if !t.is_finite() {
+            return;
+        }
+        let spread = shadow.drawn_spread();
+        // What is drawn into the mask: the outline, and for an outline
+        // that grows by a stroke, that stroke too, unioned with it.
+        let mut grow_by = 0.0f32;
+        let rule = match stroke {
+            None => {
+                let grown = match shape {
+                    StoredShape::Rect(r) => StoredShape::Rect(r.outset(spread)),
+                    StoredShape::RoundedRect(r) => {
+                        let radii = r.fitted_radii();
+                        let grow = |v: f32| (v + spread).max(0.0);
+                        StoredShape::RoundedRect(RoundedRect::with_radii(
+                            r.rect.outset(spread),
+                            Radii {
+                                top_left: grow(radii.top_left),
+                                top_right: grow(radii.top_right),
+                                bottom_right: grow(radii.bottom_right),
+                                bottom_left: grow(radii.bottom_left),
+                            },
+                        ))
+                    }
+                    StoredShape::Circle(c) => {
+                        StoredShape::Circle(Circle::new(c.center, c.radius + spread))
+                    }
+                    other => {
+                        grow_by = spread.max(0.0);
+                        other
+                    }
+                };
+                self.verbs.clear();
+                self.points.clear();
+                sk_fill_rule(scene.outline(grown, &mut self.verbs, &mut self.points))
+            }
+            Some(stroke) => {
+                let widened = Stroke {
+                    width: stroke.width + 2.0 * spread.max(0.0),
+                    ..stroke
+                };
+                if !self.stroke_outline(scene, shape, &widened, t) {
+                    return;
+                }
+                sk::FillRule::Winding
+            }
+        };
+        let scale = f64::from(t.a * t.d - t.b * t.c).abs().sqrt();
+        let d = box_size(f64::from(shadow.drawn_blur()) * 0.5 * scale);
+        let pad = f64::from(box_reach(d) + 1);
+        // The mask's top-left corner, in whole device pixels: the blur's
+        // reach beyond the outline's box. The outline is drawn relative to
+        // it, so that the same shadow moved by whole device pixels has the
+        // same mask.
+        let Some(local) = crate::path::bounds_of(&self.points) else {
+            return;
+        };
+        let device = t.map_rect(&local);
+        let (ox, oy) = (
+            f64::from(device.x).floor() - pad,
+            f64::from(device.y).floor() - pad,
+        );
+        // Beyond this a corner is not a whole `f32`.
+        const WHOLE: f64 = 16_777_216.0;
+        if !(ox.abs() < WHOLE && oy.abs() < WHOLE) {
+            return;
+        }
+        let t = t.then(Transform::translate(-ox as f32, -oy as f32));
+        // The outline, flattened, relative to the corner; then the grown
+        // part.
+        for p in &mut self.points {
+            *p = t.map_point(*p);
+        }
+        self.flat_verbs.clear();
+        self.flat_points.clear();
+        flatten(
+            &self.verbs,
+            &self.points,
+            &mut self.flat_verbs,
+            &mut self.flat_points,
+        );
+        let mut split = (self.flat_verbs.len(), self.flat_points.len());
+        if grow_by > 0.0 && self.stroke_outline(scene, shape, &Stroke::round(2.0 * grow_by), t) {
+            for p in &mut self.points {
+                *p = t.map_point(*p);
+            }
+            flatten(
+                &self.verbs,
+                &self.points,
+                &mut self.flat_verbs,
+                &mut self.flat_points,
+            );
+        }
+        if self.flat_points.iter().any(|p| !p.is_finite()) {
+            return;
+        }
+        let Some(outline) = crate::path::bounds_of(&self.flat_points) else {
+            return;
+        };
+        // A shadow far larger than the target is cut to the target and the
+        // blur's reach around it: what lies farther cannot reach a pixel
+        // of the target. The cut depends only on the target's size and the
+        // corner.
+        let (w, h) = (f64::from(walk.width), f64::from(walk.height));
+        let limit = (
+            -ox - pad - 1.0,
+            -oy - pad - 1.0,
+            w - ox + pad + 1.0,
+            h - oy + pad + 1.0,
+        );
+        let fits = f64::from(outline.x) >= limit.0
+            && f64::from(outline.y) >= limit.1
+            && f64::from(outline.right()) <= limit.2
+            && f64::from(outline.bottom()) <= limit.3;
+        if !fits {
+            let (mut verbs, mut points) = clip_contours(
+                &self.flat_verbs[..split.0],
+                &self.flat_points[..split.1],
+                limit,
+            );
+            let main = (verbs.len(), points.len());
+            let (grown_verbs, grown_points) = clip_contours(
+                &self.flat_verbs[split.0..],
+                &self.flat_points[split.1..],
+                limit,
+            );
+            verbs.extend(grown_verbs);
+            points.extend(grown_points);
+            self.flat_verbs = verbs;
+            self.flat_points = points;
+            split = main;
+        }
+        self.shadow_mask(
+            base,
+            walk,
+            (rule, d, pad),
+            (split, (ox, oy)),
+            (shadow, bounds),
+            cache,
+        );
+    }
+
+    /// The outline of `shape` drawn with `stroke`, in the shape's own
+    /// coordinates, into `verbs` and `points`, computed as `stroke` does
+    /// for the transform `t`; false if there is none.
+    fn stroke_outline(
+        &mut self,
+        scene: &Scene,
+        shape: StoredShape,
+        stroke: &Stroke,
+        t: Transform,
+    ) -> bool {
+        if !(stroke.width > 0.0 && stroke.width.is_finite()) {
+            return false;
+        }
+        let Some(local) = self.local_outline(scene, shape) else {
+            return false;
+        };
+        let sk_stroke = sk::Stroke {
+            width: stroke.width,
+            miter_limit: stroke.drawn_miter_limit(),
+            line_cap: match stroke.cap {
+                Cap::Butt => sk::LineCap::Butt,
+                Cap::Round => sk::LineCap::Round,
+                Cap::Square => sk::LineCap::Square,
+            },
+            line_join: match stroke.join {
+                Join::Miter => sk::LineJoin::Miter,
+                Join::Round => sk::LineJoin::Round,
+                Join::Bevel => sk::LineJoin::Bevel,
+            },
+            dash: None,
+        };
+        let resolution = (sk::PathStroker::compute_resolution_scale(&sk_transform(t))
+            * STROKE_OVERSAMPLE)
+            .clamp(STROKE_OVERSAMPLE, MAX_STROKE_RESOLUTION);
+        let dashed;
+        let local = match stroke.dash {
+            None => &local,
+            Some(d) => {
+                let Some(dash) = sk::StrokeDash::new(vec![d.on, d.off], d.offset) else {
+                    return false;
+                };
+                let Some(path) = local.dash(&dash, resolution) else {
+                    return false;
+                };
+                dashed = path;
+                &dashed
+            }
+        };
+        let Some(outline) = local.stroke(&sk_stroke, resolution) else {
+            return false;
+        };
+        self.verbs.clear();
+        self.points.clear();
+        let map = |p: sk::Point| Point::new(p.x, p.y);
+        for segment in outline.segments() {
+            match segment {
+                sk::PathSegment::MoveTo(p) => {
+                    self.verbs.push(Verb::Move);
+                    self.points.push(map(p));
+                }
+                sk::PathSegment::LineTo(p) => {
+                    self.verbs.push(Verb::Line);
+                    self.points.push(map(p));
+                }
+                sk::PathSegment::QuadTo(c, p) => {
+                    self.verbs.push(Verb::Quad);
+                    self.points.extend([map(c), map(p)]);
+                }
+                sk::PathSegment::CubicTo(c1, c2, p) => {
+                    self.verbs.push(Verb::Cubic);
+                    self.points.extend([map(c1), map(c2), map(p)]);
+                }
+                sk::PathSegment::Close => self.verbs.push(Verb::Close),
+            }
+        }
+        true
+    }
+
+    /// Finds, or makes and blurs, the mask of the flattened outline in
+    /// `flat_verbs` and `flat_points` (device pixels relative to the
+    /// mask's corner `origin`; the part from `split` on, if any, unioned
+    /// with the rest by the larger coverage), and blends it within
+    /// `bounds`.
+    fn shadow_mask(
+        &mut self,
+        base: &mut [u8],
+        walk: &Walk,
+        (rule, d, pad): (sk::FillRule, u32, f64),
+        (split, (x0, y0)): ((usize, usize), (f64, f64)),
+        (shadow, bounds): (Shadow, Rect),
+        cache: &mut ShadowCache,
+    ) {
+        let Some(outline) = crate::path::bounds_of(&self.flat_points) else {
+            return;
+        };
+        let (mw, mh) = (
+            (f64::from(outline.right()).ceil() + pad).max(0.0),
+            (f64::from(outline.bottom()).ceil() + pad).max(0.0),
+        );
+        if !(mw >= 1.0 && mh >= 1.0 && mw <= 32_768.0 && mh <= 32_768.0) {
+            return;
+        }
+        let (x1, y1) = (x0 + mw, y0 + mh);
+        let (mw, mh) = (mw as u32, mh as u32);
+        // The key: everything the mask is made from.
+        let key = &mut self.shadow_key;
+        key.clear();
+        key.extend([
+            match rule {
+                sk::FillRule::Winding => 0,
+                sk::FillRule::EvenOdd => 1,
+            },
+            d,
+            mw,
+            mh,
+            split.0 as u32,
+            split.1 as u32,
+        ]);
+        key.extend(self.flat_verbs.iter().map(|&v| v as u32));
+        key.extend(
+            self.flat_points
+                .iter()
+                .flat_map(|p| [p.x.to_bits(), p.y.to_bits()]),
+        );
+        let Skia {
+            flat_verbs,
+            flat_points,
+            blur_work,
+            blur_line,
+            shadow_key,
+            ..
+        } = self;
+        let mask = cache.get_or_make(shadow_key, || {
+            let mut mask = sk::Mask::new(mw, mh)?;
+            if let Some(path) = sk_path(&flat_verbs[..split.0], &flat_points[..split.1]) {
+                mask.fill_path(&path, rule, true, sk::Transform::identity());
+            }
+            if split.0 < flat_verbs.len() {
+                let mut grown = sk::Mask::new(mw, mh)?;
+                if let Some(path) = sk_path(&flat_verbs[split.0..], &flat_points[split.1..]) {
+                    grown.fill_path(
+                        &path,
+                        sk::FillRule::Winding,
+                        true,
+                        sk::Transform::identity(),
+                    );
+                }
+                for (m, g) in mask.data_mut().iter_mut().zip(grown.data()) {
+                    *m = (*m).max(*g);
+                }
+            }
+            let mut data = mask.take();
+            blur(&mut data, mw as usize, mh as usize, d, blur_work, blur_line);
+            Some(ShadowMask {
+                width: mw,
+                data: data.into_boxed_slice(),
+            })
+        });
+        let Some(mask) = mask else {
+            return;
+        };
+        // Blended within the mask, the shadow's bounds in device pixels
+        // rounded out, and the pixels this pass draws.
+        let cut = walk.transform.map_rect(&bounds);
+        if !cut.is_finite() {
+            return;
+        }
+        let pixels = walk.pixels();
+        let left = x0.max(f64::from(cut.x).floor()).max(f64::from(pixels.x));
+        let top = y0.max(f64::from(cut.y).floor()).max(f64::from(pixels.y));
+        let right = x1
+            .min(f64::from(cut.right()).ceil())
+            .min(pixels.right() as f64);
+        let bottom = y1
+            .min(f64::from(cut.bottom()).ceil())
+            .min(pixels.bottom() as f64);
+        if !(left < right && top < bottom) {
+            return;
+        }
+        // Inside the target's pixels, so whole, small and not negative.
+        let (left, top, right, bottom) =
+            (left as usize, top as usize, right as usize, bottom as usize);
+        let (mx, my) = (x0 as i64, y0 as i64);
+        let color = shadow.color.premultiply().to_array();
+        let width = walk.width as usize;
+        let clip = walk
+            .clips
+            .checked_sub(1)
+            .and_then(|i| self.masks.get(i))
+            .map(sk::Mask::data);
+        let Some(surface) = surface(&mut self.layers, base, walk.layers) else {
+            return;
+        };
+        let stride = mask.width as usize;
+        for y in top..bottom {
+            let row = (y as i64 - my) as usize * stride;
+            for x in left..right {
+                let c = mask.data[row + (x as i64 - mx) as usize];
+                if c == 0 {
+                    continue;
+                }
+                let i = y * width + x;
+                let c = clip.map_or(c, |clip| mul_div_255(c, clip[i]));
+                blend_solid(&mut surface[i * 4..i * 4 + 4], color, c);
+            }
+        }
+    }
+
     fn skip(&mut self, walk: &mut Walk, kind: Kind) {
         self.frames.push(Frame::Skip(kind));
         walk.skipping += 1;
@@ -2263,7 +2658,7 @@ mod tests {
     use crate::{Circle, LinearGradient, Path};
 
     impl Skia {
-        /// `render` with a glyph cache of its own.
+        /// `render` with caches of its own.
         fn draw(
             &mut self,
             scene: &Scene,
@@ -2271,7 +2666,11 @@ mod tests {
             transform: Transform,
             damage: Option<&[IRect]>,
         ) {
-            self.render(scene, target, transform, damage, &mut GlyphCache::default());
+            let caches = Caches {
+                glyphs: &mut GlyphCache::default(),
+                shadows: &mut ShadowCache::default(),
+            };
+            self.render(scene, target, transform, damage, caches);
         }
     }
 

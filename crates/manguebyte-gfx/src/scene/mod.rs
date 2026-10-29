@@ -3,7 +3,7 @@
 mod bounds;
 mod dump;
 
-pub(crate) use bounds::shape_bounds;
+pub(crate) use bounds::{shadow_bounds, shape_bounds};
 
 use std::ops::Range;
 
@@ -12,6 +12,7 @@ use crate::geom::{Arc, Circle, Point, Rect, RoundedRect, Transform};
 use crate::image::{Image, Sampling};
 use crate::paint::{Extend, Paint, Stop, Stroke};
 use crate::path::{self, FillRule, Path, Verb};
+use crate::shadow::Shadow;
 use crate::text::TextLayout;
 use crate::text::font::Coords;
 
@@ -165,6 +166,13 @@ pub(crate) enum Command {
         area: Rect,
         values: Span,
         paint: StoredPaint,
+    },
+    /// A soft shadow of the shape filled, or of its outline drawn with
+    /// `stroke`.
+    Shadow {
+        shape: StoredShape,
+        stroke: Option<Stroke>,
+        shadow: Shadow,
     },
     PushClip(StoredShape),
     PopClip,
@@ -347,6 +355,49 @@ impl Scene {
             shape,
             stroke,
             paint,
+        });
+    }
+
+    /// Draws a soft shadow of `shape`, filled: the shape moved, grown and
+    /// blurred as `shadow` says (see [`Shadow`]). Record it before the
+    /// shape to put it under the shape.
+    ///
+    /// The renderer blurs the shadow's mask once and keeps it, so drawing
+    /// the same shadow again costs only blending it (see
+    /// [`Renderer::shadow_cache`](crate::Renderer::shadow_cache)).
+    pub fn shadow<'s>(&mut self, shape: impl Into<Shape<'s>>, shadow: Shadow) {
+        let shape = self.store_shape(shape.into());
+        self.commands.push(Command::Shadow {
+            shape,
+            stroke: None,
+            shadow,
+        });
+    }
+
+    /// Draws a soft shadow of the outline of `shape` drawn with `stroke`:
+    /// the glow of a knob's arc or of a curve.
+    ///
+    /// ```
+    /// use manguebyte_gfx::{Arc, Color, Point, Scene, Shadow, Stroke};
+    ///
+    /// let arc = Arc::new(Point::new(26.0, 26.0), 20.0, 2.5, 2.0);
+    /// let accent = Color::hex(0xFF7A3D);
+    /// let mut scene = Scene::new();
+    /// scene.stroke_shadow(arc, Stroke::round(3.0), Shadow::glow(8.0, accent.with_alpha(0x99)));
+    /// scene.stroke(arc, Stroke::round(3.0), accent);
+    /// assert!(scene.dump().starts_with("shadow arc(26 26 20 2.5 2) width 3 cap round"));
+    /// ```
+    pub fn stroke_shadow<'s>(
+        &mut self,
+        shape: impl Into<Shape<'s>>,
+        stroke: Stroke,
+        shadow: Shadow,
+    ) {
+        let shape = self.store_shape(shape.into());
+        self.commands.push(Command::Shadow {
+            shape,
+            stroke: Some(stroke),
+            shadow,
         });
     }
 
@@ -588,6 +639,15 @@ impl Scene {
                     paint: paint(p),
                 },
                 Command::PushClip(s) => Command::PushClip(shape(s)),
+                Command::Shadow {
+                    shape: s,
+                    stroke,
+                    shadow,
+                } => Command::Shadow {
+                    shape: shape(s),
+                    stroke,
+                    shadow,
+                },
                 Command::Text {
                     text,
                     glyphs: g,

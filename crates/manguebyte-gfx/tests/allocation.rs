@@ -8,9 +8,9 @@
 //!
 //! - re-recording a scene into a cleared [`Scene`] and a cleared [`Path`]
 //!   makes no heap call once they have reached their size, text included;
-//! - a [`Renderer`] that has drawn a scene of rectangles, columns, images
-//!   and text once draws it again with no heap call, whole or in part (its
-//!   glyph masks are then all in its cache);
+//! - a [`Renderer`] that has drawn a scene of rectangles, columns, images,
+//!   text and shadows once draws it again with no heap call, whole or in
+//!   part (its glyph masks and blurred shadows are then all in its caches);
 //! - the glyph cache holds no more heap than its budget, counts exactly
 //!   what it holds, and gives all of it back when cleared.
 
@@ -19,7 +19,7 @@ use std::cell::Cell;
 
 use manguebyte_gfx::{
     Circle, Color, Extend, IRect, Image, Layer, LinearGradient, Path, Pixmap, Point, Rect,
-    Renderer, Sampling, Scene, Stop, Stroke, TextLayout, TextStyle, Transform,
+    Renderer, RoundedRect, Sampling, Scene, Shadow, Stop, Stroke, TextLayout, TextStyle, Transform,
 };
 
 thread_local! {
@@ -157,12 +157,23 @@ fn re_recording_a_scene_makes_no_heap_call() {
 }
 
 #[test]
-fn redrawing_rectangles_columns_images_and_text_makes_no_heap_call() {
+fn redrawing_rectangles_columns_images_text_and_shadows_makes_no_heap_call() {
     let mut source = Pixmap::new(2, 2).expect("small");
     source.fill(Color::rgb(10, 200, 30));
     let image = Image::new(source);
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 64.0, 48.0), Color::hex(0x101820));
+    let card = RoundedRect::new(Rect::new(30.0, 24.0, 24.0, 16.0), 5.0);
+    scene.shadow(
+        card,
+        Shadow::new(Color::BLACK.with_alpha(0x99))
+            .with_offset(0.0, 3.0)
+            .with_blur(8.0),
+    );
+    scene.shadow(
+        Rect::new(4.0, 30.0, 10.0, 10.0),
+        Shadow::glow(4.0, Color::hex(0xFF7A3D)),
+    );
     scene.fill(
         Rect::new(4.5, 4.25, 20.0, 9.5),
         Color::rgba(255, 255, 255, 128),
@@ -192,8 +203,10 @@ fn redrawing_rectangles_columns_images_and_text_makes_no_heap_call() {
         }
     });
     assert_eq!(calls, 0, "redrawing made {calls} heap calls");
-    // The text was drawn from masks the cache held.
+    // The text and the shadows were drawn from masks the caches held.
     assert!(renderer.glyph_cache().hits > 0);
+    assert_eq!(renderer.shadow_cache().misses, 2);
+    assert!(renderer.shadow_cache().hits >= 20);
 }
 
 #[test]
