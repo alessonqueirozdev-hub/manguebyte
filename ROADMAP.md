@@ -327,7 +327,16 @@ our own, and nothing claimed before its test exists.
   without allocating. Tested, including random edit sequences undone to
   every earlier tree; no example plugin's editor uses it yet, and it has
   not been in a DAW ([TECH_DEBT](docs/TECH_DEBT.md) item 87)
-- ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
+- 🚧 Audio widgets: a waveform view drawn from a multi-resolution summary
+  (zoom around the pointer, markers within rules the application gives
+  and onto zero crossings, a selection, a playhead), a piano keyboard
+  (glissando, velocity from where a key is pressed, the computer's
+  letters, keys lit and ranges marked by the application), an ADSR
+  editor whose handles are gestures on four parameters, and a zone map
+  of keys by velocities lined up with the keyboard, taking samples
+  dragged from a list or from other programs, all tested headless;
+  spectrum and EQ editors not started, and none worked by hand in a
+  real window yet ([TECH_DEBT](docs/TECH_DEBT.md) item 98)
 - 🚧 Accessibility: every widget describes itself (the method has no
   default) and the test harness finds widgets only that way; platform
   adapters not started

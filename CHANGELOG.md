@@ -530,6 +530,78 @@ headless on every system and with real windows on Windows
   `Message::Close` and `Message::SysCommandClose`.
 - Limits: TECH_DEBT 97.
 
+Audio widgets in `manguebyte-ui`, for a sampler's screen: a waveform
+view, a piano keyboard, an envelope editor and a zone map, each tested
+headless for its behaviour, its accessibility, and a partial repaint
+equal to a whole one bit for bit at 1x, 1.25x and 2x
+(`crates/manguebyte-ui/tests/waveform.rs`, `keyboard.rs`, `envelope.rs`,
+`zone_map.rs`).
+
+- `Waveform`: a sample buffer of any number of `f32` channels
+  (`new`, `from_shared`, `from_interleaved`) with a summary of the lowest
+  and highest sample of every block of 64, 128, ... frames, about a
+  sixteenth of the buffer's size. `min_max(channel, frames)` is exact (a
+  test checks it against reading every sample) and reads at most 126
+  samples and two entries a level; `samples_read` counts what queries
+  read, and a test draws a ten-minute file at 2x reading less than 1.2 %
+  of it, and nothing more while the playhead moves. `zero_crossing_near`
+  and `zero_crossing_beyond`.
+- `waveform_view(name, WaveformState)`: a lane per channel, a span per
+  device pixel column (`Scene::columns`), or a line through the samples
+  past a frame per device pixel, kept until the frames shown change.
+  Ctrl and the wheel, or a touchpad's pinch, zoom around the pointer
+  (`ZOOM_STEP`, at most `MAX_PIXELS_PER_FRAME`); the wheel scrolls and
+  hands on at an end. `Marker`s the application defines are dragged
+  from where they were taken, within `MarkerOrder` rules, onto the
+  nearest zero crossing if `set_snap_to_zero`; `set_sample_points` makes
+  a sampler's start, end and loop with their rules. A drag elsewhere
+  selects; a click reports where. Up and Down choose a marker, Left and
+  Right move it a pixel's worth (Shift a frame, or to the next zero
+  crossing), Home and End as far as its rules allow, `+` and `-` zoom.
+  `WaveformState` holds the sample, the frames shown, the selection,
+  the markers and the playhead, and `WaveformEvent`s (`MarkerMoved`,
+  `Selected`, `Clicked`). Markers are sliders to assistive technology,
+  in seconds and frames.
+- `KeySpan`: notes laid out a column each, the white keys sharing an
+  octave as a piano's do (`column`, `white_key`, `note_at`, `PIANO`,
+  `KEYS_61`), so that widgets over the same span line up key for key.
+  `note_name` ("C4" for 60) and `note_name_portuguese` ("Dó4").
+- `piano_keyboard(name, span, KeyboardState)`: a press plays a key with
+  a velocity from 1 at its top to 127 at its bottom, a drag plays a
+  glissando, and with the focus the letters A to ' play an octave and a
+  half (Z and X move it, `computer_keys(false)` turns them off), the
+  arrows choose a key and Space plays it. `NoteEvent::On` and `Off` are
+  polled from the state, one of each per key however many ways it is
+  held; closing the interface stops what it holds. The application
+  lights notes (`set_sounding`) and marks `KeyRange`s with their roots.
+  Each key is a button named by its note (`note_names` for others),
+  pressed to hold it.
+- `envelope(name, attack, decay, sustain, release)`: an ADSR curve whose
+  corners are dragged as gestures on the parameters, as a knob's are
+  (two at once for the end of the decay); `attack_curve`,
+  `decay_curve` and `release_curve` bend its segments and drag up and
+  down. Escape cancels a drag, Alt and a click reset, a double click or
+  Enter types a value, the wheel and the keys step the part chosen
+  (Left and Right choose it); each part is a slider to assistive
+  technology.
+- `zone_map(name, span, ZoneMapState)`: `Zone`s of keys by velocities,
+  selected by clicks and by a band, moved by whole keys and velocities
+  within the map, resized by their edges and corners, with overlaps
+  marked; Page Up and Down, the arrows (with Shift, Alt, Alt and Shift),
+  Delete, Ctrl+A and Escape do the same from the keyboard. Drags it
+  `takes` make zones where they land, one a key: files from other
+  programs by default, rows of a `list_view` when the application says
+  how to name them. `ZoneEvent::Edited`, `Created` and `Removed`. Zones
+  are list items to assistive technology, saying their keys, velocities,
+  root and overlaps.
+- The theme gains `Palette::key_white` and `key_black`.
+- `examples/sampler_screen.rs` composes the four with a list of samples
+  and writes the screen to PNG files at 2x and 1.25x;
+  `manguebyte-gui`'s `examples/sampler_window.rs` opens it in an
+  application window on Windows.
+- Limits: TECH_DEBT 98. The spectrum view and the EQ editor are not
+  started.
+
 ### Breaking
 
 - In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`

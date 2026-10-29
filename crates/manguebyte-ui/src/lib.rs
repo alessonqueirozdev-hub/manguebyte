@@ -62,6 +62,14 @@
 //!   move rows this way.
 //! - **Pictures** ([`image`]): an image fitted to its rectangle, with a
 //!   version per screen density so that it stays sharp at 2x.
+//! - **Audio widgets**: a [`waveform_view`] of a [`Waveform`] drawn from
+//!   its multi-resolution summary, with zoom, markers, a selection and a
+//!   playhead; a [`piano_keyboard`] that plays [`NoteEvent`]s and shows
+//!   notes sounding and key ranges; an [`envelope`] editor bound to four
+//!   parameters; a [`zone_map`] of keys by velocities that lines up with
+//!   a keyboard over the same [`KeySpan`] and takes dropped samples. Each
+//!   shares what it shows and changes through a state the application
+//!   polls.
 //! - **Hover and tooltips**: the widget under the pointer hears it
 //!   ([`Widget::hover_changed`]), and a view given a
 //!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
