@@ -3,24 +3,24 @@ clip rect(0 0 184 230) {
   fill rect(183 0 1 230) solid(#ffffff0f)
   fill rounded_rect(8 70 168 32 radii 10 10 10 10) solid(#ff7a3d1f)
   fill rounded_rect(13 79 3 14 radii 1.5 1.5 1.5 1.5) solid(#ff7a3dff)
-  text "Manuals" size 11 weight 400 opsz 14 solid(#7f8697ff) [59 18 26.34668, 115 27.936523 26.34668, 181 34.11328 26.34668, 216 40.612305 26.34668, 115 47.1167 26.34668, 174 53.293457 26.34668, 204 55.95752 26.34668]
-  fill rounded_rect(18 50.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(24.4 44 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(30.8 47.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  text "Great" size 12 weight 500 opsz 14 solid(#989eafff) [32 42 56.365234, 200 50.970703 56.365234, 137 55.382813 56.365234, 115 62.54883 56.365234, 211 69.36328 56.365234]
-  fill rounded_rect(18 84.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
-  fill rounded_rect(24.4 78 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
-  fill rounded_rect(30.8 81.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
-  text "Swell" size 12 weight 500 opsz 14 solid(#eef0f6ff) [83 42 90.365234, 229 49.751953 90.365234, 137 59.501953 90.365234, 174 66.55078 90.365234, 174 69.57422 90.365234]
-  fill rounded_rect(18 118.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(24.4 112 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(30.8 115.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  text "Choir" size 12 weight 500 opsz 14 solid(#989eafff) [13 42 124.365234, 155 50.80078 124.365234, 187 58.01953 124.365234, 158 65.26758 124.365234, 200 68.291016 124.365234]
-  text "Pedal" size 11 weight 400 opsz 14 solid(#7f8697ff) [77 18 166.34668, 137 24.966309 166.34668, 134 31.379395 166.34668, 115 38.114746 166.34668, 174 44.291504 166.34668]
-  fill rounded_rect(18 190.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(24.4 184 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  fill rounded_rect(30.8 187.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
-  text "Pedal" size 12 weight 500 opsz 14 solid(#989eafff) [77 42 196.36523, 137 49.623047 196.36523, 134 56.671875 196.36523, 115 64.08984 196.36523, 174 70.9043 196.36523]
+  text "Manuals" size 11 weight 400 opsz 14 solid(#7f8697ff) [59 23 26.34668, 115 32.936523 26.34668, 181 39.11328 26.34668, 216 45.612305 26.34668, 115 52.1167 26.34668, 174 58.293457 26.34668, 204 60.95752 26.34668]
+  fill rounded_rect(23 50.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(29.4 44 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(35.8 47.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  text "Great" size 12 weight 500 opsz 14 solid(#989eafff) [32 47 56.365234, 200 55.970703 56.365234, 137 60.382813 56.365234, 115 67.54883 56.365234, 211 74.36328 56.365234]
+  fill rounded_rect(23 84.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
+  fill rounded_rect(29.4 78 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
+  fill rounded_rect(35.8 81.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#eef0f6ff)
+  text "Swell" size 12 weight 500 opsz 14 solid(#eef0f6ff) [83 47 90.365234, 229 54.751953 90.365234, 137 64.50195 90.365234, 174 71.55078 90.365234, 174 74.57422 90.365234]
+  fill rounded_rect(23 118.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(29.4 112 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(35.8 115.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  text "Choir" size 12 weight 500 opsz 14 solid(#989eafff) [13 47 124.365234, 155 55.80078 124.365234, 187 63.01953 124.365234, 158 70.26758 124.365234, 200 73.291016 124.365234]
+  text "Pedal" size 11 weight 400 opsz 14 solid(#7f8697ff) [77 23 166.34668, 137 29.966309 166.34668, 134 36.379395 166.34668, 115 43.114746 166.34668, 174 49.291504 166.34668]
+  fill rounded_rect(23 190.4 3.2 9.6 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(29.4 184 3.2 16 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  fill rounded_rect(35.8 187.2 3.2 12.8 radii 1.6 1.6 1.6 1.6) solid(#989eafff)
+  text "Pedal" size 12 weight 500 opsz 14 solid(#989eafff) [77 47 196.36523, 137 54.623047 196.36523, 134 61.671875 196.36523, 115 69.08984 196.36523, 174 75.9043 196.36523]
   shadow rounded_rect(9 71 166 30 radii 9 9 9 9) width 2 cap round join round offset 0 0 blur 8 spread 0 solid(#ff7a3d53)
   stroke rounded_rect(9 71 166 30 radii 9 9 9 9) width 2 cap round join round solid(#ff7a3da6)
 }

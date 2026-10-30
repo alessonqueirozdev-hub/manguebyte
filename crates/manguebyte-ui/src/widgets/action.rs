@@ -1,5 +1,8 @@
 //! Action buttons: primary, secondary and destructive.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use manguebyte_gfx::{
     Align, Color, Layer, Point, Rect, RoundedRect, Scene, Shadow, Size, TextStyle,
 };
@@ -103,6 +106,9 @@ pub struct ActionButton {
     /// What else a press does, inside the crate: a dialog's buttons answer
     /// it, and a button can open one.
     pub(crate) hook: Option<Box<dyn Fn()>>,
+    /// Set by a dialog that has just opened with this as its default
+    /// button: the button takes the focus.
+    pub(crate) autofocus: Option<Rc<Cell<bool>>>,
 }
 
 /// A secondary button labelled `label`, which is also its name for
@@ -118,6 +124,7 @@ pub fn action_button(label: impl Into<TextSource>) -> ActionButton {
         pressed: false,
         layout: Cached::new(),
         hook: None,
+        autofocus: None,
     }
 }
 
@@ -272,6 +279,13 @@ impl Widget for ActionButton {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        if self
+            .autofocus
+            .as_ref()
+            .is_some_and(|flag| flag.replace(false))
+        {
+            cx.request_focus();
+        }
         if self.label.poll() {
             self.layout.clear();
             cx.request_layout();

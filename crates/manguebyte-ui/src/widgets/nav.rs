@@ -38,6 +38,10 @@ const SECTION_GAP: f32 = 12.0;
 const ROW_HEIGHT: f32 = 32.0;
 const HEADER_HEIGHT: f32 = 26.0;
 
+/// Where a sidebar row's icon or text starts, clear of the indicator's
+/// bar.
+const ROW_INSET: f32 = 15.0;
+
 /// The narrowest a sidebar is.
 const SIDEBAR_WIDTH: f32 = 184.0;
 
@@ -501,9 +505,9 @@ impl TabBar {
         };
         match (entry.page.is_some(), self.vertical) {
             (true, false) => 2.0 * TAB_PAD + icon + self.widths[at],
-            (true, true) => 2.0 * 10.0 + icon + self.widths[at],
+            (true, true) => ROW_INSET + 10.0 + icon + self.widths[at],
             (false, false) => self.widths[at] + 4.0,
-            (false, true) => 2.0 * 10.0 + self.widths[at],
+            (false, true) => ROW_INSET + 10.0 + self.widths[at],
         }
     }
 
@@ -753,7 +757,7 @@ impl Widget for TabBar {
             let style = base.with_color(ink);
             let mut x = slot.x
                 + if self.vertical {
-                    10.0
+                    ROW_INSET
                 } else if entry.page.is_some() {
                     TAB_PAD
                 } else {

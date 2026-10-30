@@ -339,6 +339,52 @@ fn a_steady_frame_with_pages_makes_no_heap_call() {
 }
 
 #[test]
+fn a_steady_frame_with_a_dialog_closed_or_open_makes_no_heap_call() {
+    use manguebyte_ui::{
+        DialogState, IntoView, State, TextSource, action_button, column, confirm_dialog,
+    };
+
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let ask = DialogState::new();
+    let view = column((
+        action_button(title(["Delete", "Apagar"])).opens(&ask),
+        action_button(title(["Save", "Salvar"]))
+            .primary()
+            .enabled(|| true),
+    ))
+    .with_dialog(
+        confirm_dialog(
+            ask.clone(),
+            title(["Delete it?", "Apagar?"]),
+            title(["It cannot be undone.", "Não se desfaz."]),
+        )
+        .confirm_label(title(["Delete", "Apagar"]))
+        .cancel_label(title(["Keep", "Manter"])),
+    );
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(500.0, 300.0), 2.0);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames, closed, made {calls} heap calls");
+    ask.open();
+    ui.advance_ms(300);
+    assert!(ui.root().modal().is_some());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames, open, made {calls} heap calls");
+}
+
+#[test]
 fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
     // What the documentation of `TextSource` warns about, and what the
     // test above would catch.

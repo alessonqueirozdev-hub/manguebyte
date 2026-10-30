@@ -1085,7 +1085,10 @@ impl Root {
                 let inside_focus = self
                     .focus
                     .is_some_and(|focus| self.ancestry(target).contains(&focus));
-                if !inside_focus {
+                // A press on a dialog's scrim leaves the focus in the
+                // dialog.
+                let on_scrim = self.modal.is_some_and(|modal| modal.node == target);
+                if !inside_focus && !on_scrim {
                     self.set_focus(None);
                 }
                 self.bubble(target, &event)
@@ -1270,8 +1273,23 @@ impl Root {
         }
         if let Some(id) = focus_wanted {
             if self.focusable(id) && self.reachable(id) {
+                let old = self.focus;
                 self.set_focus(Some(id));
                 self.reveal(id);
+                // Their rings follow in this frame, not the next.
+                let shown = self.focus.filter(|_| self.focus_visible);
+                for changed in [old, Some(id)].into_iter().flatten() {
+                    if let Some(node) = self.tree.nodes.get_mut(changed.index()) {
+                        let states = (
+                            hover == Some(changed),
+                            pressed_on == Some(changed),
+                            shown == Some(changed),
+                        );
+                        let (moved, running) = node.motion.follow(states, now, &motion);
+                        node.paint |= moved;
+                        animating |= running;
+                    }
+                }
             }
         }
         // A tooltip waiting for the pointer to rest long enough wants the

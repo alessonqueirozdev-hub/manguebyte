@@ -424,8 +424,11 @@ impl NodeMotion {
             (&mut self.press, pressed, motion.fast()),
             (&mut self.focus, focused, motion.base()),
         ] {
+            // A jump (motion off) changes the value without a tick.
+            let before = amount.value();
             amount.transition(level(on), now, transition);
-            changed |= amount.tick(now);
+            amount.tick(now);
+            changed |= amount.value() != before;
         }
         let running = self.hover.is_running() || self.press.is_running() || self.focus.is_running();
         (changed, running)

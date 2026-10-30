@@ -26,8 +26,8 @@ use manguebyte_params::{ChoiceParam, param_set};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    Action, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, action_button, column,
-    combo, knob, label, row, sidebar, tabs, text_field,
+    Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme,
+    action_button, column, combo, confirm_dialog, knob, label, row, sidebar, tabs, text_field,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -307,6 +307,61 @@ fn action_buttons_match_their_goldens() {
             let name = format!("buttons{look}{suffix}");
             ui.assert_accessible();
             assert!(ui.get(Role::Button, "Cancel").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+/// A confirmation dialog open over a small screen, its default button
+/// focused from the keyboard.
+fn open_dialog(scale: f32, theme: Theme) -> Harness {
+    let ask = DialogState::new();
+    let view = column((
+        label("Presets").title(),
+        row((
+            action_button("Save"),
+            action_button("Delete preset").opens(&ask),
+        ))
+        .spacing(8.0),
+    ))
+    .spacing(10.0)
+    .padding(16.0)
+    .align(Align::Start)
+    .with_dialog(
+        confirm_dialog(
+            ask.clone(),
+            "Delete “Glass bells”?",
+            "The preset is removed from the library and from every project that uses it. \
+             This cannot be undone.",
+        )
+        .confirm_label("Delete")
+        .destructive(),
+    );
+    let mut ui = Harness::new(view, Size::new(520.0, 300.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    assert!(ui.tab());
+    ui.key(Key::Enter);
+    // The frame that opens it gives its default button the focus, and
+    // shows its ring.
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_dialog_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = open_dialog(scale, theme);
+            let name = format!("dialog{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.find(Role::Dialog, "Delete “Glass bells”?").is_some());
+            assert!(ui.get(Role::Button, "Delete").is_focused(), "{name}");
             assert!(ui.pixels() == &ui.render_fresh(), "{name}");
             if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
                 panic!("{mismatch}");

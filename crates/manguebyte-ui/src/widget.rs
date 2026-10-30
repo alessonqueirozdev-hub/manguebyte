@@ -486,6 +486,7 @@ impl UpdateCx<'_> {
     /// used. Open menus close, and a drag or a held pointer outside ends.
     /// When it ends, the focus goes back to the widget that had it before.
     /// One subtree is modal at a time; asking for another ends the first.
+    /// [`with_dialog`](crate::IntoView::with_dialog) is built on this.
     pub fn set_modal(&mut self, child: Option<usize>) {
         self.requests.modal = Some(child);
     }

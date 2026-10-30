@@ -202,6 +202,15 @@ pub trait IntoView: Sized {
         view.tooltip = Some(text.into());
         view
     }
+
+    /// This view with `dialog` over it: the dialog's scrim and card cover
+    /// the view's rectangle while it is open, and nothing of the view can
+    /// be used then (see [`ConfirmDialog`](crate::ConfirmDialog)). Put it
+    /// on the outermost view for a dialog over the whole window. Closed,
+    /// the dialog is hidden and costs nothing.
+    fn with_dialog(self, dialog: crate::ConfirmDialog) -> View {
+        dialog.over(self.into_view())
+    }
 }
 
 impl<W: Widget> IntoView for W {
