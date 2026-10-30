@@ -12,8 +12,6 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use mangue_duck::Duck;
 use manguebyte_core::{AudioBuffer, ParamId};
 use manguebyte_dsp::Processor;
@@ -29,7 +27,7 @@ use common::{as_lv2_delivers, assert_same_bits, load_lv2 as load, plain_at as pl
 const RATE: f64 = 48_000.0;
 const DUCK: &str = "urn:manguebyte:org.manguebyte.duck";
 
-fn duck_bundle(name: &str) -> PathBuf {
+fn duck_bundle(name: &str) -> common::Lv2Bundle {
     common::lv2_bundle(
         "mangue_duck",
         mangue_duck::__manguebyte_lv2_bundle_files,
@@ -295,7 +293,8 @@ fn finish(plugin: &mut Lv2Plugin, processor: impl Processor<f32>) {
 
 #[test]
 fn the_effect_sounds_as_it_does_with_no_host_however_the_blocks_fall() {
-    let library = load(&duck_bundle("effect"));
+    let bundle = duck_bundle("effect");
+    let library = load(&bundle);
     let frames = 24_000;
     let input = programme(2, frames);
     let sidechain = key(2, frames);
@@ -343,7 +342,8 @@ fn the_effect_sounds_as_it_does_with_no_host_however_the_blocks_fall() {
 
 #[test]
 fn the_switch_the_state_and_another_sample_rate() {
-    let library = load(&duck_bundle("state"));
+    let bundle = duck_bundle("state");
+    let library = load(&bundle);
     let mut plugin = library.create(DUCK).unwrap();
     assert_eq!(plugin.params().len(), 5);
     let bypass = plugin.param(BYPASS).unwrap();
@@ -499,7 +499,8 @@ fn the_switch_the_state_and_another_sample_rate() {
 
 #[test]
 fn notes_have_nowhere_to_go_in_an_effect_and_are_counted() {
-    let library = load(&duck_bundle("notes"));
+    let bundle = duck_bundle("notes");
+    let library = load(&bundle);
     let mut plugin = library.create_with(DUCK, RATE, 256).unwrap();
     // The effect's event input takes MIDI, as every plugin of the wrapper's
     // does; a note on an effect reaches it and does nothing.

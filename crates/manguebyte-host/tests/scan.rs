@@ -98,7 +98,7 @@ fn rustc() -> PathBuf {
 fn fakes() -> &'static [(Behaviour, PathBuf); 3] {
     static BUILT: OnceLock<[(Behaviour, PathBuf); 3]> = OnceLock::new();
     BUILT.get_or_init(|| {
-        let folder = common::scratch_folder("scan-fakes");
+        let folder = common::lasting_scratch_folder("scan-fakes");
         [Behaviour::Crash, Behaviour::Hang, Behaviour::Refuse].map(|behaviour| {
             let name = match behaviour {
                 Behaviour::Crash => "crash",
@@ -140,7 +140,7 @@ fn fake(behaviour: Behaviour) -> &'static Path {
 /// A folder laid out as plugins are installed: the example plugins, the
 /// fakes, a file that is not a plugin, and things that are not plugins by
 /// their names, some of it a few folders down.
-fn plugin_folder(name: &str) -> PathBuf {
+fn plugin_folder(name: &str) -> common::Scratch {
     let root = common::scratch_folder(&format!("scan-{name}"));
     let deeper = root.join("vendor").join("deeper");
     std::fs::create_dir_all(&deeper).unwrap();
@@ -206,7 +206,7 @@ fn failure<'a>(report: &'a ScanReport, file: &str) -> &'a ScanError {
 #[test]
 fn plugins_are_found_by_their_names_alone() {
     let root = plugin_folder("find");
-    let found = find(std::slice::from_ref(&root), &ALL);
+    let found = find(&[root.to_path_buf()], &ALL);
     let mut files: Vec<(String, Format)> = found
         .iter()
         .map(|candidate| {
@@ -235,7 +235,7 @@ fn plugins_are_found_by_their_names_alone() {
     );
     // One format only, a path that is itself a plugin, a path twice, and a
     // path with nothing at it.
-    let only = find(std::slice::from_ref(&root), &[Format::Vst3]);
+    let only = find(&[root.to_path_buf()], &[Format::Vst3]);
     assert_eq!(only.len(), 1);
     let direct = root.join("crash.clap");
     let twice = find(
@@ -254,7 +254,7 @@ fn plugins_are_found_by_their_names_alone() {
 #[test]
 fn a_scan_lists_what_works_and_survives_what_does_not() {
     let root = plugin_folder("survive");
-    let candidates = find(std::slice::from_ref(&root), &ALL);
+    let candidates = find(&[root.to_path_buf()], &ALL);
     let mut cache = ScanCache::new();
     let started = Instant::now();
     let report = scanner().scan(&candidates, &mut cache);

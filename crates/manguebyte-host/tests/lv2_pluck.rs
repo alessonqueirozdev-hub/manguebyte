@@ -8,8 +8,6 @@
 
 mod common;
 
-use std::path::PathBuf;
-
 use mangue_pluck::Pluck;
 use manguebyte_core::log::LogLevel;
 use manguebyte_core::{AudioBuffer, ParamId};
@@ -24,7 +22,7 @@ use common::{as_lv2_delivers, assert_same_bits, load_lv2 as load, plain_at as pl
 const RATE: f64 = 48_000.0;
 const PLUCK: &str = "urn:manguebyte:org.manguebyte.pluck";
 
-fn pluck_bundle(name: &str) -> PathBuf {
+fn pluck_bundle(name: &str) -> common::Lv2Bundle {
     common::lv2_bundle(
         "mangue_pluck",
         mangue_pluck::__manguebyte_lv2_bundle_files,
@@ -94,7 +92,8 @@ fn song() -> Vec<(u64, EventKind)> {
 
 #[test]
 fn the_instrument_plays_as_it_does_with_no_host() {
-    let library = load(&pluck_bundle("instrument"));
+    let bundle = pluck_bundle("instrument");
+    let library = load(&bundle);
     let [info] = library.plugins() else {
         panic!("one plugin");
     };
@@ -146,7 +145,8 @@ fn the_instrument_plays_as_it_does_with_no_host() {
 
 #[test]
 fn the_plugin_logs_through_the_host() {
-    let library = load(&pluck_bundle("log"));
+    let bundle = pluck_bundle("log");
+    let library = load(&bundle);
     // Blocks longer than the wrapper prepares for: it says so in its log.
     let mut plugin = library.create_with(PLUCK, RATE, 100_000).unwrap();
     let messages: Vec<(LogLevel, String)> = plugin
@@ -191,7 +191,8 @@ fn the_plugin_logs_through_the_host() {
 
 #[test]
 fn a_reset_clears_what_was_sounding() {
-    let library = load(&pluck_bundle("reset"));
+    let bundle = pluck_bundle("reset");
+    let library = load(&bundle);
     let mut plugin = library.create_with(PLUCK, RATE, 512).unwrap();
     let mut processor = plugin.activate(RATE, 512).unwrap();
     let mut events = EventBuffer::with_capacity(4);
@@ -226,7 +227,7 @@ fn the_one_interface_lists_restores_and_runs_it() {
     // framework's own LV2 wrapper.
     let library = unsafe { Library::load(&folder) }.expect("the bundle loads");
     assert_eq!(library.format(), Format::Lv2);
-    assert_eq!(library.path(), folder);
+    assert_eq!(library.path(), &*folder);
     let [entry] = library.plugins() else {
         panic!("one plugin");
     };

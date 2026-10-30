@@ -328,8 +328,10 @@ macro_rules! lv2_entry {
 fn lv2_library<P: Plugin>(
     entry: manguebyte_host::lv2::Lv2Entry,
 ) -> manguebyte_host::lv2::Lv2Library {
-    let folder = common::scratch_folder(&format!("output-{}", P::INFO.name))
-        .join(format!("{}.lv2", P::INFO.name));
+    // Everything is read from the folder before it is removed: the
+    // library is `entry`, and the wrapper never reads its bundle again.
+    let scratch = common::scratch_folder(&format!("output-{}", P::INFO.name));
+    let folder = scratch.join(format!("{}.lv2", P::INFO.name));
     std::fs::create_dir_all(&folder).unwrap();
     let binary = "plugin.so";
     std::fs::write(folder.join(binary), b"").unwrap();
@@ -411,11 +413,12 @@ mod lv2 {
     #[test]
     fn a_plugin_that_sends_nothing_reads_back_nothing() {
         // Mangue Pluck sends nothing, and its notify port says no MIDI.
-        let library = common::load_lv2(&common::lv2_bundle(
+        let bundle = common::lv2_bundle(
             "mangue_pluck",
             mangue_pluck::__manguebyte_lv2_bundle_files,
             "pluck-quiet",
-        ));
+        );
+        let library = common::load_lv2(&bundle);
         let uri = library.plugins()[0].uri.clone();
         let mut plugin = library.create_with(&uri, RATE, 256).unwrap();
         let mut processor = plugin.activate(RATE, 256).unwrap();

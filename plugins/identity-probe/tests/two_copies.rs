@@ -65,21 +65,43 @@ fn with_identity(bytes: &[u8], (id, name, vendor): (&str, &str, &str)) -> Vec<u8
     out
 }
 
+/// Where this process writes its copies. The process id keeps two runs of
+/// the test that share a target directory apart.
+fn copies_folder() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("identity-probe-{}", std::process::id()))
+}
+
 /// Writes the copies: two with an identity and one without, each in a
 /// folder of its own under the same file name.
 fn make_copies() -> ([PathBuf; 2], PathBuf) {
     let engine = std::fs::read(built_library()).unwrap();
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("identity-probe");
+    // Folders that runs which ended long ago left behind: a copy a run
+    // still had loaded on Windows could not be removed then.
+    let hour = std::time::Duration::from_secs(3600);
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    for old in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
+        let stale = old
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("identity-probe-"))
+            .is_some_and(|pid| pid.bytes().all(|b| b.is_ascii_digit()))
+            && old
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > hour);
+        if stale {
+            let _ = std::fs::remove_dir_all(old.path());
+        }
+    }
+    let root = copies_folder();
+    let _ = std::fs::remove_dir_all(&root);
     let write = |folder: &str, bytes: &[u8]| -> PathBuf {
         let folder = root.join(folder);
         std::fs::create_dir_all(&folder).unwrap();
-        // Copies of earlier runs, unless a run that failed still has them
-        // loaded.
-        for old in std::fs::read_dir(&folder).unwrap().flatten() {
-            let _ = std::fs::remove_file(old.path());
-        }
-        // The same name in every folder, new in each run, since a copy
-        // that a failed run still has loaded cannot be replaced.
+        // The same name in every folder.
         let file = folder.join(format!("Instrument-{}.clap", std::process::id()));
         std::fs::write(&file, bytes).unwrap();
         file
@@ -257,6 +279,10 @@ fn two_copies_of_one_library_are_two_plugins_in_one_process() {
 
     drop(clap_plugins);
     drop(vst3_plugins);
+    drop((clap, bare, vst3, bare_module));
+    // Best effort: on Windows a library the system keeps loaded stays
+    // until a later run sweeps it.
+    let _ = std::fs::remove_dir_all(copies_folder());
 }
 
 #[cfg(windows)]

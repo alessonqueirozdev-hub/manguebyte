@@ -242,7 +242,9 @@ fn the_voice_never_allocates_inside_a_synth() {
 fn streaming_voices_and_cursors_never_allocate() {
     use manguebyte_sampler::{CursorRead, SampleStore, Sfz, StreamOptions};
 
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("realtime-streaming");
+    // The process id keeps two runs that share a target directory apart.
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("realtime-streaming-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // Long enough that every voice reads past its head.

@@ -364,7 +364,11 @@ mod tests {
 
     #[test]
     fn a_folder_without_an_info_plist_is_not_a_bundle() {
-        let folder = std::env::temp_dir().join("manguebyte-au-not-a-bundle.component");
+        // The process id keeps two runs of the tests apart.
+        let folder = std::env::temp_dir().join(format!(
+            "manguebyte-au-not-a-bundle-{}.component",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&folder).unwrap();
         // SAFETY: the folder holds no code.
         let loaded = unsafe { AuLibrary::load(&folder) };

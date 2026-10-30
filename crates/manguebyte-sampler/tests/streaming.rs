@@ -28,7 +28,10 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("streaming-{name}"));
+        // The process id keeps two runs that share a target directory
+        // apart.
+        let path = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("streaming-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Self(path)

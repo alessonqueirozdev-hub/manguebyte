@@ -87,9 +87,15 @@ fn text(pointer: *const c_char) -> String {
         .to_owned()
 }
 
+/// The folder of this process's library files; the process id keeps two
+/// runs of the tests that share a target directory apart.
+fn library_folder() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("clap-identity-{}", std::process::id()))
+}
+
 /// A file standing for the plugin's library, holding its identity.
 fn library_file(name: &str, identity: &str) -> PathBuf {
-    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("clap-identity");
+    let folder = library_folder();
     std::fs::create_dir_all(&folder).unwrap();
     let file = folder.join(name);
     std::fs::write(&file, identity).unwrap();
@@ -161,4 +167,5 @@ fn the_descriptor_is_the_identity_read_from_the_path_init_was_given() {
         entry.deinit.unwrap()();
         entry.deinit.unwrap()();
     }
+    let _ = std::fs::remove_dir_all(library_folder());
 }
