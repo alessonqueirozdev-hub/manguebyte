@@ -577,9 +577,10 @@ impl Backend {
     ///
     /// The sums are added in an order that does not depend on the backend,
     /// so the output too is the same on every backend. For each frame, the
-    /// partials before the last whole group of 16 add to 16 running sums
-    /// that start at zero, partial `i` to sum `i % 16`, in the order of
-    /// `i`; the sums are added in pairs (`s[j] + s[j + 8]`, halving until
+    /// partials before the last whole group of 16 go to 16 running sums,
+    /// partial `i` to sum `i % 16`, in the order of `i`: the first 16 start
+    /// the sums and each later one is added to its sum. The sums are added
+    /// in pairs (`s[j] + s[j + 8]`, halving until
     /// one is left) and the result added to the output sample. The
     /// partials after them, fewer than 16, then add to the output one after
     /// another. Against adding every partial straight to the output one

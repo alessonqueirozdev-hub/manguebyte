@@ -205,10 +205,10 @@ pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut P
             let frames = out_left.len();
             let sums_left = &mut sums_left[..frames * PARTIAL_LANES];
             let sums_right = &mut sums_right[..frames * PARTIAL_LANES];
-            sums_left.fill(0.0);
-            sums_right.fill(0.0);
             for i in 0..body {
                 let lane = i % PARTIAL_LANES;
+                // The first group's terms start the sums.
+                let first = i < PARTIAL_LANES;
                 let (mut x, mut y, mut g) = (partials.cos[i], partials.sin[i], partials.gain[i]);
                 let (c, s, step) = (
                     partials.cos_step[i],
@@ -219,8 +219,14 @@ pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut P
                 for t in 0..frames {
                     g += step;
                     let v = g * y;
-                    sums_left[t * PARTIAL_LANES + lane] += v * to_left;
-                    sums_right[t * PARTIAL_LANES + lane] += v * to_right;
+                    let at = t * PARTIAL_LANES + lane;
+                    if first {
+                        sums_left[at] = v * to_left;
+                        sums_right[at] = v * to_right;
+                    } else {
+                        sums_left[at] += v * to_left;
+                        sums_right[at] += v * to_right;
+                    }
                     let next_x = x * c - y * s;
                     let next_y = x * s + y * c;
                     x = next_x;

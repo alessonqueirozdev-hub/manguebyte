@@ -12,6 +12,7 @@
 use super::scalar::{self, PARTIAL_FRAMES, PARTIAL_LANES, SQUARE_LANES};
 use super::{Partials, Peak};
 use crate::Sample;
+use core::mem::MaybeUninit;
 
 /// A vector register and the operations the kernels need on it.
 ///
@@ -237,6 +238,19 @@ pub(super) unsafe fn add_product<V: Vector>(dst: &mut [V::T], a: &[V::T], b: &[V
     scalar::add_product(&mut dst[body..], &a[body..], &b[body..]);
 }
 
+/// Where a bank of partials is: the slices of [`Partials`] as pointers.
+#[derive(Clone, Copy)]
+struct Bank {
+    cos: *mut f32,
+    sin: *mut f32,
+    gain: *mut f32,
+    cos_step: *const f32,
+    sin_step: *const f32,
+    gain_step: *const f32,
+    left_gain: *const f32,
+    right_gain: *const f32,
+}
+
 /// The bank of partials with each lane of a register one partial: the
 /// registers of a group of [`PARTIAL_LANES`] partials are its running sums,
 /// lane for lane, and every lane does what the definition does to its
@@ -248,85 +262,44 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
     right: &mut [f32],
     partials: &mut Partials<'_>,
 ) {
-    let regs = PARTIAL_LANES / V::LANES;
-    debug_assert!(regs <= MAX_REGS && regs * V::LANES == PARTIAL_LANES);
     let count = partials.len();
     let body = count - count % PARTIAL_LANES;
     if body > 0 {
-        let mut sums_left = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
-        let mut sums_right = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
-        let (cos, sin, gain) = (
-            partials.cos.as_mut_ptr(),
-            partials.sin.as_mut_ptr(),
-            partials.gain.as_mut_ptr(),
+        let bank = Bank {
+            cos: partials.cos.as_mut_ptr(),
+            sin: partials.sin.as_mut_ptr(),
+            gain: partials.gain.as_mut_ptr(),
+            cos_step: partials.cos_step.as_ptr(),
+            sin_step: partials.sin_step.as_ptr(),
+            gain_step: partials.gain_step.as_ptr(),
+            left_gain: partials.left_gain.as_ptr(),
+            right_gain: partials.right_gain.as_ptr(),
+        };
+        // Not cleared: the first group writes every sum of a chunk before
+        // anything reads it.
+        let mut sums_left = MaybeUninit::<[f32; PARTIAL_LANES * PARTIAL_FRAMES]>::uninit();
+        let mut sums_right = MaybeUninit::<[f32; PARTIAL_LANES * PARTIAL_FRAMES]>::uninit();
+        let (sl, sr) = (
+            sums_left.as_mut_ptr().cast::<f32>(),
+            sums_right.as_mut_ptr().cast::<f32>(),
         );
-        let (cos_step, sin_step, gain_step) = (
-            partials.cos_step.as_ptr(),
-            partials.sin_step.as_ptr(),
-            partials.gain_step.as_ptr(),
-        );
-        let (left_gain, right_gain) = (partials.left_gain.as_ptr(), partials.right_gain.as_ptr());
-        let (sl, sr) = (sums_left.as_mut_ptr(), sums_right.as_mut_ptr());
         let mut start = 0;
         while start < left.len() {
             let frames = (left.len() - start).min(PARTIAL_FRAMES);
-            sums_left[..frames * PARTIAL_LANES].fill(0.0);
-            sums_right[..frames * PARTIAL_LANES].fill(0.0);
-            // SAFETY: partial `group + r * LANES` and the `LANES` after it
-            // are below `body`, inside every slice of `partials`, which
-            // have the same length; the sums read and written are below
-            // `frames * PARTIAL_LANES`, inside the arrays. The caller knows
-            // the processor has the instructions.
+            // SAFETY: the groups are below `body`, inside every slice of
+            // `partials`, which have the same length; the sums written and
+            // read are the first `frames * PARTIAL_LANES` of the arrays,
+            // all written by the first group before the reduction reads
+            // them. The caller knows the processor has the instructions.
             unsafe {
-                let zero = V::splat(0.0);
-                let flip = V::splat(-0.0);
-                let mut group = 0;
+                partial_group::<V, true>(bank, 0, frames, sl, sr);
+                let mut group = PARTIAL_LANES;
                 while group < body {
-                    let mut x = [zero; MAX_REGS];
-                    let mut y = [zero; MAX_REGS];
-                    let mut g = [zero; MAX_REGS];
-                    let mut c = [zero; MAX_REGS];
-                    let mut s = [zero; MAX_REGS];
-                    let mut minus_s = [zero; MAX_REGS];
-                    let mut step = [zero; MAX_REGS];
-                    let mut to_left = [zero; MAX_REGS];
-                    let mut to_right = [zero; MAX_REGS];
-                    for r in 0..regs {
-                        let at = group + r * V::LANES;
-                        x[r] = V::load(cos.add(at));
-                        y[r] = V::load(sin.add(at));
-                        g[r] = V::load(gain.add(at));
-                        c[r] = V::load(cos_step.add(at));
-                        s[r] = V::load(sin_step.add(at));
-                        minus_s[r] = V::xor(s[r], flip);
-                        step[r] = V::load(gain_step.add(at));
-                        to_left[r] = V::load(left_gain.add(at));
-                        to_right[r] = V::load(right_gain.add(at));
-                    }
-                    for t in 0..frames {
-                        let (row_left, row_right) =
-                            (sl.add(t * PARTIAL_LANES), sr.add(t * PARTIAL_LANES));
-                        for r in 0..regs {
-                            g[r] = V::add(g[r], step[r]);
-                            let v = V::mul(g[r], y[r]);
-                            let at_left = row_left.add(r * V::LANES);
-                            V::store(at_left, V::add(V::load(at_left), V::mul(v, to_left[r])));
-                            let at_right = row_right.add(r * V::LANES);
-                            V::store(at_right, V::add(V::load(at_right), V::mul(v, to_right[r])));
-                            let next_x = V::add(V::mul(x[r], c[r]), V::mul(y[r], minus_s[r]));
-                            let next_y = V::add(V::mul(x[r], s[r]), V::mul(y[r], c[r]));
-                            x[r] = next_x;
-                            y[r] = next_y;
-                        }
-                    }
-                    for r in 0..regs {
-                        let at = group + r * V::LANES;
-                        V::store(cos.add(at), x[r]);
-                        V::store(sin.add(at), y[r]);
-                        V::store(gain.add(at), g[r]);
-                    }
+                    partial_group::<V, false>(bank, group, frames, sl, sr);
                     group += PARTIAL_LANES;
                 }
+                let regs = PARTIAL_LANES / V::LANES;
+                let zero = V::splat(0.0);
                 for t in 0..frames {
                     let (row_left, row_right) =
                         (sl.add(t * PARTIAL_LANES), sr.add(t * PARTIAL_LANES));
@@ -345,6 +318,82 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
     }
     for i in body..count {
         scalar::add_partial_in_order(left, right, partials, i);
+    }
+}
+
+/// `frames` frames of the group of [`PARTIAL_LANES`] partials from
+/// `group` on, its terms written to the running sums at `sums_left` and
+/// `sums_right` if it is the `FIRST` group and added to them if not.
+///
+/// # Safety
+///
+/// The group must be inside the bank, the sums must have room for
+/// `frames * PARTIAL_LANES` elements (written already unless `FIRST`), and
+/// the processor must have the instructions.
+#[inline(always)]
+unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
+    bank: Bank,
+    group: usize,
+    frames: usize,
+    sums_left: *mut f32,
+    sums_right: *mut f32,
+) {
+    let regs = PARTIAL_LANES / V::LANES;
+    debug_assert!(regs <= MAX_REGS && regs * V::LANES == PARTIAL_LANES);
+    // SAFETY: the caller's guarantees.
+    unsafe {
+        let zero = V::splat(0.0);
+        let flip = V::splat(-0.0);
+        let mut x = [zero; MAX_REGS];
+        let mut y = [zero; MAX_REGS];
+        let mut g = [zero; MAX_REGS];
+        let mut c = [zero; MAX_REGS];
+        let mut s = [zero; MAX_REGS];
+        let mut minus_s = [zero; MAX_REGS];
+        let mut step = [zero; MAX_REGS];
+        let mut to_left = [zero; MAX_REGS];
+        let mut to_right = [zero; MAX_REGS];
+        for r in 0..regs {
+            let at = group + r * V::LANES;
+            x[r] = V::load(bank.cos.add(at));
+            y[r] = V::load(bank.sin.add(at));
+            g[r] = V::load(bank.gain.add(at));
+            c[r] = V::load(bank.cos_step.add(at));
+            s[r] = V::load(bank.sin_step.add(at));
+            minus_s[r] = V::xor(s[r], flip);
+            step[r] = V::load(bank.gain_step.add(at));
+            to_left[r] = V::load(bank.left_gain.add(at));
+            to_right[r] = V::load(bank.right_gain.add(at));
+        }
+        for t in 0..frames {
+            let (row_left, row_right) = (
+                sums_left.add(t * PARTIAL_LANES),
+                sums_right.add(t * PARTIAL_LANES),
+            );
+            for r in 0..regs {
+                g[r] = V::add(g[r], step[r]);
+                let v = V::mul(g[r], y[r]);
+                let (term_left, term_right) = (V::mul(v, to_left[r]), V::mul(v, to_right[r]));
+                let (at_left, at_right) = (row_left.add(r * V::LANES), row_right.add(r * V::LANES));
+                if FIRST {
+                    V::store(at_left, term_left);
+                    V::store(at_right, term_right);
+                } else {
+                    V::store(at_left, V::add(V::load(at_left), term_left));
+                    V::store(at_right, V::add(V::load(at_right), term_right));
+                }
+                let next_x = V::add(V::mul(x[r], c[r]), V::mul(y[r], minus_s[r]));
+                let next_y = V::add(V::mul(x[r], s[r]), V::mul(y[r], c[r]));
+                x[r] = next_x;
+                y[r] = next_y;
+            }
+        }
+        for r in 0..regs {
+            let at = group + r * V::LANES;
+            V::store(bank.cos.add(at), x[r]);
+            V::store(bank.sin.add(at), y[r]);
+            V::store(bank.gain.add(at), g[r]);
+        }
     }
 }
 
