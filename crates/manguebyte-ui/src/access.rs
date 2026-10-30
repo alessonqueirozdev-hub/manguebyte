@@ -78,6 +78,9 @@ pub enum Role {
     /// A window inside the interface that has all input until it is
     /// answered, such as a confirmation: its description is its message.
     Dialog,
+    /// A part of the interface a person can move to by its name and that
+    /// does not stop the rest, such as a panel floating over the window.
+    Region,
 }
 
 /// The range of a widget's numeric value.
@@ -583,7 +586,12 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
         }
         if matches!(
             node.role,
-            Role::List | Role::ScrollView | Role::TabList | Role::TabPanel | Role::Dialog
+            Role::List
+                | Role::ScrollView
+                | Role::TabList
+                | Role::TabPanel
+                | Role::Dialog
+                | Role::Region
         ) && node.name.trim().is_empty()
         {
             return Some(format!(

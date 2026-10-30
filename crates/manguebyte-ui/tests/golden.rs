@@ -21,14 +21,15 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use manguebyte_gfx::snapshot::Snapshots;
-use manguebyte_gfx::{Rect, RoundedRect, Size};
+use manguebyte_gfx::{Point, Rect, RoundedRect, Size};
 use manguebyte_params::{ChoiceParam, param_set};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
     Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, WaveData,
-    WheelState, action_button, card, column, combo, confirm_dialog, knob, label, mod_wheel,
-    pitch_wheel, row, sidebar, tabs, text_field, wave_view, wavetable_view,
+    WheelState, action_button, card, column, combo, confirm_dialog, floating_panel, knob, label,
+    mod_wheel, pill, pitch_wheel, row, sidebar, tabs, text_field, toggle, wave_view,
+    wavetable_view,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -493,4 +494,78 @@ fn tabs_and_sidebars_match_their_goldens() {
 /// goldens are drawn from.
 fn sin(angle: f32) -> f32 {
     manguebyte_gfx::sin_cos(angle).0 as f32
+}
+
+/// An effect chain of pills with two panels open over it, overlapping:
+/// the delay's in front, a knob in it focused from the keyboard.
+fn open_panels(scale: f32, theme: Theme) -> Harness {
+    let params = params();
+    let (reverb, delay) = (State::new(true), State::new(false));
+    let p = |get: fn(&common::PanelParams) -> &manguebyte_params::FloatParam| {
+        knob(ParamHandle::new(Arc::clone(&params), get))
+    };
+    let view = column((
+        label("Effects").title(),
+        row((
+            pill("Drive"),
+            pill("Reverb").opens(&reverb),
+            pill("Delay").opens(&delay),
+        ))
+        .spacing(6.0),
+    ))
+    .spacing(10.0)
+    .padding(16.0)
+    .align(Align::Start)
+    .with_panels([
+        floating_panel(
+            "Reverb",
+            reverb.clone(),
+            State::new(Point::new(36.0, 96.0)),
+            row((p(|p| &p.resonance), p(|p| &p.drive))).spacing(8.0),
+        ),
+        floating_panel(
+            "Delay",
+            delay.clone(),
+            State::new(Point::new(196.0, 150.0)),
+            column((
+                row((p(|p| &p.cutoff), p(|p| &p.mix))).spacing(8.0),
+                toggle(ParamHandle::new(Arc::clone(&params), |p| &p.bypass)),
+            ))
+            .spacing(8.0),
+        ),
+    ]);
+    let mut ui = Harness::with_params(
+        view,
+        Size::new(480.0, 350.0),
+        scale,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.set_theme(theme);
+    ui.frame();
+    // From the keyboard: Tab to the delay's pill and Enter, which opens it
+    // in front with the focus, and its ring, on its first knob.
+    for _ in 0..3 {
+        ui.tab();
+    }
+    ui.key(Key::Enter);
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn floating_panels_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = open_panels(scale, theme);
+            let name = format!("panels{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.find(Role::Region, "Reverb").is_some(), "{name}");
+            assert!(ui.get(Role::Slider, "Cutoff").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
 }

@@ -58,7 +58,7 @@ impl Root {
     fn refresh_hidden(&mut self, id: usize) {
         let end = self.tree.nodes[id].end.min(self.tree.nodes.len());
         let (mut lost_focus, mut lost_capture, mut lost_hover) = (false, false, false);
-        let mut lost_modal = false;
+        let (mut lost_modal, mut hid) = (false, false);
         for index in id + 1..end {
             let hidden = match self.tree.nodes[index].parent {
                 Some(parent) if parent.index() < index => {
@@ -74,6 +74,7 @@ impl Root {
             node.hidden = hidden;
             let at = Some(NodeId::from_index(index));
             if hidden {
+                hid = true;
                 // What it drew is drawn over from what is under it.
                 self.removed.extend(node.painted.take());
                 node.scene.clear();
@@ -99,7 +100,10 @@ impl Root {
         if lost_modal {
             self.end_modal();
         }
-        if lost_focus && self.focus.is_some_and(|id| self.is_hidden(id)) {
+        // A floating widget gives the focus back to the widget that had it
+        // before it took it.
+        let given_back = hid && self.give_back_focus(id, lost_focus);
+        if !given_back && lost_focus && self.focus.is_some_and(|id| self.is_hidden(id)) {
             self.set_focus(None);
         }
         if lost_hover {

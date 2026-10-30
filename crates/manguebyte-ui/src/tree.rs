@@ -5,6 +5,7 @@ use manguebyte_gfx::{IRect, Rect, Scene};
 
 use crate::layout::{Arrange, LayoutNode};
 use crate::motion::NodeMotion;
+use crate::root::Float;
 use crate::scroll::ScrollMetrics;
 use crate::view::View;
 use crate::widget::{Shown, Widget};
@@ -73,6 +74,8 @@ pub(crate) struct Node {
     /// It is inside a child that a container does not show: it is not
     /// polled, laid out, drawn, hit or described, and costs nothing.
     pub(crate) hidden: bool,
+    /// Where it floats, if it asked to (see `UpdateCx::float_at`).
+    pub(crate) float: Option<Float>,
 }
 
 impl Node {
@@ -158,6 +161,7 @@ impl Tree {
             kids: Vec::new(),
             shown: Shown::All,
             hidden: false,
+            float: None,
         });
         self.layout
             .push(LayoutNode::new(style, Default::default(), Vec::new()));

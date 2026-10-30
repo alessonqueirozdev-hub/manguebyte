@@ -10,10 +10,13 @@ use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
 mod drag;
 mod files;
+mod floats;
 mod hover;
 mod menus;
 mod pages;
 
+pub(crate) use floats::Float;
+pub use floats::FloatMetrics;
 pub use hover::TOOLTIP_DELAY;
 pub(crate) use menus::{Anchor, MenuRequest};
 
@@ -180,6 +183,13 @@ pub struct Root {
     drag: Option<drag::DragState>,
     /// The subtree that has all input, if any (see `UpdateCx::set_modal`).
     modal: Option<pages::Modal>,
+    /// The floating widgets (see `UpdateCx::float_at`), back to front.
+    floats: Vec<NodeId>,
+    /// The interface's own widgets in drawing order, as runs of the arena:
+    /// each node's floating children after its others.
+    order: Vec<(usize, usize)>,
+    /// The widget the last press went down on, kept after it is let go.
+    last_press: Option<NodeId>,
     /// The widget whose tooltip a press or a key took away, until the
     /// pointer leaves it.
     tip_quiet: Option<NodeId>,
@@ -304,7 +314,7 @@ impl Root {
     pub fn new(view: impl IntoView, size: Size, scale: f32, context: EditorContext) -> Root {
         let size = clean_size(size);
         let scale = clean_scale(scale).unwrap_or(1.0);
-        Root {
+        let mut root = Root {
             tree: Tree::build(view.into_view()),
             theme: Theme::default(),
             size,
@@ -329,6 +339,9 @@ impl Root {
             tip_quiet: None,
             drag: None,
             modal: None,
+            floats: Vec::new(),
+            order: Vec::new(),
+            last_press: None,
             notifying: false,
             system_motion: true,
             pressed_on: None,
@@ -338,7 +351,9 @@ impl Root {
             full: true,
             now: Duration::ZERO,
             last_frame: None,
-        }
+        };
+        root.rebuild_order();
+        root
     }
 
     /// The same root drawn in `theme`.
@@ -482,7 +497,8 @@ impl Root {
     }
 
     /// The scene the back buffer was last drawn from: the background, then
-    /// every widget's scene in tree order. Its [`dump`](Scene::dump) is an
+    /// every widget's scene in drawing order (tree order, but for floating
+    /// widgets, see [`UpdateCx::float_at`]). Its [`dump`](Scene::dump) is an
     /// exact description of what is on screen.
     pub fn scene(&self) -> &Scene {
         &self.composite
@@ -719,7 +735,8 @@ impl Root {
 
     fn hit_among(&self, at: Point, count: usize) -> Option<NodeId> {
         // Later widgets are drawn over earlier ones, and children over
-        // their parents.
+        // their parents: the widgets over the interface (menus, a
+        // tooltip) first, then the interface's own in drawing order.
         // A widget scrolled out of a view's sight is not there to hit.
         // A hidden widget is not there either, and while a subtree is modal
         // nothing of the interface outside it is.
@@ -730,16 +747,23 @@ impl Root {
             ),
             _ => (0, count),
         };
-        (0..count.min(self.tree.nodes.len()))
-            .rev()
-            .filter(|&index| index >= self.tree.main || (start..end).contains(&index))
-            .find(|&index| {
-                let node = &self.tree.nodes[index];
-                !node.hidden
-                    && node.rect.contains(at)
-                    && node.clip.is_none_or(|(clip, _)| clip.contains(at))
-            })
-            .map(NodeId::from_index)
+        let count = count.min(self.tree.nodes.len());
+        let hits = |index: &usize| {
+            let node = &self.tree.nodes[*index];
+            !node.hidden
+                && node.rect.contains(at)
+                && node.clip.is_none_or(|(clip, _)| clip.contains(at))
+        };
+        let over = (self.tree.main.min(count)..count).rev().find(hits);
+        over.or_else(|| {
+            self.order
+                .iter()
+                .rev()
+                .flat_map(|&(first, last)| (first..last.min(count)).rev())
+                .filter(|index| (start..end).contains(index))
+                .find(hits)
+        })
+        .map(NodeId::from_index)
     }
 
     /// The widget the pointer is over, with no button held, if any (see
@@ -818,6 +842,10 @@ impl Root {
             }
         }
         let old = std::mem::replace(&mut self.focus, id);
+        // The focus moving into a floating widget brings it to the front.
+        if let Some(id) = id {
+            self.raise_around(id);
+        }
         // Each hears of it once the focus is where it now is, the one that
         // lost it first.
         let notifying = std::mem::replace(&mut self.notifying, true);
@@ -861,6 +889,7 @@ impl Root {
     ) -> R {
         let mut requests = Requests::default();
         let motion = self.motion();
+        let floating = self.float_around(id);
         let node = &mut self.tree.nodes[id.index()];
         let mut cx = EventCx {
             theme: &self.theme,
@@ -874,6 +903,7 @@ impl Root {
             context: &self.context,
             clipboard: &*self.clipboard,
             id,
+            floating,
             requests: &mut requests,
         };
         let result = call(&mut *node.widget, &mut cx);
@@ -971,6 +1001,26 @@ impl Root {
         Handled::No
     }
 
+    /// Offers `event`, a key the widget with the focus did not use, to the
+    /// widgets that contain it, innermost first, until one uses it; to
+    /// none with nothing focused.
+    fn offer_to_ancestors(&mut self, event: &Event) -> Handled {
+        let mut at = self
+            .focus
+            .and_then(|focus| self.tree.get(focus))
+            .and_then(|node| node.parent);
+        while let Some(target) = at {
+            at = self.tree.get(target).and_then(|node| node.parent);
+            if target.index() >= self.tree.main || !self.reachable(target) {
+                continue;
+            }
+            if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
+                return Handled::Yes;
+            }
+        }
+        Handled::No
+    }
+
     /// Offers `event` to `id` and then to the widgets containing it, until
     /// one uses it.
     fn bubble(&mut self, id: NodeId, event: &Event) -> Handled {
@@ -1011,7 +1061,12 @@ impl Root {
     ///   does not use go to the widgets that contain it, innermost first
     ///   (with nothing focused, to every widget shown), which is how
     ///   [`tabs`](crate::tabs) change page from anywhere inside them; they
-    ///   never move the focus.
+    ///   never move the focus. Escape that it does not use goes to the
+    ///   widgets that contain it too (with nothing focused, to none),
+    ///   which is how a [`floating_panel`](crate::floating_panel) closes.
+    /// - A press inside a floating widget (see [`UpdateCx::float_at`])
+    ///   brings it to the front, and leaves the focus where it is if the
+    ///   focus is inside it too, as a press on a window's title bar does.
     /// - While a subtree is modal (a dialog is open, see
     ///   [`UpdateCx::set_modal`]), only widgets inside it can be pressed or
     ///   focused, Tab goes round inside it, keys that the widget with the
@@ -1082,13 +1137,19 @@ impl Root {
                     self.set_focus(None);
                     return Handled::No;
                 };
+                self.last_press = Some(target);
+                // A press inside a floating widget brings it to the front.
+                self.raise_around(target);
                 let inside_focus = self
                     .focus
                     .is_some_and(|focus| self.ancestry(target).contains(&focus));
                 // A press on a dialog's scrim leaves the focus in the
-                // dialog.
+                // dialog, and one on a floating panel the focus inside it.
                 let on_scrim = self.modal.is_some_and(|modal| modal.node == target);
-                if !inside_focus && !on_scrim {
+                let same_float = self
+                    .focus
+                    .is_some_and(|focus| self.same_float(target, focus));
+                if !inside_focus && !on_scrim && !same_float {
                     self.set_focus(None);
                 }
                 self.bubble(target, &event)
@@ -1150,6 +1211,11 @@ impl Root {
                 if handled == Handled::No && control_tab {
                     handled = self.offer_to_containers(&event);
                 }
+                // Escape that the focused widget does not use goes to the
+                // widgets around it: a floating panel closes.
+                if handled == Handled::No && key.key == Key::Escape {
+                    handled = self.offer_to_ancestors(&event);
+                }
                 if handled == Handled::No {
                     if let Some(modal) = self.modal {
                         handled = self.deliver(modal.node, |widget, cx| widget.event(cx, &event));
@@ -1204,6 +1270,7 @@ impl Root {
         let motion = self.motion();
         let (hover, pressed_on) = (self.hover, self.pressed_on);
         let mut focus_wanted = None;
+        let mut focus_within = None;
         let mut index = 0;
         while index < self.tree.nodes.len() {
             let focus = self.focus.filter(|_| self.focus_visible);
@@ -1269,7 +1336,19 @@ impl Root {
             if let Some(child) = requests.modal {
                 self.set_modal_child(index, child);
             }
+            if let Some(position) = requests.float {
+                self.set_float(index, position);
+            }
+            if requests.raise {
+                self.raise(NodeId::from_index(index));
+            }
+            if requests.focus_within {
+                focus_within = Some(index);
+            }
             index += 1;
+        }
+        if let Some(index) = focus_within {
+            focus_wanted = self.focus_within(index).or(focus_wanted);
         }
         if let Some(id) = focus_wanted {
             if self.focusable(id) && self.reachable(id) {
@@ -1375,7 +1454,15 @@ impl Root {
                 }
                 _ => ((0, 0), None),
             };
-            let placement = shifted(placed[index], shift, scale);
+            let mut placement = shifted(placed[index], shift, scale);
+            let mut shift = shift;
+            if self.tree.nodes[index].float.is_some() {
+                // A floating widget, and all inside it, moves to where it
+                // asked to be.
+                let (moved, by) = self.place_float(index, placement);
+                placement = moved;
+                shift = (shift.0.saturating_add(by.0), shift.1.saturating_add(by.1));
+            }
             shifts[index] = shift;
             clips[index] = clip;
             let item = &self.tree.layout[index];
@@ -1578,7 +1665,12 @@ impl Root {
         );
         self.composite
             .fill(background, self.theme.palette.background);
-        for node in &self.tree.nodes {
+        for &(first, last) in &self.order {
+            for node in &self.tree.nodes[first..last] {
+                self.composite.append(&node.scene);
+            }
+        }
+        for node in &self.tree.nodes[self.tree.main..] {
             self.composite.append(&node.scene);
         }
         for &rect in &self.damage {

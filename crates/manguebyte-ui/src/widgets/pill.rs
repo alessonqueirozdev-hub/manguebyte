@@ -55,6 +55,7 @@ pub struct Pill {
     dot: Option<Color>,
     primary: bool,
     presses: Option<State<u64>>,
+    opens: Option<State<bool>>,
     pressed: bool,
     layout: Cached<TextStyle>,
 }
@@ -66,6 +67,7 @@ pub fn pill(text: impl Into<String>) -> Pill {
         dot: None,
         primary: false,
         presses: None,
+        opens: None,
         pressed: false,
         layout: Cached::new(),
     }
@@ -94,9 +96,22 @@ impl Pill {
         self
     }
 
+    /// The same pill setting `open` to `true` when pressed, as well as
+    /// counting its presses if it does: what opens a
+    /// [`floating_panel`](crate::floating_panel), or brings it to the
+    /// front with the focus inside if it is open.
+    #[must_use]
+    pub fn opens(mut self, open: &State<bool>) -> Pill {
+        self.opens = Some(open.clone());
+        self
+    }
+
     fn activate(&self) {
         if let Some(count) = &self.presses {
             count.update(|n| *n = n.wrapping_add(1));
+        }
+        if let Some(open) = &self.opens {
+            open.set(true);
         }
     }
 

@@ -1,0 +1,72 @@
+fill rect(0 0 480 350) solid(#101116ff)
+text "Effects" size 16 weight 600 opsz 16 solid(#eef0f6ff) [21 16 31.320313, 148 25.671875 31.320313, 148 31.15625 31.320313, 137 36.945313 31.320313, 128 46.34375 31.320313, 211 55.601563 31.320313, 204 61.109375 31.320313]
+fill rounded_rect(19 48 56 30 radii 15 15 15 15) solid(#1c1f28ff)
+stroke rounded_rect(19.5 48.5 55 29 radii 14.5 14.5 14.5 14.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+text "Drive" size 12 weight 500 opsz 14 solid(#989eafff) [19 31 67.365234, 200 39.660156 67.365234, 158 44.39453 67.365234, 228 47.41797 67.365234, 137 54.085938 67.365234]
+fill rounded_rect(87 48 66 30 radii 15 15 15 15) solid(#1c1f28ff)
+stroke rounded_rect(87.5 48.5 65 29 radii 14.5 14.5 14.5 14.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+text "Reverb" size 12 weight 500 opsz 14 solid(#989eafff) [79 99 67.365234, 137 106.61133 67.365234, 228 113.43164 67.365234, 137 120.09961 67.365234, 200 127.14844 67.365234, 126 131.97656 67.365234]
+fill rounded_rect(165 48 58 30 radii 15 15 15 15) solid(#1c1f28ff)
+stroke rounded_rect(165.5 48.5 57 29 radii 14.5 14.5 14.5 14.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+text "Delay" size 12 weight 500 opsz 14 solid(#989eafff) [19 177 67.365234, 137 185.66016 67.365234, 174 192.70898 67.365234, 115 195.73242 67.365234, 232 202.35938 67.365234]
+shadow rounded_rect(36 96 171 145 radii 12 12 12 12) offset 0 16 blur 40 spread -8 solid(#00000099)
+fill rounded_rect(36 96 171 145 radii 12 12 12 12) solid(#242834ff)
+stroke rounded_rect(36.5 96.5 170 144 radii 11.5 11.5 11.5 11.5) width 1 cap butt join miter 4 solid(#ffffff1a)
+fill path(evenodd M 36 109 L 36 108 C 36 101.37258 41.37258 96 48 96 L 195 96 C 201.62741 96 207 101.37258 207 108 L 207 109 Z M 36 109 L 36 109 C 36 102.37258 41.37258 97 48 97 L 195 97 C 201.62741 97 207 102.37258 207 109 L 207 109 Z) solid(#ffffff0a)
+shadow circle(84.5 172.08545 15.4800005) offset 0 2 blur 4 spread 0 solid(#00000066)
+fill circle(84.5 172.08545 15.4800005) radial(81.404 165.89345, 20.124, pad [0 #383d49ff, 1 #181a22ff])
+stroke circle(84.5 172.08545 14.9800005) width 1 cap butt join miter 4 solid(#ffffff1a)
+stroke arc(84.5 172.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ffffff14)
+shadow arc(84.5 172.08545 21.5 2.3561945 1.1780972) width 3 cap round join round offset 0 0 blur 4 spread 0 solid(#ff7a3da6)
+stroke arc(84.5 172.08545 21.5 2.3561945 1.1780972) width 3 cap round join round solid(#ff7a3dff)
+stroke path(nonzero M 84.5 172.08545 L 74.202805 167.8202) width 2 cap round join round solid(#ffffffff)
+text "Resonance" size 12 weight 500 opsz 14 solid(#989eafff) [79 52.70117 208.7959, 137 60.3125 208.7959, 204 67.36133 208.7959, 187 73.82422 208.7959, 181 81.072266 208.7959, 115 88.291016 208.7959, 181 95.10547 208.7959, 128 102.32422 208.7959, 137 109.25 208.7959]
+text "0.25" size 11 weight 500 opsz 14 solid(#eef0f6ff) [257 72.33179 222.34668, 268 79.45923 222.34668, 259 82.41333 222.34668, 262 89.54077 222.34668]
+shadow circle(160 172.08545 15.4800005) offset 0 2 blur 4 spread 0 solid(#00000066)
+fill circle(160 172.08545 15.4800005) radial(156.904 165.89345, 20.124, pad [0 #383d49ff, 1 #181a22ff])
+stroke circle(160 172.08545 14.9800005) width 1 cap butt join miter 4 solid(#ffffff1a)
+stroke arc(160 172.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ffffff14)
+shadow arc(160 172.08545 21.5 2.3561945 1.1780972) width 3 cap round join round offset 0 0 blur 4 spread 0 solid(#ff7a3da6)
+stroke arc(160 172.08545 21.5 2.3561945 1.1780972) width 3 cap round join round solid(#ff7a3dff)
+stroke path(nonzero M 160 172.08545 L 149.7028 167.8202) width 2 cap round join round solid(#ffffffff)
+text "Drive" size 12 weight 500 opsz 14 solid(#989eafff) [19 144.93262 208.7959, 200 153.59277 208.7959, 158 158.32715 208.7959, 228 161.35059 208.7959, 137 168.01855 208.7959]
+text "6.0 dB" size 11 weight 500 opsz 14 solid(#eef0f6ff) [263 142.9065 222.34668, 268 150.03394 222.34668, 257 152.98804 222.34668, 314 160.11548 222.34668, 134 163.06958 222.34668, 12 169.86938 222.34668]
+fill rect(37 131 169 1) solid(#ffffff0f)
+text "Reverb" size 12 weight 600 opsz 14 solid(#eef0f6ff) [79 50 118.365234, 137 57.67578 118.365234, 228 64.54883 118.365234, 137 71.36914 118.365234, 200 78.46484 118.365234, 126 83.416016 118.365234]
+stroke path(nonzero M 181.68 109.68 L 190.32 118.32 M 190.32 109.68 L 181.68 118.32) width 1.5 cap round join round solid(#989eafff)
+shadow rounded_rect(196 150 168 183 radii 12 12 12 12) offset 0 16 blur 40 spread -8 solid(#00000099)
+fill rounded_rect(196 150 168 183 radii 12 12 12 12) solid(#242834ff)
+stroke rounded_rect(196.5 150.5 167 182 radii 11.5 11.5 11.5 11.5) width 1 cap butt join miter 4 solid(#ffffff1a)
+fill path(evenodd M 196 163 L 196 162 C 196 155.37259 201.37259 150 208 150 L 352 150 C 358.6274 150 364 155.37259 364 162 L 364 163 Z M 196 163 L 196 163 C 196 156.37259 201.37259 151 208 151 L 352 151 C 358.6274 151 364 156.37259 364 163 L 364 163 Z) solid(#ffffff0a)
+clip rect(210 193 66 88) {
+  shadow circle(243 226.08545 15.4800005) offset 0 2 blur 4 spread 0 solid(#00000066)
+  fill circle(243 226.08545 15.4800005) radial(239.904 219.89345, 20.124, pad [0 #383d49ff, 1 #181a22ff])
+  stroke circle(243 226.08545 14.9800005) width 1 cap butt join miter 4 solid(#ffffff1a)
+  stroke arc(243 226.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ffffff14)
+  shadow arc(243 226.08545 21.5 2.3561945 2.668736) width 3 cap round join round offset 0 0 blur 4 spread 0 solid(#ff7a3da6)
+  stroke arc(243 226.08545 21.5 2.3561945 2.668736) width 3 cap round join round solid(#ff7a3dff)
+  stroke path(nonzero M 243 226.08545 L 246.42703 215.4798) width 2 cap round join round solid(#ffffffff)
+  shadow circle(243 226.08545 25) width 2 cap round join round offset 0 0 blur 8 spread 0 solid(#ff7a3d53)
+  stroke circle(243 226.08545 25) width 2 cap round join round solid(#ff7a3da6)
+  text "Cutoff" size 12 weight 500 opsz 14 solid(#989eafff) [13 225.07031 262.7959, 216 233.8711 262.7959, 211 241.08984 262.7959, 187 245.05664 262.7959, 148 252.30469 262.7959, 148 256.37695 262.7959]
+  text "1000 Hz" size 11 weight 500 opsz 14 solid(#eef0f6ff) [258 220.09766 276.34668, 257 227.2251 276.34668, 257 234.35254 276.34668, 257 241.47998 276.34668, 314 248.60742 276.34668, 37 251.56152 276.34668, 236 259.75244 276.34668]
+}
+shadow circle(317 226.08545 15.4800005) offset 0 2 blur 4 spread 0 solid(#00000066)
+fill circle(317 226.08545 15.4800005) radial(313.904 219.89345, 20.124, pad [0 #383d49ff, 1 #181a22ff])
+stroke circle(317 226.08545 14.9800005) width 1 cap butt join miter 4 solid(#ffffff1a)
+stroke arc(317 226.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ffffff14)
+shadow arc(317 226.08545 21.5 2.3561945 4.712389) width 3 cap round join round offset 0 0 blur 4 spread 0 solid(#ff7a3da6)
+stroke arc(317 226.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ff7a3dff)
+stroke path(nonzero M 317 226.08545 L 324.88113 233.96658) width 2 cap round join round solid(#ffffffff)
+text "Mix" size 12 weight 500 opsz 14 solid(#989eafff) [59 306.66992 262.7959, 158 317.6211 262.7959, 231 320.64453 262.7959]
+text "100 %" size 11 weight 500 opsz 14 solid(#eef0f6ff) [258 299.3694 276.34668, 257 306.49683 276.34668, 257 313.62427 276.34668, 314 320.7517 276.34668, 431 323.7058 276.34668]
+fill rounded_rect(215 294 34 20 radii 10 10 10 10) solid(#ffffff14)
+stroke rounded_rect(215.5 294.5 33 19 radii 9.5 9.5 9.5 9.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+shadow circle(225 304 8) offset 0 1 blur 2 spread 0 solid(#00000066)
+fill circle(225 304 8) solid(#ffffffff)
+text "Bypass" size 12 weight 500 opsz 14 solid(#989eafff) [12 255 308.36523, 232 262.88086 308.36523, 198 269.7832 308.36523, 115 277.31836 308.36523, 204 284.1328 308.36523, 204 290.5957 308.36523]
+fill rect(197 185 166 1) solid(#ffffff0f)
+clip rect(210 161 110 14) {
+  text "Delay" size 12 weight 600 opsz 14 solid(#eef0f6ff) [19 210 172.36523, 137 218.66602 172.36523, 174 225.76172 172.36523, 115 228.90234 172.36523, 232 235.59375 172.36523]
+}
+stroke path(nonzero M 338.68 163.68 L 347.32 172.32 M 347.32 163.68 L 338.68 172.32) width 1.5 cap round join round solid(#989eafff)

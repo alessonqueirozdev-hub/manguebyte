@@ -211,6 +211,18 @@ pub trait IntoView: Sized {
     fn with_dialog(self, dialog: crate::ConfirmDialog) -> View {
         dialog.over(self.into_view())
     }
+
+    /// This view with `panels` floating over it (see
+    /// [`FloatingPanel`](crate::FloatingPanel)): each is kept inside the
+    /// view's rectangle, and the view goes on taking input around and
+    /// under them. Put it on the outermost view for panels that move
+    /// anywhere in the window, inside [`with_dialog`](IntoView::with_dialog)
+    /// for a dialog over them too. Closed panels are hidden and cost
+    /// nothing; open ones count in the view's natural size, as a stack's
+    /// children do, so the view should be given its room.
+    fn with_panels(self, panels: impl IntoIterator<Item = crate::FloatingPanel>) -> View {
+        crate::widgets::panels_over(self.into_view(), panels)
+    }
 }
 
 impl<W: Widget> IntoView for W {

@@ -204,7 +204,7 @@ pub use event::{
 pub use menu::{Menu, MenuItem};
 pub use motion::{Animated, Easing, Motion, Transition};
 pub use param::{ParamBinding, ParamHandle};
-pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
+pub use root::{FloatMetrics, Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
 pub use scroll::ScrollMetrics;
 pub use source::{AtomicSource, Source, State, TextSource, Watch};
 pub use theme::{Corners, Elevation, Hue, Palette, Sizes, Spacing, Theme, Typography};
@@ -229,3 +229,4 @@ pub use widgets::{
     ZoneMap, ZoneMapState, envelope, is_black, note_name, note_name_portuguese, piano_keyboard,
     piano_keyboard_named, zone_map, zone_map_named,
 };
+pub use widgets::{FloatingPanel, TITLE_BAR_HEIGHT, floating_panel};

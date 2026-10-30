@@ -11,7 +11,7 @@ use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Event, Handled};
 use crate::menu::Menu;
 use crate::motion::{Animated, Lerp, Motion};
-use crate::root::{Anchor, MenuRequest};
+use crate::root::{Anchor, FloatMetrics, MenuRequest};
 use crate::scroll::ScrollMetrics;
 use crate::theme::Theme;
 use crate::tree::NodeId;
@@ -248,6 +248,12 @@ pub(crate) struct Requests {
     /// `Some(Some(child))` to make a child's subtree modal, `Some(None)`
     /// to end it.
     pub(crate) modal: Option<Option<usize>>,
+    /// Where the widget asked to float, from its parent's corner.
+    pub(crate) float: Option<Point>,
+    /// The widget asked to be brought in front of its floating siblings.
+    pub(crate) raise: bool,
+    /// The focus goes to the first widget inside it that takes it.
+    pub(crate) focus_within: bool,
 }
 
 /// Which of its children a container shows (see [`UpdateCx::show`]).
@@ -497,6 +503,42 @@ impl UpdateCx<'_> {
     pub fn request_focus(&mut self) {
         self.requests.focus = true;
     }
+
+    /// Floats the widget over its siblings, its top-left corner at
+    /// `position` from its parent's, in logical pixels, from this frame
+    /// on: layout places it as any child, at the size it is given (a
+    /// floating widget usually aligns itself to the start, so that it has
+    /// its natural size), and the root then moves it, and everything
+    /// inside it, by whole device pixels to where it asked, as near as
+    /// keeps it inside its parent's rectangle. Asking again moves it, and
+    /// lays the interface out again.
+    ///
+    /// A floating widget is drawn after its parent's other children, and
+    /// in front of its floating siblings raised before it (see
+    /// [`raise`](Self::raise)); a press anywhere inside it, or the focus
+    /// moving inside it, raises it. The focus order stays the tree's.
+    /// [`with_panels`](crate::IntoView::with_panels) is built on this.
+    pub fn float_at(&mut self, position: Point) {
+        self.requests.float = Some(position);
+    }
+
+    /// Brings the widget, if it floats, in front of its floating siblings,
+    /// and draws again what it covers. Nothing if it is in front already.
+    pub fn raise(&mut self) {
+        self.requests.raise = true;
+    }
+
+    /// Gives the keyboard focus, at the end of this frame's polling, to
+    /// the first widget inside this one that takes it, in tree order, if
+    /// there is one. For a floating widget (see
+    /// [`float_at`](Self::float_at)) the root remembers the widget that
+    /// had the focus, or else the one pressed last if it takes the focus:
+    /// when this widget next hides what is inside it (see
+    /// [`show`](Self::show)) while the focus is inside or nowhere, that
+    /// widget gets it back, as a dialog gives it back to its opener.
+    pub fn focus_within(&mut self) {
+        self.requests.focus_within = true;
+    }
 }
 
 /// What [`Widget::measure`] is given.
@@ -637,6 +679,8 @@ pub struct EventCx<'a> {
     pub(crate) context: &'a EditorContext,
     pub(crate) clipboard: &'a dyn Clipboard,
     pub(crate) id: NodeId,
+    /// Where the nearest floating widget around this one is.
+    pub(crate) floating: Option<FloatMetrics>,
     pub(crate) requests: &'a mut Requests,
 }
 
@@ -756,6 +800,13 @@ impl EventCx<'_> {
     /// for a widget that does not scroll.
     pub fn scroll_to(&mut self, offset: Point) {
         self.requests.scroll = Some(offset);
+    }
+
+    /// Where the nearest floating widget around this one, or this one, is
+    /// (see [`UpdateCx::float_at`]), as of the last layout: what a title
+    /// bar that moves its panel reads. `None` inside no floating widget.
+    pub fn floating(&self) -> Option<FloatMetrics> {
+        self.floating
     }
 
     /// Starts dragging `payload` (see [`crate::drag`]), if a button is

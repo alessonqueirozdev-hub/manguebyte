@@ -8,6 +8,7 @@
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
 //! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
 //! | [`Pill`] | [`Button`](crate::Role::Button) | a label, a status dot | a count of presses the application polls, by clicking, Space and Enter |
+//! | [`FloatingPanel`] | [`Region`](crate::Role::Region) | a title bar and any view, over the interface without stopping it | where it is and whether it is open, by its title bar, its close button and Escape |
 //! | [`ActionButton`] | [`Button`](crate::Role::Button) | a label from a [`TextSource`], an optional icon, a primary, secondary or destructive look, disabled or not | a count of presses the application polls, by clicking, Space and Enter |
 //! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
@@ -47,6 +48,7 @@ mod combo;
 mod container;
 mod dialog;
 mod envelope;
+mod floating;
 mod icon;
 mod image;
 mod keyboard;
@@ -74,6 +76,8 @@ pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
 pub use dialog::{ConfirmDialog, DialogResult, DialogState, confirm_dialog};
 pub use envelope::{EnvelopeEditor, envelope};
+pub(crate) use floating::over as panels_over;
+pub use floating::{FloatingPanel, TITLE_BAR_HEIGHT, floating_panel};
 pub use icon::Icon;
 pub use image::{Fit, ImageView, image};
 pub use keyboard::{

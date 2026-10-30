@@ -385,6 +385,75 @@ fn a_steady_frame_with_a_dialog_closed_or_open_makes_no_heap_call() {
 }
 
 #[test]
+fn a_steady_frame_with_floating_panels_open_makes_no_heap_call() {
+    use manguebyte_ui::{
+        IntoView, ParamHandle, State, TextSource, floating_panel, knob, pill, row,
+    };
+
+    let params = params();
+    let levels = levels();
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let (filter, delay) = (State::new(false), State::new(true));
+    let view = row((pill("Filter").opens(&filter), panel_view(&params, &levels)))
+        .spacing(8.0)
+        .with_panels([
+            floating_panel(
+                title(["Filter", "Filtro"]),
+                filter.clone(),
+                State::new(Point::new(120.0, 40.0)),
+                knob(ParamHandle::new(Arc::clone(&params), |p| &p.resonance)).label("Q"),
+            )
+            .close_label(title(["Close", "Fechar"])),
+            floating_panel(
+                title(["Delay", "Atraso"]),
+                delay.clone(),
+                State::new(Point::new(260.0, 160.0)),
+                knob(ParamHandle::new(Arc::clone(&params), |p| &p.mix)).label("Mix"),
+            ),
+        ]);
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(640.0, 360.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(100);
+    // Opened from its pill, with the focus inside, over the panel's meters.
+    ui.click(ui.get(Role::Button, "Filter").center());
+    ui.advance_ms(100);
+    assert!(ui.get(Role::Slider, "Q").is_focused());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames with panels open made {calls} heap calls"
+    );
+    // Moved, and the language switched: the frames after make none.
+    let region = ui.get(Role::Region, "Filter");
+    ui.drag(
+        Point::new(region.bounds.x + 20.0, region.bounds.y + 12.0),
+        (40.0, 30.0),
+        4,
+    );
+    language.set(1);
+    ui.advance_ms(100);
+    assert!(ui.find(Role::Region, "Filtro").is_some());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after a move made {calls} heap calls");
+}
+
+#[test]
 fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
     // What the documentation of `TextSource` warns about, and what the
     // test above would catch.
