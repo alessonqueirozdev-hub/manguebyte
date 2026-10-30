@@ -63,7 +63,9 @@ impl Job for Voice {
         for sample in &mut self.out[..self.frames] {
             let mut sum = 0.0f64;
             for (phase, step) in self.phases.iter_mut().zip(&self.steps) {
-                sum += (*phase * std::f64::consts::TAU).sin();
+                // A parabola rather than a sine: plain arithmetic, exact
+                // under Miri too, which perturbs `sin` on purpose.
+                sum += 4.0 * *phase * (1.0 - *phase) - 0.5;
                 *phase = (*phase + step).fract();
             }
             self.state = self.state * self.pole + (1.0 - self.pole) * sum as f32;
@@ -289,6 +291,10 @@ impl Job for Stall {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "it measures wall-clock times, which Miri does not keep"
+)]
 fn a_stalled_worker_costs_the_audio_thread_at_most_the_wait_limit() {
     let gate = Arc::new(Gate::default());
     gate.armed.store(true, Ordering::SeqCst);
