@@ -304,6 +304,12 @@ and an editor with a gain-reduction meter. Both examples go through the CLAP
 project's validator and Steinberg's on every commit, and Apple's `auval` as
 Audio Units on macOS.
 
+[`plugins/divisions`](plugins/divisions) is an instrument with several
+outputs: a small organ whose Great, Swell, Choir and Pedal, each played
+from a MIDI channel of its own, go out on four stereo auxiliary buses, so
+that a DAW can mix and place them apart, and together on the main output.
+It is put through the same validators in CI.
+
 [`plugins/aratu-bridge`](plugins/aratu-bridge) runs the engine of
 [Aratu](https://aratu.live), the browser's live-coding language, inside a
 DAW: the page sends it the music (control calls and events, in beats) over

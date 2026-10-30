@@ -547,6 +547,15 @@ break the API.
 
 ### Fixed
 
+- Tests that write files under `CARGO_TARGET_TMPDIR` used fixed folder
+  names, so two runs of them sharing a target directory (parallel agents,
+  two CI-like runs) deleted or overwrote each other's LV2 bundles, scan
+  fakes and library copies: a host LV2 test could fail building its
+  bundle and pass alone. `manguebyte-host`'s tests get a `Scratch` folder
+  named with the process id and a number of its own, removed when
+  dropped, and the other crates' tests that did this name their folders
+  with the process id and remove them at the end.
+
 - `cargo mangue` built the programs that write an LV2 bundle's Turtle files
   and an Audio Unit's `Info.plist` in the workspace's target directory,
   where cargo could give their builds of the plugin and of the framework the
@@ -645,6 +654,39 @@ break the API.
 
 ### Plugins
 
+- **Auxiliary output buses** ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)).
+  A plugin lists output buses besides its main one in
+  `Plugin::AUX_OUTPUTS` (`AuxOutput`: a name, a channel count, on or off
+  by default), such as an organ's divisions or a drum machine's pads, and
+  writes them from `Plugin::process_with_aux`, whose default calls
+  `process_with_output` and leaves them silent. `AuxOutputs` holds the
+  buses of one block, readied without allocating: a bus the host
+  switched off is not given to the plugin, so it costs nothing, and the
+  host gets silence from it. `AudioBuffer::narrow` and `widen` cut every
+  bus with a block processed in pieces.
+  - CLAP: an audio port per bus after the main output, with its name,
+    width and port type; `audio-ports-activation` switches them, every
+    port starting on, as CLAP says.
+  - VST 3: an auxiliary audio output bus each, `kDefaultActive` as
+    declared, switched by `activateBus`, arranged at its one width.
+  - Audio Units: an output element each, named, of fixed width; the
+    plugin runs once per slice whichever element a host pulls first, and
+    every element is rendered, since a unit cannot switch one off.
+  - LV2: an optional audio output port per channel after the main
+    outputs, grouped per bus with the port-groups extension (stereo and
+    mono groups with their designations); a bus whose ports are all
+    unconnected is off.
+  - Standalone: each bus mixed into device channels of its own, by
+    default the ones after the main output's, for the buses on by
+    default; `Engine::with_aux_channels` and
+    `StandaloneOptions::aux_channels` move them or leave them unheard.
+  - The harness: `set_aux_active` switches a bus between renders, and
+    `aux_output` gives what the last render wrote on it.
+  - `plugins/divisions`, Mangue Divisions: an example organ whose Great,
+    Swell, Choir and Pedal, each played from a MIDI channel of its own,
+    go out on four stereo buses and together on the main output. CI runs
+    clap-validator, Steinberg's validator, lilv and auval on it.
+
 - **Identity at run time** ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)).
   `Plugin::info()` gives a plugin's id, name, vendor, version and
   description, `Plugin::INFO` unless overridden, so one pre-built engine
@@ -734,6 +776,24 @@ break the API.
 - Limits: TECH_DEBT 91.
 
 ### Hosting
+
+- `manguebyte-host` reads a hosted plugin's auxiliary output buses in
+  every format: `ClapProcessor`, `Vst3Processor`, `Lv2Processor` and
+  `AuProcessor::process_with_aux` copy the output buses after the main
+  one into buffers the caller owns, on the block's frames, without
+  allocating. Buses are switched before activation with
+  `ClapPlugin::set_audio_port_active` (`audio-ports-activation`),
+  `Vst3Plugin::set_audio_output_active` (in place of the plugin's
+  default for `activateBus`) and `Lv2Plugin::set_aux_output_active`
+  (optional ports left unconnected); an Audio Unit's elements after the
+  main one are rendered with the main output's time stamp. The LV2 host
+  reads `pg:group` and the groups' labels (`PortInfo::group`,
+  `Lv2PluginInfo::port_groups`): outputs in a group other than the first
+  output's are buses, listed by `Lv2Plugin::aux_outputs`.
+  `tests/aux_outputs.rs` hosts an organ with four stereo buses through
+  the framework's own wrappers in all four formats: names and widths as
+  each host reports them, each bus its own signal on every frame, a bus
+  switched off silent and never given to the plugin, no heap use.
 
 - `manguebyte-host` reads the notes and MIDI that hosted LV2 and Audio
   Unit plugins send: `Lv2Processor::output_events` reads the output atom
@@ -1302,6 +1362,15 @@ Floating panels for an effect chain, which Parabolic asked for:
   goes to the widgets containing it, innermost first, before it is left
   to the host (a floating panel closes on it). `Root::scene` lists the
   widgets in drawing order, which is tree order unless widgets float.
+- Auxiliary output buses ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)):
+  `manguebyte_lv2::PortRole` gains `AuxOutput { bus, channel }`, so an
+  exhaustive match on it must name it; `StandaloneOptions` gains
+  `aux_channels`, and `manguebyte_host::lv2::Lv2PluginInfo` and
+  `PortInfo` gain `port_groups` and `group`, so struct literals of them
+  must name the new fields (`..Default::default()` for the options);
+  `AuPlugin::audio_outputs` lists every output element of a unit, not
+  only element 0. Plugins that declare no buses, and code that only calls
+  the `Plugin` trait, are unchanged.
 
 - In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
   must name it. A `Label::from_state` whose state is set to the same

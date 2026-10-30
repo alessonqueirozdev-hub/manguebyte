@@ -42,9 +42,17 @@ The notes and MIDI a hosted plugin sends are read on their frames in all
 four formats, and `any::AnyProcessor` hands them over in one type
 whatever the format; LV2 and AU plugins send MIDI 1.0.
 
+A plugin's output buses after the main one, such as an organ's divisions
+on their own outputs, are read with each format's processor's
+`process_with_aux`, into buffers the caller owns, and switched before
+activation: CLAP ports through `audio-ports-activation`, VST 3 buses
+through `activateBus`, LV2 port groups by leaving their optional ports
+unconnected; an Audio Unit's elements are all rendered, each with the
+main output's time stamp.
+
 Not yet: the editors of LV2 and AU plugins, MIDI 2.0 out of hosted LV2
-and AU plugins, Audio Units version 3 as such, and runs against
-plugins from other vendors.
+and AU plugins, Audio Units version 3 as such, auxiliary buses through
+`any` and the graph, and runs against plugins from other vendors.
 
 Documentation: <https://docs.rs/manguebyte-host>
 

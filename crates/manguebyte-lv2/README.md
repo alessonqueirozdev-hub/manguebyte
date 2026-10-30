@@ -11,8 +11,11 @@ under one name; depend on this crate directly to use only this part.
 control port per parameter, MIDI and `time:Position` in through an atom
 sequence, state and latency. A plugin that sends notes sends them as
 MIDI 1.0 on the `notify` sequence, which then supports `midi:MidiEvent`.
-The ports are fixed in the bundle, so a plugin runs its own layout. No
-editor.
+The ports are fixed in the bundle, so a plugin runs its own layout. Each
+of `Plugin::AUX_OUTPUTS` is a port group (port-groups extension) of
+optional audio outputs after the main ones, one per channel; a bus whose
+ports the host leaves unconnected is off. A plugin without buses keeps
+the ports it had. No editor.
 
 The descriptor (`plugin_descriptor`, or `descriptor!`) is built on first
 use with the URI of the plugin's identity at run time

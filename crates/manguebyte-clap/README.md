@@ -12,7 +12,10 @@ plugin with an editor `gui`, `timer-support` and `posix-fd-support`; and,
 when the plugin declares what they need, per-note automation and
 modulation (`ParamFlags::per_note`), `voice-info` (`Plugin::voice_info`),
 `note-name` (`Plugin::NOTE_NAMES`), `audio-ports-config` and
-`audio-ports-activation` (`Plugin::LAYOUTS`). Every port takes 64-bit
+`audio-ports-activation` (`Plugin::LAYOUTS`). Each of
+`Plugin::AUX_OUTPUTS` is an audio port after the main output, with its
+name and width, switched by `audio-ports-activation`; every port starts
+active, as CLAP says. Every port takes 64-bit
 audio through the plugin's 32-bit path, and transport events inside a
 block cut it on their frames. Not there yet: note-end events, `tail`,
 presets, remote controls.

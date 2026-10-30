@@ -290,6 +290,17 @@ Write a processor once and ship it in every format.
   `Plugin::LAYOUTS` and `activateBus` switching the sidechain off
 - ⬜ VST 3 still to come: program lists, note names, a native 64-bit path
   (TECH_DEBT 91)
+- 🚧 Auxiliary output buses ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)):
+  `Plugin::AUX_OUTPUTS` and `process_with_aux`, as CLAP audio ports
+  switched by `audio-ports-activation`, VST 3 auxiliary buses switched by
+  `activateBus`, Audio Unit output elements, LV2 port groups of optional
+  ports, device channels in the standalone runner, and in the harness; a
+  bus switched off is not rendered. Tested in process through the
+  framework's own host in all four formats, and the example organ, Mangue
+  Divisions, loaded from its built library as CLAP and VST 3. Not yet run
+  through the CI validators (wired in, not seen to pass) or a DAW; widths
+  are fixed, there are no auxiliary inputs, and an Audio Unit renders
+  every element (TECH_DEBT 110)
 - 🚧 Audio Unit, version 2: `export_au!` through the plain C interface,
   with formats, parameters, scheduled parameters and MIDI on their
   frames, the host's transport and state; `.component` bundles written and
@@ -451,6 +462,11 @@ our own, and nothing claimed before its test exists.
 - ✅ Hosting CLAP, VST 3 and LV2 plugins as processors, through one
   interface for all three formats, with every event on its frame; LV2
   bundles read with the host's own Turtle reader
+- 🚧 A hosted plugin's auxiliary output buses read in all four formats
+  (`process_with_aux` on each processor) and switched before activation
+  in CLAP, VST 3 and LV2; tested against the framework's own wrappers
+  only, and not yet in the one interface (`any`) or the graph, whose
+  nodes have one output (TECH_DEBT 110)
 - ✅ Plugin scanning: the standard folders of each format, each CLAP and
   VST 3 file listed in a process of its own with a time limit, crashes and
   hangs reported, a cache keyed by path, time and size

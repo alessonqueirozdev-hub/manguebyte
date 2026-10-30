@@ -12,7 +12,10 @@ notes and note expressions, the MIDI controllers it declares, state,
 latency and an editor. It processes 32-bit and 64-bit audio (`kSample64`,
 through the plugin's 32-bit path, so both give the same numbers), and
 `setBusArrangements` and `activateBus` choose among the layouts the
-plugin offers in `Plugin::LAYOUTS`. Not there yet: program lists.
+plugin offers in `Plugin::LAYOUTS`. Each of `Plugin::AUX_OUTPUTS` is an
+auxiliary audio output bus, named, of one width, active by default as
+declared and switched by `activateBus`; a bus switched off is not given
+to the plugin and is written silent. Not there yet: program lists.
 
 The factory reports the plugin's identity at run time
 (`manguebyte_plugin::plugin_info`, ADR 0012), and its class id is

@@ -11,7 +11,11 @@ wrappers take as an Audio Unit, through the plain C AudioUnit interface:
 parameters, scheduled parameters and MIDI on their frames, the host's
 transport, state and the present preset, the elements' channel counts
 from `Plugin::LAYOUTS`, and, for a plugin that sends notes, MIDI 1.0 out
-through `kAudioUnitProperty_MIDIOutputCallback`. `cargo mangue bundle --format au`
+through `kAudioUnitProperty_MIDIOutputCallback`. Each of
+`Plugin::AUX_OUTPUTS` is an output element after element 0, named, of
+one width; the plugin runs once per slice, whichever element the host
+pulls first, and every element is rendered, since a unit cannot switch
+one off. `cargo mangue bundle --format au`
 writes the `.component` on macOS and `install --format au` puts it where
 hosts look. The wrapper's tests act as a host through its C interface on
 every system, against a stand-in for CoreFoundation elsewhere than macOS,

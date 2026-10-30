@@ -14,6 +14,14 @@ CLAP, VST 3, AU and LV2 wrappers and the standalone runner offer what
 their formats can of it. `Harness` runs it in a test, in any of its
 layouts, with no host.
 
+A plugin can have output buses besides its main one, such as an organ's
+divisions or a drum machine's pads: it lists them in `AUX_OUTPUTS`
+(`AuxOutput`: a name, a width, on or off by default) and writes them
+from `process_with_aux`, where a bus the host switched off is not given,
+so it costs nothing. Every wrapper presents them in its format's terms,
+and the harness switches them (`set_aux_active`) and returns what was
+written (`aux_output`). See ADR 0017.
+
 A plugin's identity is `Plugin::INFO`, fixed when it is compiled, unless
 it overrides `Plugin::info`, which works it out when the library is
 loaded: one engine binary copied to several files, each with its own
