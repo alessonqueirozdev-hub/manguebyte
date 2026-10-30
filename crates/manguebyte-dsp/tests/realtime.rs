@@ -1586,8 +1586,9 @@ fn a_partial_bank_does_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingCarrier,
-        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
+        AutoPan, Bitcrusher, FrequencyShifter, GranularDelay, LfoShape, MultibandCompressor,
+        RingCarrier, RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo,
+        Vocoder,
     };
 
     check(
@@ -1671,6 +1672,29 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_mix(0.5),
     );
 
+    // At the most grains: the pool is full, and grains keep being refused.
+    check(
+        "GranularDelay at its densest",
+        GranularDelay::<f32>::new()
+            .with_grain_ms(500.0)
+            .with_density_hz(200.0)
+            .with_spray_ms(500.0)
+            .with_pitch_spray(24.0)
+            .with_stereo_spread(1.0)
+            .with_feedback(0.95),
+    );
+    let mut cloud = GranularDelay::<f32>::new()
+        .with_grain_ms(500.0)
+        .with_density_hz(200.0);
+    cloud.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("a full pool of grains", || {
+        for _ in 0..200 {
+            cloud.process(&mut buffer);
+        }
+    });
+    assert_eq!(cloud.active_grains(), GranularDelay::<f32>::MAX_GRAINS);
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1731,8 +1755,8 @@ fn the_workstation_effects_do_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingModulator,
-        StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
+        AutoPan, Bitcrusher, FrequencyShifter, GranularDelay, LfoShape, MultibandCompressor,
+        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1755,6 +1779,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     tape.prepare(&SPEC);
     let mut vocoder = Vocoder::<f32>::new();
     vocoder.prepare(&SPEC);
+    let mut cloud = GranularDelay::<f32>::new();
+    cloud.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1846,6 +1872,18 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             vocoder.set_gain_db(turn);
             vocoder.set_mix(turn / 14.0);
             vocoder.process(&mut buffer);
+
+            cloud.set_position_ms(70.0 * turn);
+            cloud.set_spray_ms(35.0 * turn);
+            cloud.set_grain_ms(5.0 + 35.0 * turn);
+            cloud.set_density_hz(1.0 + 14.0 * turn);
+            cloud.set_pitch_semitones(3.0 * turn - 20.0);
+            cloud.set_pitch_spray(turn);
+            cloud.set_stereo_spread(turn / 14.0);
+            cloud.set_feedback(0.9 - turn / 7.0);
+            cloud.set_mix(turn / 14.0);
+            cloud.set_seed(u64::from(step));
+            cloud.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

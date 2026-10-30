@@ -184,6 +184,17 @@ break the API.
   follows a modulator that moves between bands; an octave of formant
   shift opens the carrier an octave up and leaves the original place more
   than 20 dB down; a silent modulator silences the carrier.
+- `GranularDelay`: Hann-windowed grains of the delayed signal, started on
+  a steady clock (density), each from a position plus a random spray, at
+  its own pitch (a set pitch plus a random pitch spray), placed at random
+  across the stereo field, with feedback through a `tanh` and a mix. The
+  grains live in a pool of 64 fixed when the delay is made; nothing is
+  allocated after `prepare`, also at the densest settings with the pool
+  full. Measured: at an overlap of two with nothing random the output is
+  the input delayed by the position to 1e-12; grains an octave up or 19
+  semitones down put the cloud's peak at the shifted pitch; spray keeps
+  every echo within the position and the spray; a fixed seed repeats the
+  render exactly for any block size, and another seed differs.
 
 ### Formats
 
