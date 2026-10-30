@@ -147,6 +147,15 @@ Everything a standalone audio application needs, short of a user interface.
   not started (TECH_DEBT 101)
 - ✅ Polyphonic voice allocation with per-note expression and modulation,
   accents and legato slides
+- ✅ Tuning beyond 12-tone equal temperament (`manguebyte_dsp::tuning`):
+  equal divisions of any period, Pythagorean, meantone, Werckmeister III,
+  Kirnberger III, Vallotti, Young and just intonation on any key, Scala
+  `.scl` and `.kbm` files, any reference pitch, transposition, detune and
+  octave stretch, and the MIDI Tuning Standard's bulk dump and single note
+  changes; played by every pitched instrument and the sampler, swapped
+  without allocating. Checked against published cents and Caecilia 1.x's
+  tables. Not done: the MIDI Tuning Standard's scale/octave messages, a
+  tuning per channel or per MPE note, the drum kits (TECH_DEBT 108)
 - ✅ Instruments: physically modelled plucked strings (guitars and basses),
   four-operator FM, a tonewheel organ with a rotary speaker, the drums and
   kick bass of the classic analogue drum machine, and an acid bass; each a

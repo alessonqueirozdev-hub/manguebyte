@@ -41,6 +41,11 @@ sampler moves each key's pitch and level frame by frame
 (`Sampler::modulate_key`), and `SincReader` offers the same windowed-sinc
 reading, with a ratio for every frame, to any player.
 
+It plays in any `manguebyte_dsp::tuning::Tuning` too (`Sampler::set_tuning`,
+or `Synth::set_tuning` for `SamplerVoice`): temperaments, Scala files and
+the MIDI Tuning Standard. A key's tuned pitch takes the place of its number
+in a region's pitch, and notes on unmapped keys do not start.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

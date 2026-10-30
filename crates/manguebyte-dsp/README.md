@@ -1,6 +1,6 @@
 # manguebyte-dsp
 
-Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, spectral processing by STFT and overlap-add, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, mallets by modal synthesis, bowed strings and winds by digital waveguide, choirs by formant synthesis, drum kits: acoustic by modal synthesis, Brazilian percussion by physical modelling, and drum machines, a deep polyphonic synthesiser with 68 presets) and zero-cost processor chains.
+Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, spectral processing by STFT and overlap-add, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, mallets by modal synthesis, bowed strings and winds by digital waveguide, choirs by formant synthesis, drum kits: acoustic by modal synthesis, Brazilian percussion by physical modelling, and drum machines, a deep polyphonic synthesiser with 68 presets), tunings beyond equal temperament (historical temperaments, Scala files, the MIDI Tuning Standard) and zero-cost processor chains.
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte). Most projects depend on
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part
@@ -158,6 +158,46 @@ for (i, ratio) in [1.0, 2.0, 3.0].into_iter().enumerate() {
 }
 let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
 bank.render_add(&mut left, &mut right);
+```
+
+## Tuning
+
+The `tuning` module gives every key of a `Synth` or a sampler a pitch other
+than 12-tone equal temperament's. A `Tuning` is a table of the 128 keys'
+pitches and frequencies, built off the audio thread from `TuningSettings`:
+
+- equal divisions of the octave or of any period (19, 24, 31, 53, or 13 to
+  the tritave);
+- twelve-note `Temperament`s on any key, built from their definitions:
+  Pythagorean, quarter-comma meantone, Werckmeister III, Kirnberger III,
+  Vallotti, Young's second and five-limit just intonation, or any table of
+  cents;
+- Scala scales (`.scl`) and keyboard mappings (`.kbm`), with unmapped
+  keys, any period and the line of every error;
+- any reference key and frequency, a transposition, a detune and an
+  octave `Stretch`; and tunings sent as MIDI Tuning Standard messages
+  (`MtsMessage`: bulk dumps and single note changes).
+
+It holds no heap memory, so it goes to the audio thread through a queue and
+`Synth::set_tuning` copies it into every voice without allocating. The
+instruments take their key's pitch from it and add bends and glides on
+top in semitones. `Tuning::default()` is 12-tone equal temperament at
+A4 = 440 Hz and gives the frequencies the voices always had, bit for bit.
+The temperaments are checked against their published cents and against
+Caecilia 1.x's reference tables.
+
+```rust
+use manguebyte_dsp::tuning::{Scale, Temperament, TuningSettings};
+
+let baroque = TuningSettings {
+    scale: Scale::Temperament { temperament: Temperament::werckmeister_iii(), key: 0 },
+    reference_hz: 415.0,
+    ..TuningSettings::default()
+}
+.build()
+.unwrap();
+assert!((baroque.key_frequency(69) - 415.0).abs() < 1e-9);
+// synth.set_tuning(&baroque);
 ```
 
 ## Licence

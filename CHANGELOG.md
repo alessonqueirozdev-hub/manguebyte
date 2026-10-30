@@ -88,6 +88,49 @@ break the API.
 
 ### DSP
 
+- Tuning (`manguebyte_dsp::tuning`): a `Tuning` gives each of the 128
+  keys a frequency, and fractional keys one between, interpolated in
+  pitch; built off the audio thread from `TuningSettings` and never
+  changed after. A key's frequency is a table lookup, a fractional note's
+  one interpolation and one `exp2`. It owns no heap memory, so it is sent
+  through `manguebyte_core::spsc` and dropped on the audio thread for
+  free. Scales (`Scale`): equal divisions of the octave or of any period
+  (12, 19, 24, 31, 53, Bohlen-Pierce's 13 to the tritave); twelve-note
+  `Temperament`s on any key, built from their definitions in fractions of
+  the Pythagorean or syntonic comma (Pythagorean, quarter-comma meantone,
+  Werckmeister III, Kirnberger III, Vallotti, Young's second, five-limit
+  just intonation) or from a table of cents or of deviations from equal
+  temperament; Scala files, `ScalaScale` (`.scl`: comments, ratios, cents,
+  negative cents, any period) and `KeyboardMapping` (`.kbm`: patterns,
+  unmapped keys, the range to retune, reference key and frequency, formal
+  octave), with the line of every error. On top: any reference key and
+  frequency, a transposition in keys, a detune in cents and a `Stretch`
+  (cents per octave below and above a pivot, the straight-line model
+  Caecilia 1.x used). `MtsMessage` reads the MIDI Tuning Standard's bulk
+  tuning dump (checksum checked) and single note tuning changes (real
+  time, and with a bank), and applies them without allocating;
+  `mts_pitch_bytes` writes a pitch in its three bytes. `Tuning::default()`
+  is 12-tone equal temperament with A4 at 440 Hz and gives
+  `440 · 2^((note − 69) / 12)` bit for bit for every note, whole or not.
+  The tests check every temperament against its published cents to half
+  a thousandth of a cent in every octave and on every key, Caecilia 1.x's
+  twelve reference tables (six temperaments at 440 and 415 Hz, 128 keys)
+  within 1e-9 cent (the largest difference is 3.5e-12), equal divisions
+  to 1e-13, Scala files of every kind through to the table, error lines,
+  MIDI tuning messages to their resolution, and fractional notes rising
+  without a jump through eight tunings.
+- `Synth::set_tuning` gives every voice a tuning through the new
+  `Voice::set_tuning` (a default method that ignores it), real-time safe;
+  a note on a key the tuning leaves unmapped does not start. Every pitched
+  instrument plays in it: plucked strings, FM, the organ, the acid and
+  kick basses, the polysynth, bowed strings, winds, mallets and the choir
+  take their key's pitch from the tuning and add bends, glides and their
+  own transpositions on top in semitones, as MIDI Tuning Standard synths
+  do. Measured: each moves by what the tuning moves its key by, within
+  1.5 cents, at A4 = 415 Hz, in 19-tone equal temperament and in meantone.
+  With the default tuning, given or not, each renders what it rendered
+  before bit for bit, and a tuning swapped while notes play allocates
+  nothing (`tests/tuning.rs`). Limits: TECH_DEBT 108.
 - `PartialBank` and `Partial`: a bank of sine partials for additive
   voices, such as Caecilia's organ pipes. `new(max)` allocates once;
   `set(i, Partial { freq_hz, gain, pan })`, `set_frequency`,
@@ -351,6 +394,14 @@ break the API.
 
 ### Sampler
 
+- `Sampler::set_tuning` and `SamplerVoice` through `Synth::set_tuning`:
+  a key's pitch in the tuning takes the place of the key number in a
+  region's pitch, the note offset, `tune`, `transpose` and the wheel
+  staying intervals on top; notes on unmapped keys do not start. Every key
+  from 45 to 93 measured within 0.05 cent of Werckmeister III at
+  A4 = 415 Hz with a stretch; the default tuning renders bit for bit what
+  the sampler rendered before; changing tunings while playing allocates
+  nothing.
 - Filters per region in `manguebyte-sampler`: `cutoff` turns on a filter
   of the region's `fil_type`, among `lpf_1p`, `hpf_1p`, `lpf_2p` (the
   default), `hpf_2p`, `bpf_2p`, `brf_2p` (and their `_sv` spellings),
