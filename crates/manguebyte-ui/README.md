@@ -49,6 +49,17 @@ Documentation: <https://docs.rs/manguebyte-ui>
   editor bound to four parameters) and `zone_map` (zones of keys by
   velocities, lined up with a keyboard over the same `KeySpan`, made by
   dropping samples). What they change is polled from their states.
+  Zoomed out, a waveform whose cycle is only a few pixels long is drawn
+  as a solid band rather than as spikes that beat with the pixel grid;
+  zoomed in, an anti-aliased line through the samples takes over from
+  the columns gradually.
+- For a synth's page: `pitch_wheel` and `mod_wheel` (a ridged wheel in
+  a recessed slot, bound to a parameter or to a `WheelState` the
+  application polls to send MIDI; the pitch bend wheel springs back to
+  the middle when let go), `wave_view` (one cycle of an oscillator, from
+  samples or a `manguebyte_dsp::Wavetable` frame, at a polled position)
+  and `wavetable_view` (a wavetable's frames stacked in depth, the frame
+  playing lit), fed from a `WaveData` the application sets.
 - Drag and drop inside the interface (`drag`): typed payloads, targets
   that accept or refuse, a ghost over everything, scrolling near an edge.
   Files and text dragged from other programs reach the same targets
@@ -87,8 +98,14 @@ shadow blurred and cached):
 (Synth, Effects, Presets) and a confirmation dialog, and an organ
 console with a sidebar of divisions, in both themes:
 
+`examples/synth_screen.rs` draws a synth's page: a wavetable stacked in
+depth beside the cycle playing, a second oscillator's cycle, and the
+pitch bend and modulation wheels left of a keyboard, in both themes at
+1x, 1.25x and 2x:
+
 ```text
 cargo run -p manguebyte-ui --example pages_demo -- <folder>
+cargo run -p manguebyte-ui --example synth_screen -- <folder>
 cargo run -p manguebyte-ui --example sampler_screen -- <folder>
 cargo run -p manguebyte-gui --example sampler_window
 cargo run -p manguebyte-ui --example design_bench --release

@@ -392,9 +392,14 @@ our own, and nothing claimed before its test exists.
   letters, keys lit and ranges marked by the application), an ADSR
   editor whose handles are gestures on four parameters, and a zone map
   of keys by velocities lined up with the keyboard, taking samples
-  dragged from a list or from other programs, all tested headless;
-  spectrum and EQ editors not started, and none worked by hand in a
-  real window yet ([TECH_DEBT](docs/TECH_DEBT.md) item 98)
+  dragged from a list or from other programs, all tested headless; for
+  a synth's page, pitch bend and modulation wheels (bound to parameters
+  or polled to send MIDI, the bend springing back), one cycle of an
+  oscillator and a wavetable stacked in depth with the frame playing
+  lit, tested headless; a low tone zoomed out in the waveform view drawn
+  as a solid band instead of moiré; spectrum and EQ editors not started,
+  and none worked by hand in a real window yet
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 98 and 109)
 - ✅ Design tokens and motion
   ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)): layered tokens
   (surfaces, hairlines, three text levels, one accent, categorical hues,

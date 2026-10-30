@@ -1142,6 +1142,73 @@ Effects and Presets pages, Caecilia's organ divisions)
   `examples/pages_demo.rs` draws a Parabolic-like screen and an organ
   console. Limits: TECH_DEBT 105.
 
+Wheels and oscillator views for a synth's page, which Parabolic asked
+for, and the waveform view's moiré fixed:
+
+- `pitch_wheel(name, binding)` and `mod_wheel(name, binding)`: a ridged
+  wheel in a recessed slot, the ridges moving as it turns, the stretch
+  from rest tinted and the value a glowing accent bar, its name (a
+  `TextSource`) under it. Bound to a `ParamHandle` through gestures, as a
+  knob is, or to a `WheelState` the application polls (`take`, the
+  person's moves only; `midi_pitch_bend`, `midi_controller`, `is_held`)
+  and sets from MIDI it receives; its value is an atomic the audio
+  thread may read. Dragging (the slot's height a whole travel, ten times
+  finer with Shift), the mouse wheel and the keys (arrows, Page Up and
+  Page Down, Home and End) move it; a double click puts it back at
+  rest. The pitch bend wheel springs back to the middle on the theme's
+  spring, jumping with motion off, when a drag ends, when the key that
+  moved it comes up, when the focus leaves it and `BEND_RETURN_AFTER`
+  (300 ms) after the mouse wheel last turned it, sending the values it
+  passes through; bound to a parameter the hold and the spring back are
+  one gesture. The modulation wheel stays. Each is a slider to assistive
+  technology, with its value as text.
+- `WaveData`: what the oscillator views show, one cycle from a slice of
+  samples, frames of equal length, or a `manguebyte_dsp::Wavetable`'s
+  frames read from its richest level, set by the application off the
+  audio thread and polled by version. `wave_view(name, data)` draws one
+  cycle as a glowing line over a fill to the centre line, at a polled
+  fractional position between frames (`.position(source)`).
+  `wavetable_view(name, data, position)` stacks up to
+  `MAX_STACKED_FRAMES` (32) frames in depth, each hiding what is behind
+  it, and lights the frame at the polled position over the stack; the
+  stack is rendered once into a picture of the view and copied pixel for
+  pixel while only the position moves. Both draw again only when the
+  data or the position changes; fills and glows are columns
+  (`Scene::columns`). Measured optimised on the development machine: a
+  position change costs about 3 ms (1x) and 7 ms (2x) for a wavetable
+  view of 300 by 180, 2 and 5 ms for a cycle view of 160 by 96.
+  `manguebyte-ui` depends on `manguebyte-dsp` directly now (it already
+  did through `manguebyte-plugin`).
+- `waveform_view`: a pure 196 Hz sine, 1.5 s across 1340 pixels (54
+  frames and a fifth of a cycle per column), drew as separate spikes
+  with vertical bands of moiré. The columns were exact; each saw a fifth
+  of a cycle. The view now measures the waveform's cycle around each
+  column from where its line turns and, where a cycle is six logical
+  pixels or shorter, widens each column's span to the whole cycle (part
+  of the way up to twelve), so a low tone zoomed out is a solid band. A
+  column's span is the line through the samples across the column, its
+  edges interpolated, grown by half the line's width; the core's root
+  mean square is averaged with falling weights over about a cycle and no
+  longer drawn outside the span. From two frames per device pixel down
+  to one, the anti-aliased line through the samples takes over
+  gradually, the columns in the line's colour, so zooming through does
+  not jump.
+- Tested headless (`tests/wheels.rs`, `wavetable.rs`, `waveform.rs`,
+  `realtime.rs`, `golden.rs`): the spring's frames, its overshoot and its
+  values reported to the application, the jump with motion off, keys
+  held and released, the mouse wheel's pause, double clicks, gestures on
+  parameters and host automation, assistive technology, names following
+  the language, damage inside the widget and partial repaints equal to
+  whole ones at 1x, 1.25x and 2x, idle frames drawing nothing and steady
+  frames making no heap call; samples and wavetable frames drawn where
+  they are, the lit frame moving with the position, redraws only on a
+  change; every column of the reported tone lit across its envelope and
+  of even ink, an unbroken line zoomed in, and the ink changing by less
+  than 4 % a step of 3 % zoom through the change from columns to a line.
+  Golden images of the wheels and the oscillator views at 1x and 2x in
+  both themes. `examples/synth_screen.rs` draws a synth's page with all
+  three. Limits: TECH_DEBT 109.
+
 ### Breaking
 
 - In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
