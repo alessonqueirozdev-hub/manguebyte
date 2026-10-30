@@ -534,4 +534,27 @@ mod tests {
             assert!(basic.read(3, value, value).is_finite());
         }
     }
+
+    #[test]
+    fn the_frames_drawn_are_the_cycles_the_voice_reads() {
+        for (table, shape) in bank().iter().zip(TableShape::ALL) {
+            let frames = shape.frames(256);
+            assert_eq!(frames.len(), FRAMES);
+            for (index, frame) in frames.iter().enumerate() {
+                assert_eq!(frame.len(), 256);
+                let position = index as f64 / (FRAMES - 1) as f64;
+                for (n, &sample) in frame.iter().enumerate() {
+                    let read = table.read(0, position, n as f64 / 256.0) as f32;
+                    assert_eq!(sample, read, "{shape:?} frame {index} sample {n}");
+                }
+            }
+            // Between frames, a cycle is the blend of its neighbours.
+            let between = shape.cycle(0.5 / (FRAMES - 1) as f64, 256);
+            for (n, &sample) in between.iter().enumerate() {
+                let mean = (frames[0][n] + frames[1][n]) / 2.0;
+                assert!((sample - mean).abs() < 1e-5, "{shape:?} {n}");
+            }
+        }
+        assert!(TableShape::Fold.cycle(0.3, 0).is_empty());
+    }
 }

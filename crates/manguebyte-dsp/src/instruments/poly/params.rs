@@ -4,6 +4,7 @@
 use crate::{LfoShape, NoiseColor};
 
 use super::super::common::setting;
+use super::tables;
 
 /// How many oscillators a voice has, beside its sub oscillator and noise.
 pub const OSCILLATORS: usize = 3;
@@ -141,6 +142,41 @@ impl TableShape {
     /// The table's place in [`ALL`](Self::ALL).
     pub const fn index(self) -> usize {
         self as usize
+    }
+
+    /// How many frames each table has: an oscillator's
+    /// [`shape`](OscParams::shape) moves from the first (0) to the last (1).
+    pub const FRAMES: usize = tables::FRAMES;
+
+    /// One cycle of the table at `position`, between its first frame (0)
+    /// and its last (1), in `samples` evenly spaced points from phase 0:
+    /// the waveform with every harmonic, peaking near 1, as a low note
+    /// plays it. It is for drawing; a voice reads the table itself.
+    ///
+    /// The first call builds every table, which takes a moment and about
+    /// 14 MB, as the first voice made does; later calls only read them.
+    /// It allocates, so it belongs off the audio thread.
+    ///
+    /// ```
+    /// use manguebyte_dsp::instruments::poly::TableShape;
+    ///
+    /// // The basic table starts as a sine.
+    /// let cycle = TableShape::Basic.cycle(0.0, 64);
+    /// assert!((cycle[16] - 1.0).abs() < 1e-5 && cycle[0].abs() < 1e-5);
+    /// ```
+    pub fn cycle(self, position: f64, samples: usize) -> Vec<f32> {
+        let table = &tables::bank()[self.index()];
+        (0..samples)
+            .map(|n| table.read(0, position, n as f64 / samples as f64) as f32)
+            .collect()
+    }
+
+    /// Every frame of the table, first to last, as a cycle of `samples`
+    /// points each, the way [`cycle`](Self::cycle) gives one.
+    pub fn frames(self, samples: usize) -> Vec<Vec<f32>> {
+        (0..Self::FRAMES)
+            .map(|frame| self.cycle(frame as f64 / (Self::FRAMES - 1) as f64, samples))
+            .collect()
     }
 }
 

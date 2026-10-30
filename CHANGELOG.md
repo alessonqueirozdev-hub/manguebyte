@@ -122,6 +122,12 @@ break the API.
 
 ### DSP
 
+- `TableShape::cycle` and `TableShape::frames`: the poly synth's
+  wavetables as cycles to draw, one at any position or all
+  `TableShape::FRAMES` frames, read from the richest level as a low note
+  plays them. They share the tables the voices use, built once; for an
+  interface thread, not the audio one. Tested against what the voice
+  reads, sample for sample.
 - Tuning (`manguebyte_dsp::tuning`): a `Tuning` gives each of the 128
   keys a frequency, and fractional keys one between, interpolated in
   pitch; built off the audio thread from `TuningSettings` and never
