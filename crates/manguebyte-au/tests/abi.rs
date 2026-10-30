@@ -2131,3 +2131,146 @@ fn channel_counts_follow_the_layouts_offered() {
     expected.apply_gain(0.5);
     assert_same_bits(&out, &expected, "mono");
 }
+
+// --- Parameters renamed while the unit runs ------------------------------------
+
+struct ChoirParams {
+    upper: BoolParam,
+    swell: FloatParam,
+}
+param_set!(ChoirParams { upper, swell });
+
+const UPPER: ParamId = ParamId::from_name("upper");
+const SWELL: ParamId = ParamId::from_name("swell");
+
+static CHOIR_PARAMS: Mutex<Option<Arc<ChoirParams>>> = Mutex::new(None);
+
+/// Passes its input through; it is here for its parameters, which the
+/// test renames as a plugin that loads another instrument does.
+struct Choir {
+    params: Arc<ChoirParams>,
+}
+
+impl Plugin for Choir {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.choir",
+        name: "Choir",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Renames its parameters",
+        kind: PluginKind::Effect,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+    type Params = ChoirParams;
+
+    fn new() -> Self {
+        let params = Arc::new(ChoirParams {
+            upper: BoolParam::new("upper", "Upper", false),
+            swell: FloatParam::new("swell", "Swell", FloatRange::linear(0.0, 1.0), 0.5),
+        });
+        *CHOIR_PARAMS.lock().unwrap() = Some(Arc::clone(&params));
+        Self { params }
+    }
+    fn params(&self) -> Arc<ChoirParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+}
+
+/// The name a unit gives in a parameter's information, and its unit; the
+/// name is checked to be the same in both its fields.
+fn described(unit: &Host, param: ParamId) -> (String, u32) {
+    let info = unit
+        .get::<AudioUnitParameterInfo>(
+            kAudioUnitProperty_ParameterInfo,
+            kAudioUnitScope_Global,
+            param.0,
+        )
+        .unwrap();
+    // SAFETY: the name field ends with a NUL.
+    let name = unsafe { CStr::from_ptr(info.name.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(text_of(info.cfNameString), name);
+    // SAFETY: the host releases the name, as the flags say.
+    unsafe { CFRelease(info.cfNameString) };
+    (name, info.unit)
+}
+
+/// Renames made while the unit is not initialized are announced once, as
+/// a change of the parameter list, when it is, and renames made as state
+/// is restored are announced with it; the parameters' information gives
+/// the new names and unit throughout.
+#[test]
+fn renamed_parameters_are_announced_once_and_described_by_their_new_names() {
+    let _serial = serial();
+    HEARD.lock().unwrap().clear();
+    let choir = Host::new::<Choir>();
+    let global = kAudioUnitScope_Global;
+    let add: AddListener = choir.method(kAudioUnitAddPropertyListenerSelect);
+    let user = 7 as *mut c_void;
+    // SAFETY: the method, with a listener that outlives the unit.
+    let status = unsafe {
+        add(
+            choir.this,
+            kAudioUnitProperty_ParameterList,
+            Some(listener),
+            user,
+        )
+    };
+    assert_eq!(status, noErr);
+    assert_eq!(
+        described(&choir, SWELL),
+        ("Swell".into(), kAudioUnitParameterUnit_Generic)
+    );
+
+    let params = CHOIR_PARAMS.lock().unwrap().clone().unwrap();
+    let renamer = Arc::clone(&params);
+    std::thread::spawn(move || {
+        renamer.upper.info().set_display_name("Soprano");
+        renamer.swell.info().set_display_name("Expression");
+        renamer.swell.info().set_display_unit("dB");
+    })
+    .join()
+    .unwrap();
+    // Asked for before anything announces it, the information is new.
+    assert_eq!(described(&choir, UPPER).0, "Soprano");
+    assert_eq!(choir.simple(kAudioUnitInitializeSelect), noErr);
+    assert_eq!(
+        *HEARD.lock().unwrap(),
+        [(kAudioUnitProperty_ParameterList, global, 0, 7)]
+    );
+    assert_eq!(
+        described(&choir, SWELL),
+        ("Expression".into(), kAudioUnitParameterUnit_Decibels)
+    );
+    // Nothing renamed since: nothing more to hear.
+    assert_eq!(choir.simple(kAudioUnitUninitializeSelect), noErr);
+    assert_eq!(choir.simple(kAudioUnitInitializeSelect), noErr);
+    assert_eq!(HEARD.lock().unwrap().len(), 1);
+
+    // A state restored with another instrument's names.
+    let saved = choir
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    params.upper.info().set_display_name("Treble");
+    assert_eq!(
+        choir.set(kAudioUnitProperty_ClassInfo, global, 0, &saved),
+        noErr
+    );
+    // SAFETY: the host releases what it was given.
+    unsafe { CFRelease(saved) };
+    assert_eq!(
+        HEARD.lock().unwrap().as_slice(),
+        [(kAudioUnitProperty_ParameterList, global, 0, 7); 2]
+    );
+    assert_eq!(described(&choir, UPPER).0, "Treble");
+    assert_eq!(choir.simple(kAudioUnitUninitializeSelect), noErr);
+
+    let remove: RemoveListener = choir.method(kAudioUnitRemovePropertyListenerSelect);
+    // SAFETY: the method.
+    let status = unsafe { remove(choir.this, kAudioUnitProperty_ParameterList, Some(listener)) };
+    assert_eq!(status, noErr);
+}

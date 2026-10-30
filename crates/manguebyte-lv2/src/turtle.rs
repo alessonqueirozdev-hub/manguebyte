@@ -607,6 +607,9 @@ fn plugin_ttl<P: Plugin>() -> String {
                 let Some(&param) = param_list.get(at) else {
                     continue;
                 };
+                // The name the parameter was made with: the file is written
+                // once, so hosts never see a name given at run time
+                // (ADR 0020).
                 port(
                     &mut out,
                     "lv2:ControlPort , lv2:InputPort",

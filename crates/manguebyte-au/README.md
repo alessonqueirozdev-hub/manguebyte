@@ -23,6 +23,12 @@ and both example plugins pass Apple's `auval` in a macOS CI job. No DAW
 has loaded one yet. Not there: an editor, MIDI 2.0 output, factory presets
 and AUv3.
 
+`kAudioUnitProperty_ParameterInfo` gives each parameter's current display
+name and unit. When a plugin renames parameters (ADR 0020), the listeners
+of `kAudioUnitProperty_ParameterList` are told once per batch, at the next
+`Initialize` or restored `ClassInfo`; an Audio Unit has no call on the
+main thread of its own to tell them sooner.
+
 The codes come from the plugin's identity at run time
 (`manguebyte_plugin::plugin_info`, ADR 0012), in the state dictionary and
 in the `Info.plist` that `cargo mangue` writes; a library whose identity

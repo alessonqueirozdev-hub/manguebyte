@@ -274,6 +274,10 @@ pub(crate) struct Instance<P: Plugin> {
     last_error: AtomicI32,
     /// Events dropped on the audio thread, for the tests.
     dropped: AtomicU64,
+    /// The parameters' `labels_version` when the listeners were last told
+    /// that the parameter list changed. Only ever used off the audio
+    /// thread.
+    labels_told: AtomicU64,
     config: Exclusive<Config>,
     audio: Exclusive<Audio<P>>,
     /// Only ever taken off the audio thread.
@@ -322,6 +326,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             latency: AtomicU32::new(0),
             last_error: AtomicI32::new(noErr),
             dropped: AtomicU64::new(0),
+            labels_told: AtomicU64::new(params.labels_version()),
             config: Exclusive::new(Config {
                 sample_rate: DEFAULT_SAMPLE_RATE,
                 max_frames: DEFAULT_MAX_FRAMES,
@@ -511,6 +516,21 @@ impl<P: Plugin> Instance<P> {
         }
     }
 
+    /// If any parameter was given a new name, short name or unit since the
+    /// listeners were last told, tells the listeners of
+    /// `kAudioUnitProperty_ParameterList` once, however many were renamed,
+    /// so that a host reads each parameter's information again (ADR 0020).
+    ///
+    /// An Audio Unit has no call on the main thread of its own, so this
+    /// runs where the host calls in anyway: `Initialize` and a restored
+    /// state. Off the audio thread only.
+    fn tell_new_labels(&self) {
+        let now = self.params.labels_version();
+        if self.labels_told.swap(now, Ordering::Relaxed) != now {
+            self.changed(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
+        }
+    }
+
     /// The channels of an element of a scope as the host has set them, or
     /// the error for one that does not exist.
     fn channels(
@@ -564,6 +584,7 @@ impl<P: Plugin> Instance<P> {
         }
         self.prepare();
         self.initialized.store(true, Ordering::Release);
+        self.tell_new_labels();
         noErr
     }
 
@@ -764,7 +785,7 @@ fn display(param: &dyn Param) -> Display {
             return Display::Indexed;
         }
     }
-    let unit = match param.info().unit() {
+    let unit = match &*param.info().display_unit() {
         "dB" | "db" | "dBFS" => kAudioUnitParameterUnit_Decibels,
         "Hz" | "hz" => kAudioUnitParameterUnit_Hertz,
         "ms" => kAudioUnitParameterUnit_Milliseconds,
@@ -825,8 +846,9 @@ impl<P: Plugin> Instance<P> {
             defaultValue: param.default_plain().clamp(min, max) as f32,
             flags: kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable,
         };
-        copy_name(param.name(), &mut info.name);
-        if let Some(name) = cf::string(param.name()) {
+        let name = param.display_name();
+        copy_name(&name, &mut info.name);
+        if let Some(name) = cf::string(&name) {
             // The host releases it, as the flags say.
             info.cfNameString = name.into_raw();
             info.flags |=
@@ -2390,6 +2412,8 @@ impl<P: Plugin> Instance<P> {
                     let status = self.restore(list);
                     if status == noErr {
                         self.changed(kAudioUnitProperty_PresentPreset, kAudioUnitScope_Global, 0);
+                        // A plugin may rename parameters as it loads.
+                        self.tell_new_labels();
                     }
                     status
                 }
