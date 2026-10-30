@@ -242,11 +242,12 @@ Everything a standalone audio application needs, short of a user interface.
   ADR 0018): a governor that measures each block against its deadline and
   gives the instrument a budget in cost units for the next one, off when
   rendering offline, with a quality floor. Done and tested on a fake clock;
-  on the real clock only on one loaded laptop at normal thread priority,
-  where it kept the deadline but thinned the organ far more than needed.
-  No instrument of the framework spends a budget yet, the wrappers do not
-  turn it off for a host's offline render, and the render pool's report
-  is passed by hand (TECH_DEBT item 111)
+  on the real clock only on one loaded laptop, where on a real-time
+  thread it held a synthetic organ asked for twice what fits at the
+  target with no late block (at normal priority it kept nearly every
+  block in time but thinned the organ far more than needed). No
+  instrument of the framework spends a budget yet, and the wrappers do
+  not turn it off for a host's offline render (TECH_DEBT item 111)
 - ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 

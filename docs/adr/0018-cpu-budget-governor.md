@@ -100,17 +100,32 @@ calibrated time), at normal thread priority, 10 or 20 seconds a run:
 
 | Setting | Blocks late | Organ rendered | Median load |
 |---|---|---|---|
-| default (`spike_blocks` 1, `max_rise` 2) | 0.3 to 0.7 % | 0.3 to 6 % | 1 to 16 % |
+| default (`spike_blocks` 1, `max_rise` 2) | 0.3 to 0.7 % | 0.3 to 10 % | 1 to 32 % |
 | `max_rise` 1.1 | 3.1 % | 8.7 % | 16 % |
 | `spike_blocks` 3 | 6 to 39 % | 7 to 18 % | 28 to 46 % |
 | `spike_blocks` 3, `max_rise` 1.25 | 5.3 % | 15 % | 50 % |
 | no governor | 100 % | 100 % | 170 to 1430 % |
 
-The default keeps the deadline, which is what the governor is for, and
-pays for it in sound on a machine this busy: the estimate climbs to the
-costliest blocks faster than the release brings it down. Rendering 35 %
-would load the target at the calibrated cost. On a quiet machine or a
-real-time thread, nothing has been measured yet.
+At normal priority, the default keeps the deadline, which is what the
+governor is for, and pays for it in sound on a machine this busy: the
+estimate climbs to the costliest blocks faster than the release brings
+it down. Rendering 35 % would load the target at the calibrated cost.
+
+On a real-time thread, which is where audio runs, the picture changes.
+The example asks for MMCSS "Pro Audio" through the pool's `Promotion`
+(`sleep-rt`), on the same busy machine, 20 seconds a run:
+
+| Setting | Blocks late | Organ rendered | Load: median, 99th percentile, worst |
+|---|---|---|---|
+| default, two runs | none | 13 and 17 % | 55 to 57 %, 70 to 71 %, 89 to 98 % |
+| `spike_blocks` 3 | none | 19 % | 62 %, 73 %, 96 % |
+| default, spinning between blocks (`spin-rt`) | 0.06 % | 2.1 % | 8 %, 87 %, 110 % |
+| default, normal priority, just before | 0.35 % | 9.9 % | 32 %, 69 %, 1325 % |
+
+Asked for twice what fits, the governor held the load's 99th percentile at
+the target and let no block be late. A thread that spins at real-time
+priority between blocks, which no callback does, fared worse; why was not
+looked into.
 
 The fake-clock tests measure the same trade under a cost that moves by a
 random amount every block: by default ±20 % moves nothing once settled,
@@ -147,15 +162,16 @@ if it knows; unlimited otherwise.
   to a cheaper tier changes sound at once unless the instrument
   cross-fades its tiers. The budget rises slowly, so promotions are spread
   out, but each is still a step.
-- On a busy machine the default degrades far more than the work alone
-  would need, since it cannot tell stolen time from cost; an instrument
-  that would rather risk late blocks than thin out sets `spike_blocks` or
-  a smaller `max_rise`.
+- On a busy machine at normal priority the default degrades far more
+  than the work alone would need, since it cannot tell stolen time from
+  cost; an instrument that would rather risk late blocks than thin out
+  sets `spike_blocks` or a smaller `max_rise`.
 - The first block after `new` or `reset`, with nothing learnt, renders the
   full demand; an instrument that knows it will overload can set a
   maximum.
 - The governor is meant to run on a real-time thread, where preemption is
-  rarer; it has been measured only at normal priority.
+  rarer; there it held the load at the target on a busy laptop. It has
+  not been run inside a host, on another system or with Caecilia.
 
 ## Alternatives not taken
 

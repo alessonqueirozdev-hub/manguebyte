@@ -48,7 +48,8 @@ break the API.
   `spike_blocks(n)` makes a rise count only once it has lasted `n`
   blocks. Offline it gives the maximum budget and never reads the clock;
   `set_quality_floor` and `set_max_budget` bound it; `note_missed` counts
-  a render pool's missed jobs as a full deadline's load. `Allowance`
+  missed jobs as a full deadline's load, and `note_report` takes a render
+  pool's `BlockReport`. `Allowance`
   spends a budget tier by tier and says whether the instrument was
   limited. Nothing allocates or locks. Tested on a fake clock: a step to
   twice what fits brought under the target within three blocks and kept
@@ -61,11 +62,12 @@ break the API.
   maximum, missed jobs; no heap use under the counting allocator.
   `manguebyte-dsp`'s `examples/governor_organ.rs` plays a `PartialBank`
   organ asked for twice what fits, on the real clock: on the development
-  laptop, busy with other programs, at normal priority, the default left
-  0.3 to 0.7 % of the blocks late (all of them without it) but rendered
-  only 0.3 to 6 % of the organ; `spike_blocks(3)` rendered 7 to 18 % with
-  6 to 39 % late
-  (TECH_DEBT item 111).
+  laptop, busy with other programs, on a real-time thread, the load's
+  99th percentile held at 70 to 71 % (the target) with no block late (all
+  of them without the governor), 13 to 17 % of the organ rendered; at
+  normal priority 0.3 to 0.7 % late and 0.3 to 10 % rendered, and with
+  `spike_blocks(3)` 6 to 39 % late and 7 to 18 % rendered (TECH_DEBT item
+  111).
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
   `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,
   `peak`, `dot`, `sum_of_squares`, `complex_multiply_add`,

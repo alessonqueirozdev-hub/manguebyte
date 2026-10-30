@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo run --release -p manguebyte-dsp --example governor_organ \
-//!     [seconds] [factor] [sleep|spin] [spike_blocks] [max_rise]
+//!     [seconds] [factor] [sleep|spin|sleep-rt|spin-rt] [spike_blocks] [max_rise]
 //! ```
 //!
 //! Each pipe is a [`PartialBank`] of 32 partials, whose levels fall with
@@ -26,15 +26,18 @@
 //! the measured load's percentiles, the blocks over the target and over
 //! the deadline, and the share of the asked-for partials rendered, beside a
 //! second without the governor. The thread has the system's normal
-//! priority. Build it optimised: the debug figures mean nothing. Other work
-//! on the machine shows in the worst blocks, and in how much the governor
-//! lets the organ render.
+//! priority, or asks for real-time scheduling with `sleep-rt` or `spin-rt`
+//! (`manguebyte_core::pool::Promotion`: MMCSS "Pro Audio" on Windows).
+//! Build it optimised: the debug figures mean nothing. Other work on the
+//! machine shows in the worst blocks, and in how much the governor lets
+//! the organ render.
 
 use std::hint::black_box;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+use manguebyte_core::pool::{Priority, Promotion};
 use manguebyte_dsp::{Partial, PartialBank};
 
 const RATE: f64 = 48_000.0;
@@ -234,10 +237,14 @@ fn main() {
         .next()
         .map_or(20.0, |s| s.parse().expect("seconds"));
     let factor: f64 = arguments.next().map_or(2.0, |s| s.parse().expect("factor"));
-    let pacing = match arguments.next().as_deref() {
-        Some("spin") => Pacing::Spin,
-        _ => Pacing::Sleep,
+    let pacing_name = arguments.next().unwrap_or_default();
+    let pacing = if pacing_name.starts_with("spin") {
+        Pacing::Spin
+    } else {
+        Pacing::Sleep
     };
+    // Held to the end, so the whole run is at that priority.
+    let promotion = pacing_name.ends_with("-rt").then(Promotion::current_thread);
     let mut config = GovernorConfig::default();
     if let Some(blocks) = arguments.next() {
         config = config.spike_blocks(blocks.parse().expect("spike blocks"));
@@ -256,7 +263,7 @@ fn main() {
     println!(
         "a pipe of {PARTIALS} partials takes {:.2} µs a block of {FRAMES} frames in an organ \
          this size; drawing {pipes}, {factor} times what fills the {:.2} ms deadline; \
-         pacing by {}",
+         pacing by {}, at {:?} priority",
         per_pipe.as_secs_f64() * 1e6,
         deadline().as_secs_f64() * 1e3,
         if pacing == Pacing::Spin {
@@ -264,6 +271,9 @@ fn main() {
         } else {
             "sleeping"
         },
+        promotion
+            .as_ref()
+            .map_or(Priority::Normal, Promotion::priority),
     );
 
     let mut organ = Organ::new(pipes);

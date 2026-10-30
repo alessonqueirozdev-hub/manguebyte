@@ -48,10 +48,13 @@
 //!   rise moves it only once it has lasted that many: a lone preemption
 //!   then moves nothing, but a cost that really varies from block to block
 //!   makes more blocks late. On a laptop busy with other programs, with a
-//!   synthetic organ asked for twice what fits, believing every block left
-//!   0.3 to 0.7 % of the blocks late and rendered 0.3 to 6 % of the organ;
-//!   going by the last three, 6 to 39 % late and 7 to 18 % rendered
-//!   (ADR 0018). Which is better is the instrument's choice.
+//!   synthetic organ asked for twice what fits, on a thread of normal
+//!   priority, believing every block left 0.3 to 0.7 % of the blocks late
+//!   and rendered 0.3 to 10 % of the organ; going by the last three, 6 to
+//!   39 % late and 7 to 18 % rendered. On a real-time thread (MMCSS "Pro
+//!   Audio"), believing every block held the 99th percentile of the load
+//!   at 70 to 71 %, the target, with none late, and rendered 13 to 17 %
+//!   (ADR 0018).
 //! - **Release.** When it is below, the estimate falls with the
 //!   [release](GovernorConfig::release) time constant, and the budget rises
 //!   by at most a factor of two every [`doubling`](GovernorConfig::doubling)
@@ -95,14 +98,15 @@
 //!
 //! # A render pool
 //!
-//! A block in which a render pool (ADR 0015) missed jobs, because its wait
-//! limit passed while a worker still held them, counts as at least a whole
-//! deadline's load, whatever the clock said, and goes through the same
-//! rules as any other load (with
+//! A block in which a [render pool](crate::pool) (ADR 0015) missed jobs,
+//! because its wait limit passed while a worker still held them, counts as
+//! at least a whole deadline's load, whatever the clock said, and goes
+//! through the same rules as any other load (with
 //! [`spike_blocks`](GovernorConfig::spike_blocks) above one, it must
-//! last). Tell the governor through [`note_missed`](Governor::note_missed)
-//! before [`end_block`](Governor::end_block), and time the pool's `run` and
-//! the mix after it between [`begin_block`](Governor::begin_block) and
+//! last). Give the governor the pool's report through
+//! [`note_report`](Governor::note_report) before
+//! [`end_block`](Governor::end_block), and time the pool's `run` and the
+//! mix after it between [`begin_block`](Governor::begin_block) and
 //! `end_block`.
 //!
 //! # Real time
@@ -547,6 +551,13 @@ impl<C: Clock> Governor<C> {
         if !self.offline {
             self.missed = self.missed.saturating_add(missed);
         }
+    }
+
+    /// Counts the jobs a [`RenderPool`](crate::pool::RenderPool)'s `run`
+    /// reports missed in the block being measured, as
+    /// [`note_missed`](Self::note_missed) does.
+    pub fn note_report(&mut self, report: &crate::pool::BlockReport) {
+        self.note_missed(report.missed);
     }
 
     /// Marks the end of a block of `frames` frames in which the instrument

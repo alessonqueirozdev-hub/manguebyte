@@ -553,6 +553,45 @@ fn missed_jobs_count_as_an_overload() {
 }
 
 #[test]
+fn a_render_pools_report_feeds_the_governor() {
+    use manguebyte_core::pool::{BlockReport, Job, PoolConfig, RenderPool};
+
+    /// A voice that costs a fixed share of the deadline on the fake clock.
+    struct Voice;
+    impl Job for Voice {
+        fn render(&mut self) {}
+    }
+
+    let mut rig = Rig::new(GovernorConfig::default());
+    rig.run(OVERLOAD, blocks_in(1.0));
+    let before = rig.governor.budget();
+    // A pool with no workers renders every job on the calling thread, and
+    // misses none.
+    let mut pool = RenderPool::new((0..4).map(|_| Voice).collect(), PoolConfig::offline());
+    let units = before.floor();
+    let load = OVERLOAD.overhead + OVERLOAD.per_unit * units;
+    rig.governor.begin_block();
+    let report = pool.run(4);
+    rig.governor.clock_mut().now += Duration::from_secs_f64(load * deadline(FRAMES));
+    rig.governor.note_report(&report);
+    rig.governor.end_block(FRAMES, units, true);
+    assert!(report.is_complete());
+    assert_eq!(rig.governor.stats().missed_blocks, 0);
+    assert_eq!(rig.governor.budget(), before);
+    // A report of missed jobs counts as a whole deadline.
+    rig.governor.begin_block();
+    rig.governor.clock_mut().now += Duration::from_secs_f64(load * deadline(FRAMES));
+    rig.governor.note_report(&BlockReport {
+        rendered: 3,
+        missed: 1,
+    });
+    rig.governor.end_block(FRAMES, units, true);
+    assert_eq!(rig.governor.last_load(), 1.0);
+    assert_eq!(rig.governor.stats().missed_blocks, 1);
+    assert!(rig.governor.budget() < before);
+}
+
+#[test]
 fn a_quiet_or_silent_stretch_keeps_what_was_learnt() {
     let mut rig = Rig::new(GovernorConfig::default());
     rig.run(OVERLOAD, blocks_in(1.0));
