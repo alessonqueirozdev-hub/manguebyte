@@ -1585,7 +1585,9 @@ fn a_partial_bank_does_not_use_the_heap() {
 /// The effects a synth workstation needs, at their heaviest settings.
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
-    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, RingCarrier, RingModulator, Tremolo};
+    use manguebyte_dsp::{
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingCarrier, RingModulator, Tremolo,
+    };
 
     check(
         "Bitcrusher",
@@ -1616,6 +1618,23 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_stereo_phase(0.25)
             .with_mix(0.6),
     );
+
+    check(
+        "FrequencyShifter",
+        FrequencyShifter::<f32>::new()
+            .with_shift_hz(-170.0)
+            .with_feedback(0.9)
+            .with_mix(0.8),
+    );
+    let mut shifter = FrequencyShifter::<f32>::new();
+    shifter.prepare(&SPEC);
+    assert_no_heap_use("FrequencyShifter by the sample", || {
+        for n in 0..512 {
+            let x = (n as f32 * 0.01).sin();
+            let _ = shifter.process_sample(0, x, false);
+            let _ = shifter.process_sample(1, x, true);
+        }
+    });
 
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
@@ -1658,7 +1677,7 @@ fn the_workstation_effects_do_not_use_the_heap() {
 
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
-    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, RingModulator, Tremolo};
+    use manguebyte_dsp::{AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, Tremolo};
 
     let mut crusher = Bitcrusher::<f32>::new();
     crusher.prepare(&SPEC);
@@ -1668,6 +1687,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     pan.prepare(&SPEC);
     let mut ring = RingModulator::<f32>::new();
     ring.prepare(&SPEC);
+    let mut shifter = FrequencyShifter::<f32>::new();
+    shifter.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1714,6 +1735,11 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             ring.set_mix(turn / 14.0);
             ring.set_stereo_phase(turn / 14.0);
             ring.process(&mut buffer);
+
+            shifter.set_shift_hz(300.0 * turn - 2_000.0);
+            shifter.set_feedback(0.9 - turn / 7.0);
+            shifter.set_mix(turn / 14.0);
+            shifter.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

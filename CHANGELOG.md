@@ -123,6 +123,17 @@ break the API.
   out at exactly the sum and the difference of the two frequencies, each
   at half its level, and every other bin, the tone's and the carrier's
   among them, is empty to within 1e-9.
+- `FrequencyShifter`: every partial moved by the same number of hertz, up
+  or down, by the single-sideband method of the Bode shifter, with
+  feedback and a mix; `process_sample` gives both sidebands. The 90-degree
+  network is a pair of all-pass chains, the branches of an elliptic
+  half-band filter (Valenzuela and Constantinides) moved up by a quarter
+  of the sample rate, with as many sections as it takes to hold the image
+  90 dB down from 20 Hz to as far below half the sample rate: 16 at
+  44.1 and 48 kHz, 18 at 96 kHz, 20 at 192 kHz, and no latency. Measured
+  from the coefficients on a fine grid, and by FFT on tones shifted up,
+  down and through 0 Hz: the shifted tone at its own level to 1e-4, the
+  image more than 90 dB down, nothing else above 1e-7.
 
 ### Formats
 
