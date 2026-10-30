@@ -179,6 +179,8 @@ mod system {
     /// four opaque bytes, which the larger size covers everywhere.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
+    // Read by the system, not by Rust.
+    #[allow(dead_code)]
     struct SchedParam {
         sched_priority: c_int,
         opaque: [u8; 4],
@@ -273,10 +275,10 @@ mod system {
     use super::Priority;
 
     #[derive(Default)]
-    pub(super) struct Restore;
+    pub(super) struct Restore(());
 
     pub(super) fn promote() -> (Priority, Restore) {
-        (Priority::Normal, Restore)
+        (Priority::Normal, Restore(()))
     }
 
     pub(super) fn restore(_restore: &mut Restore) {}
