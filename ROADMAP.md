@@ -343,9 +343,15 @@ our own, and nothing claimed before its test exists.
   cancelling, and pictures fitted and sharp at 2x done
   ([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)); files
   dropped from other programs onto the same drop targets done
-  ([ADR 0010](docs/adr/0010-application-windows.md)); dragging out of the
-  window, rows of different heights, multi-line text and drag and drop by
-  keyboard not started ([TECH_DEBT](docs/TECH_DEBT.md) items 96 and 97)
+  ([ADR 0010](docs/adr/0010-application-windows.md)); tabs and a sidebar
+  of pages switched without rebuilding the window, hidden pages costing
+  nothing (not polled, laid out, drawn or asking for frames, tested),
+  action buttons in three looks and a confirmation dialog inside the
+  window with a focus trap done
+  ([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)); dragging out of the window, rows of
+  different heights, multi-line text, drag and drop by keyboard, dialogs
+  with content of their own and overflowing tab bars not started
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97 and 105)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,

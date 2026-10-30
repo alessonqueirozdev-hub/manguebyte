@@ -30,6 +30,18 @@ Documentation: <https://docs.rs/manguebyte-ui>
   wheel, the keys and nested views) and `list_view` (rows the application
   keeps, only those in sight drawn, with selection, the keyboard and
   activation). Popup menus, hover and tooltips.
+- Navigation: `tabs` and `sidebar` (with section headers and icons)
+  show one page at a time from a `State<usize>`, switched by clicks, the
+  arrows, Control+Tab, assistive technology or the application, without
+  building anything again. Hidden pages keep their widgets' state and
+  cost nothing: they are not polled, laid out, drawn or given frames
+  (`Shown`, `UpdateCx::show`).
+- `action_button`: primary, secondary and destructive looks with an
+  optional `Icon` and a disabled state, its presses counted in a polled
+  state. `confirm_dialog` with `IntoView::with_dialog`: a confirmation
+  inside the window over a scrim, holding the focus and every key until
+  answered (Escape cancels, Enter presses the default), its answer
+  polled from a `DialogState`.
 - Audio widgets: `waveform_view` (a sample drawn from a multi-resolution
   `Waveform` summary, with zoom, markers, a selection and a playhead),
   `piano_keyboard` (notes from the pointer and the computer's letters,
@@ -71,7 +83,12 @@ screen in a window on Windows. `examples/design_bench.rs` measures what
 the design costs (a whole repaint, an idle frame, a hover transition, a
 shadow blurred and cached):
 
+`examples/pages_demo.rs` draws a plugin generator's screen with tabs
+(Synth, Effects, Presets) and a confirmation dialog, and an organ
+console with a sidebar of divisions, in both themes:
+
 ```text
+cargo run -p manguebyte-ui --example pages_demo -- <folder>
 cargo run -p manguebyte-ui --example sampler_screen -- <folder>
 cargo run -p manguebyte-gui --example sampler_window
 cargo run -p manguebyte-ui --example design_bench --release

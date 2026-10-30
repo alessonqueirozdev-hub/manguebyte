@@ -928,11 +928,83 @@ the language the person picks:
   and 2x; steady frames before and after a switch make no heap call; the
   screen is idle before and after a switch. Limits: TECH_DEBT 102.
 
+Navigation, action buttons and a confirmation dialog inside the window,
+for screens that switch what part of a window shows (Parabolic's Synth,
+Effects and Presets pages, Caecilia's organ divisions)
+([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)):
+
+- `tabs(name, selected)` and `sidebar(name, selected)` build `Pages`:
+  `.page(title, view)`, `.icon(Icon)` for the last page and
+  `.section(title)` headers. The page shown is the one a `State<usize>`
+  says (a number past the last shows the last); a click, the arrows
+  along the bar (Left and Right for tabs, Up and Down for a sidebar),
+  Home and End, Control+Tab and Control+Shift+Tab from anywhere inside
+  the pages, assistive technology and the application all set it. The
+  bar is one Tab stop, a `Role::TabList` whose tabs are `Role::Tab`
+  items that say whether they are selected; each page is inside a
+  `Role::TabPanel` named as its tab; section headers are label items.
+  Every name is a `TextSource`. The selection indicator (an underline
+  for tabs, a tinted row with an accent bar for a sidebar) slides over
+  the base duration and jumps with motion off.
+- Switching pages builds nothing again. Hidden pages are kept with
+  their widgets' state but are not polled, measured, laid out, drawn,
+  hit, focused or described, and ask for no frames: an idle hidden page
+  costs nothing. A switch lays out again and draws the bar and the
+  content area only. A widget in the page being hidden loses the focus.
+  This is general: a widget can show only some of its children
+  (`UpdateCx::show`, `Shown`), and `Root::access` is `None` for what is
+  hidden.
+- `action_button(label)`: an `ActionButton` with a `TextSource` label,
+  `.primary()`, secondary by default, or `.destructive()` (the theme's
+  danger colour), an optional `Icon`, `.disabled()` or
+  `.enabled(source)` (drawn faded, not focusable, described as
+  disabled), the root's eased hover, press and focus ring, and a count
+  of presses in a `State<u64>` the application polls. A click takes the
+  focus. `Icon` is a small drawing in the colour of its text.
+- `confirm_dialog(state, title, message)` and
+  `IntoView::with_dialog`: a `ConfirmDialog` over a view, a scrim and a
+  card with the large elevation, a title, a message and two action
+  buttons (`.confirm_label`, `.cancel_label`, `.destructive()`,
+  `.cancel_by_default()`). The application opens it through a
+  `DialogState` (`open`, or `ActionButton::opens`) and polls the answer
+  (`result`, `take_result`, a `DialogResult`), as other results in the
+  interface are polled. While it is open the rest of the window takes no
+  pointer, focus or actions, Tab goes round its buttons, and every key
+  is its own: Escape cancels and Enter presses the button with the
+  focus, or the default one. It opens with the focus on its default
+  button and gives the focus back to whoever had it when it closes. It
+  is a `Role::Dialog` named by its title and described by its message.
+  The machinery is general: `UpdateCx::set_modal`, `Root::modal` and
+  `UpdateCx::request_focus`.
+- Accessibility: roles `TabList`, `Tab`, `TabPanel` and `Dialog`; the
+  check asks tabs to say whether they are selected and tab lists, tab
+  panels and dialogs to have a name.
+- Tested headless (`tests/navigation.rs`, `buttons.rs`, `dialog.rs`,
+  `golden.rs`, `realtime.rs`): the keys and Control+Tab, roles, names and
+  selected states, hidden pages never polled, painted or measured and
+  asking for no frames over 200 frames, widget state and scroll offsets
+  kept over round trips with the same widgets, the damage of a switch
+  inside the bar and the content area at 1x, 1.25x and 2x, the indicator's
+  frames with motion and its jump without, the three button looks, the
+  disabled state, hover and press motion damage, the dialog's focus
+  trap, Escape and Enter, focus returned to the opener, the scrim taking
+  the pointer, a language switch renaming tabs, panels, buttons and the
+  open dialog in the next frame, steady frames with pages and an open
+  dialog making no heap call, and golden images of the tab bar, the
+  sidebar, the buttons and the dialog at 1x and 2x in both themes.
+  `examples/pages_demo.rs` draws a Parabolic-like screen and an organ
+  console. Limits: TECH_DEBT 105.
+
 ### Breaking
 
 - In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
   must name it. A `Label::from_state` whose state is set to the same
   text again no longer lays out again.
+
+- In `manguebyte-ui`: Control+Tab no longer moves the focus as Tab does;
+  a Control+Tab the focused widget does not use goes to the widgets
+  containing it (tabs change page with it) and is otherwise left to the
+  host.
 
 - In `manguebyte-ui`'s theme (ADR 0011): `Palette`'s fields are new.
   The old `text_muted` is `text_secondary` (and `text_muted` is now a
