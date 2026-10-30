@@ -27,8 +27,8 @@ use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
     Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme,
-    WheelState, action_button, column, combo, confirm_dialog, knob, label, mod_wheel, pitch_wheel,
-    row, sidebar, tabs, text_field,
+    WaveData, WheelState, action_button, card, column, combo, confirm_dialog, knob, label,
+    mod_wheel, pitch_wheel, row, sidebar, tabs, text_field, wave_view, wavetable_view,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -142,6 +142,60 @@ fn the_wheels_match_their_goldens() {
         ("wheels-light@2x", 2.0, Theme::light()),
     ] {
         let ui = wheels(scale, theme);
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
+}
+
+/// One cycle and a wavetable of 12 frames from a sine to a saw, built with
+/// `manguebyte_dsp::Wavetable`, at a position between two frames.
+fn oscillators(scale: f32, theme: Theme) -> Harness {
+    let frames: Vec<Vec<f32>> = (0..12)
+        .map(|frame| {
+            let t = frame as f32 / 11.0;
+            (0..512)
+                .map(|i| {
+                    let phase = i as f32 / 512.0 * std::f32::consts::TAU;
+                    let saw: f32 = (1..=24)
+                        .map(|h| (phase * h as f32).sin() / h as f32)
+                        .sum::<f32>()
+                        * 0.55;
+                    phase.sin() + (saw - phase.sin()) * t
+                })
+                .collect()
+        })
+        .collect();
+    let table = manguebyte_dsp::Wavetable::new(&frames).expect("a wavetable");
+    let data = WaveData::from_wavetable(&table);
+    // On a card, whose surface the stack hides what is behind with.
+    let view = card(
+        row((
+            wave_view("Cycle", data.clone())
+                .position(|| 7.5)
+                .width(150.0),
+            wavetable_view("Table", data, || 7.5).flex(1.0),
+        ))
+        .spacing(8.0),
+    )
+    .padding(12.0);
+    let mut ui = Harness::new(view, Size::new(440.0, 180.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    ui
+}
+
+#[test]
+fn the_oscillator_views_match_their_goldens() {
+    let snapshots = snapshots();
+    for (name, scale, theme) in [
+        ("oscillators@1x", 1.0, Theme::dark()),
+        ("oscillators@2x", 2.0, Theme::dark()),
+        ("oscillators-light@1x", 1.0, Theme::light()),
+        ("oscillators-light@2x", 2.0, Theme::light()),
+    ] {
+        let ui = oscillators(scale, theme);
         assert!(ui.pixels() == &ui.render_fresh(), "{name}");
         if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
             panic!("{mismatch}");

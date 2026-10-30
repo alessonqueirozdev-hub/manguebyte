@@ -221,7 +221,8 @@ pub use widgets::{
     text_field, toggle, waveform_view, waveform_view_named,
 };
 pub use widgets::{
-    BEND_RETURN_AFTER, Wheel, WheelBinding, WheelKind, WheelState, mod_wheel, pitch_wheel,
+    BEND_RETURN_AFTER, MAX_STACKED_FRAMES, WaveData, WaveView, WavetableView, Wheel, WheelBinding,
+    WheelKind, WheelState, mod_wheel, pitch_wheel, wave_view, wavetable_view,
 };
 pub use widgets::{
     EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,

@@ -1,0 +1,16 @@
+fill rect(0 0 440 180) solid(#f4f3efff)
+shadow rounded_rect(0 0 440 180 radii 18 18 18 18) offset 0 12 blur 32 spread -20 solid(#14120c40)
+fill rounded_rect(0 0 440 180 radii 18 18 18 18) linear(0 0, 0 180, pad [0 #ffffffff, 1 #fbfaf7ff])
+stroke rounded_rect(0.5 0.5 439 179 radii 17.5 17.5 17.5 17.5) width 1 cap butt join miter 4 solid(#14120c14)
+fill path(evenodd M 0 19 L 0 18 C 0 8.058874 8.058874 0 18 0 L 422 0 C 431.94113 0 440 8.058874 440 18 L 440 19 Z M 0 19 L 0 19 C 0 9.058874 8.058874 1 18 1 L 422 1 C 431.94113 1 440 9.058874 440 19 L 440 19 Z) solid(#ffffffb3)
+clip rect(12 12 150 156) {
+  fill rect(14 90 146 1) solid(#14120c24)
+  fill rect(51 14 1 152) solid(#14120c14)
+  fill rect(87 14 1 152) solid(#14120c14)
+  fill rect(124 14 1 152) solid(#14120c14)
+  columns rect(14 11 146 158) 146 entries fnv1a 04c66f25ea961c95 solid(#ff5a1f4d)
+  stroke path(nonzero 146 segments 146 points bounds rect(14 36.747242 146 106.50554) fnv1a 43568a8abd9ac305) width 2 cap round join round solid(#ff7a45ff)
+}
+image 258x156 fnv1a ef4e134d4cabd76a rect(170 12 258 156) nearest
+columns rect(211.88692 35.94059 182.71837 88.22063) 183 entries fnv1a e1313646bf6e4371 linear(211.88692 39.94059, 211.88692 120.16122, pad [0 #ff5a1f73, 1 #ff5a1f00])
+stroke path(nonzero 183 segments 183 points bounds rect(211.88692 51.638943 182.71837 56.823933) fnv1a 00fd1f1a2d5a1a8e) width 2 cap round join round solid(#ff7a45ff)

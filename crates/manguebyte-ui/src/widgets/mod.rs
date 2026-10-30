@@ -20,6 +20,8 @@
 //! | [`ZoneMap`] | [`List`](crate::Role::List), its zones [`ListItem`](crate::Role::ListItem)s | zones over keys and velocities, lined up with a keyboard over the same span, and where they overlap | the zones and the selection, by dragging zones and their edges, a band, the keys, and drops that make zones |
 //! | [`WaveformView`] | [`Group`](crate::Role::Group), its markers [`Slider`](crate::Role::Slider)s | a sample's channels, drawn from a [`Waveform`]'s summary, markers, a selection and a playhead | the markers (within their rules, onto zero crossings if asked), the selection and the zoom, by dragging, the wheel and the keys |
 //! | [`Wheel`] | [`Slider`](crate::Role::Slider) | a pitch bend or modulation wheel in a slot, its value glowing | a parameter or a [`WheelState`], by dragging, the wheel and the keys; the pitch bend wheel springs back when let go |
+//! | [`WaveView`] | [`Image`](crate::Role::Image) | one cycle of a waveform from a [`WaveData`]: samples, frames or a wavetable, at a polled position | nothing |
+//! | [`WavetableView`] | [`Image`](crate::Role::Image) | a wavetable's frames stacked in depth, the frame at a polled position lit | nothing |
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
 //! [`stack`](crate::stack), [`panel`](crate::panel)) are
@@ -62,6 +64,7 @@ mod text_field;
 mod toggle;
 mod wave_data;
 mod waveform;
+mod wavetable;
 mod wheel;
 mod zone_map;
 
@@ -91,6 +94,9 @@ pub use wave_data::{MAX_ZERO_SEARCH, Waveform};
 pub use waveform::{
     MAX_PIXELS_PER_FRAME, Marker, MarkerKind, MarkerOrder, WaveformEvent, WaveformState,
     WaveformView, ZOOM_STEP, waveform_view, waveform_view_named,
+};
+pub use wavetable::{
+    MAX_STACKED_FRAMES, WaveData, WaveView, WavetableView, wave_view, wavetable_view,
 };
 pub use wheel::{
     BEND_RETURN_AFTER, Wheel, WheelBinding, WheelKind, WheelState, mod_wheel, pitch_wheel,

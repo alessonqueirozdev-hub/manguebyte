@@ -13,6 +13,9 @@ homepage.workspace = true
 
 [dependencies]
 manguebyte-core.workspace = true
+# Only for `Wavetable`, whose frames the wave views show. Already a
+# dependency of `manguebyte-plugin`, so nothing new is built.
+manguebyte-dsp.workspace = true
 manguebyte-gfx.workspace = true
 manguebyte-params.workspace = true
 # Only for the editor contract (`manguebyte_plugin::editor`): gestures, the

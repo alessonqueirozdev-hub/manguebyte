@@ -853,6 +853,7 @@ name = "manguebyte-ui"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+ "manguebyte-dsp",
  "manguebyte-gfx",
  "manguebyte-params",
  "manguebyte-plugin",

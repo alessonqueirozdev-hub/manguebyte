@@ -402,6 +402,46 @@ fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
 }
 
 #[test]
+fn steady_frames_of_the_oscillator_views_make_no_heap_call() {
+    use manguebyte_ui::{AtomicSource, WaveData, row, wave_view, wavetable_view};
+
+    let frames: Vec<Vec<f32>> = (0..16)
+        .map(|k| {
+            (0..256)
+                .map(|i| (i as f32 / 256.0 * std::f32::consts::TAU * (1 + k) as f32).sin())
+                .collect()
+        })
+        .collect();
+    let data = WaveData::from_frames(&frames);
+    let position = Arc::new(manguebyte_core::AtomicF32::new(3.0));
+    let view = row((
+        wave_view("Cycle", data.clone()).position(AtomicSource::new(Arc::clone(&position))),
+        wavetable_view("Table", data, AtomicSource::new(Arc::clone(&position))),
+    ));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(420.0, 160.0), 2.0);
+    ui.advance_ms(100);
+    // The audio thread stores the same position every block: nothing
+    // changes, nothing is read but the atomics, nothing touches the heap.
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            position.store(3.0, Ordering::Relaxed);
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+    // A new position draws both again, once.
+    position.store(4.25, Ordering::Relaxed);
+    assert_eq!(ui.frame().painted, 2);
+    ui.frame();
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after made {calls} heap calls");
+}
+
+#[test]
 fn steady_frames_of_wheels_make_no_heap_call() {
     use manguebyte_ui::{WheelState, mod_wheel, pitch_wheel, row};
 
