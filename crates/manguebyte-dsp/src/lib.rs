@@ -71,6 +71,7 @@ mod testing;
 pub mod timeline;
 mod tremolo;
 pub mod wavetable;
+mod widener;
 pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
@@ -109,6 +110,7 @@ pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
 pub use tremolo::{AutoPan, Tremolo};
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};
+pub use widener::StereoWidener;
 
 use manguebyte_core::{AudioBuffer, Sample};
 

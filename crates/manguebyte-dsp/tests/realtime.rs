@@ -1586,7 +1586,8 @@ fn a_partial_bank_does_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingCarrier, RingModulator, Tremolo,
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingCarrier, RingModulator, StereoWidener,
+        Tremolo,
     };
 
     check(
@@ -1636,6 +1637,14 @@ fn the_workstation_effects_do_not_use_the_heap() {
         }
     });
 
+    check(
+        "StereoWidener",
+        StereoWidener::<f32>::new()
+            .with_width(2.0)
+            .with_bass_mono(true)
+            .with_bass_mono_hz(150.0),
+    );
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1677,7 +1686,9 @@ fn the_workstation_effects_do_not_use_the_heap() {
 
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
-    use manguebyte_dsp::{AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, Tremolo};
+    use manguebyte_dsp::{
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, StereoWidener, Tremolo,
+    };
 
     let mut crusher = Bitcrusher::<f32>::new();
     crusher.prepare(&SPEC);
@@ -1689,6 +1700,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     ring.prepare(&SPEC);
     let mut shifter = FrequencyShifter::<f32>::new();
     shifter.prepare(&SPEC);
+    let mut widener = StereoWidener::<f32>::new();
+    widener.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1740,6 +1753,11 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             shifter.set_feedback(0.9 - turn / 7.0);
             shifter.set_mix(turn / 14.0);
             shifter.process(&mut buffer);
+
+            widener.set_width(turn / 7.0);
+            widener.set_bass_mono(step % 3 != 1);
+            widener.set_bass_mono_hz(40.0 + 60.0 * turn);
+            widener.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

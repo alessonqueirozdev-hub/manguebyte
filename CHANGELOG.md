@@ -134,6 +134,13 @@ break the API.
   from the coefficients on a fine grid, and by FFT on tones shifted up,
   down and through 0 Hz: the shifted tone at its own level to 1e-4, the
   image more than 90 dB down, nothing else above 1e-7.
+- `StereoWidener`: the side of a stereo signal scaled by a width from 0
+  (mono) to 2, the mid never touched, with optional bass mono that keeps
+  only the side above a cutoff (a fourth-order Linkwitz-Riley split of the
+  side). Measured: at a width of 1 the output null-tests against the input
+  sample for sample; the mono sum `L + R` is unchanged to 1e-14 at every
+  width, with bass mono on or off; the side below the cutoff follows the
+  crossover's high band to 0.05 dB (24.6 dB down an octave below it).
 
 ### Formats
 
