@@ -8,6 +8,35 @@ under one name; depend on this crate directly to use only this part.
 
 Documentation: <https://docs.rs/manguebyte-dsp>
 
+## Effects
+
+Besides the filters, dynamics, delay, chorus, flanger, phaser, reverb,
+convolution and spectral effects, the crate has the effects a synth
+workstation needs, each a `Processor` with real-time-safe setters that
+glide, tested with numbers:
+
+- `Bitcrusher`: bit depth as a continuous value, optional triangular
+  dither, rate reduction by holding, with an optional elliptic
+  anti-aliasing low-pass.
+- `Tremolo` and `AutoPan`: level or position moved by an `Lfo`, in hertz
+  or locked to the transport's tempo, with a stereo phase offset.
+- `RingModulator`: by its own cosine carrier or by the sidechain.
+- `FrequencyShifter`: every partial moved by the same hertz, up or down,
+  through an elliptic all-pass 90-degree network; both sidebands from
+  `process_sample`.
+- `StereoWidener`: mid/side width that never touches the mono sum, with
+  optional bass mono below a cutoff.
+- `TransientShaper`: attack and sustain gains from envelope followers.
+- `MultibandCompressor`: three Linkwitz-Riley bands, a `Compressor` on
+  each; idle bands sum flat.
+- `TapeSaturation`: emphasis, an oversampled asymmetric curve, and wow and
+  flutter with seeded drift.
+- `Vocoder`: 8 to 32 bands, the modulator from the sidechain, with formant
+  shift.
+- `GranularDelay`: windowed grains with position spray, pitch per grain,
+  stereo spread and feedback, from a fixed pool of 64.
+- `FormantFilter`: vowels A-E-I-O-U from parallel resonances, morphed.
+
 ## Transport and tempo map
 
 A host tells a processor where its transport is (`Transport`, in the

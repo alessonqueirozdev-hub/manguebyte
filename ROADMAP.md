@@ -114,6 +114,14 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Reverb (feedback delay network)
 - ✅ Chorus and flanger, phaser, dry/wet mixing with latency compensation,
   panner, envelope follower, interpolated delay lines
+- ✅ Workstation effects, each measured: bitcrusher and sample-rate
+  reducer, tremolo and auto-pan with tempo sync, ring modulator, frequency
+  shifter (an elliptic all-pass 90-degree network, image 90 dB down),
+  stereo widener with bass mono, transient shaper, three-band multiband
+  compressor, tape saturation with wow, flutter and drift, a channel
+  vocoder of 8 to 32 bands, a granular delay with a fixed grain pool, and
+  a formant filter morphing A-E-I-O-U. Not yet timed, nor in
+  `manguebyte-web` or Parabolic (TECH_DEBT 104)
 - ✅ Convolution: uniformly partitioned, with zero latency or a latency of
   one partition, true stereo, and responses swapped with a crossfade while
   playing. A non-uniformly partitioned scheme, cheaper for long responses
