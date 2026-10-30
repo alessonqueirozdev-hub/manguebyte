@@ -195,6 +195,14 @@ break the API.
   semitones down put the cloud's peak at the shifted pitch; spray keeps
   every echo within the position and the spray; a fixed seed repeats the
   render exactly for any block size, and another seed differs.
+- `FormantFilter`: the first three formants of a vowel as parallel
+  state-variable band-pass resonances, morphing A, E, I, O, U evenly in
+  pitch, with a shift of up to an octave, gain and mix. The formant
+  frequencies are Peterson and Barney's (1952) averages for men; the
+  bandwidths and levels are the crate's own. Measured on the impulse
+  response: every formant of every vowel is a peak within 1% of the table
+  (4% where two formants lie within an octave), at its level to 1.5 dB;
+  the morph and the shift put the formants where they say.
 
 ### Formats
 

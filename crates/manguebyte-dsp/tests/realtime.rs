@@ -1586,9 +1586,9 @@ fn a_partial_bank_does_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, GranularDelay, LfoShape, MultibandCompressor,
-        RingCarrier, RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo,
-        Vocoder,
+        AutoPan, Bitcrusher, FormantFilter, FrequencyShifter, GranularDelay, LfoShape,
+        MultibandCompressor, RingCarrier, RingModulator, StereoWidener, TapeSaturation,
+        TransientShaper, Tremolo, Vocoder,
     };
 
     check(
@@ -1670,6 +1670,14 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_flutter_cents(10.0)
             .with_drift(1.0)
             .with_mix(0.5),
+    );
+
+    check(
+        "FormantFilter",
+        FormantFilter::<f32>::new()
+            .with_vowel(2.5)
+            .with_shift(5.0)
+            .with_mix(0.8),
     );
 
     // At the most grains: the pool is full, and grains keep being refused.
@@ -1755,8 +1763,9 @@ fn the_workstation_effects_do_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, GranularDelay, LfoShape, MultibandCompressor,
-        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
+        AutoPan, Bitcrusher, FormantFilter, FrequencyShifter, GranularDelay, LfoShape,
+        MultibandCompressor, RingModulator, StereoWidener, TapeSaturation, TransientShaper,
+        Tremolo, Vocoder,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1781,6 +1790,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     vocoder.prepare(&SPEC);
     let mut cloud = GranularDelay::<f32>::new();
     cloud.prepare(&SPEC);
+    let mut vowel = FormantFilter::<f32>::new();
+    vowel.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1884,6 +1895,12 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             cloud.set_mix(turn / 14.0);
             cloud.set_seed(u64::from(step));
             cloud.process(&mut buffer);
+
+            vowel.set_vowel(turn / 3.5);
+            vowel.set_shift(turn - 7.0);
+            vowel.set_gain_db(turn);
+            vowel.set_mix(turn / 14.0);
+            vowel.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));
