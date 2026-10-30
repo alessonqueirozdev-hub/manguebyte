@@ -1,0 +1,33 @@
+fill rect(0 0 380 120) solid(#101116ff)
+clip rect(7 7 89 52) {
+  shadow rounded_rect(17 17 69 32 radii 10 10 10 10) offset 0 2 blur 4 spread 0 solid(#00000066)
+  fill rounded_rect(17 17 69 32 radii 10 10 10 10) solid(#1c1f28ff)
+  stroke rounded_rect(17.25 17.25 68.5 31.5 radii 9.75 9.75 9.75 9.75) width 0.5 cap butt join miter 4 solid(#ffffff0f)
+  fill path(evenodd M 17 27.5 L 17 27 C 17 21.477152 21.477152 17 27 17 L 76 17 C 81.52285 17 86 21.477152 86 27 L 86 27.5 Z M 17 27.5 L 17 27.5 C 17 21.977152 21.477152 17.5 27 17.5 L 76 17.5 C 81.52285 17.5 86 21.977152 86 27.5 L 86 27.5 Z) solid(#ffffff0a)
+  text "Cancel" size 12 weight 500 opsz 14 solid(#989eafff) [13 31.583984 37.365234, 115 40.384766 37.365234, 181 47.19922 37.365234, 128 54.41797 37.365234, 137 61.34375 37.365234, 174 68.39258 37.365234]
+  shadow rounded_rect(15 15 73 36 radii 12 12 12 12) width 2 cap round join round offset 0 0 blur 8 spread 0 solid(#ff7a3d53)
+  stroke rounded_rect(15 15 73 36 radii 12 12 12 12) width 2 cap round join round solid(#ff7a3da6)
+}
+shadow rounded_rect(102 16 106 32 radii 10 10 10 10) offset 0 6 blur 20 spread -6 solid(#ff7a3dcc)
+fill rounded_rect(102 16 106 32 radii 10 10 10 10) linear(0 16, 0 48, pad [0 #ffb15cff, 1 #ff8d48ff])
+fill path(evenodd M 102 26.5 L 102 26 C 102 20.477152 106.47715 16 112 16 L 198 16 C 203.52284 16 208 20.477152 208 26 L 208 26.5 Z M 102 26.5 L 102 26.5 C 102 20.977152 106.47715 16.5 112 16.5 L 198 16.5 C 203.52284 16.5 208 20.977152 208 26.5 L 208 26.5 Z) solid(#ffffff0a)
+text "Export plugin" size 12 weight 500 opsz 14 solid(#1a0d06ff) [21 116.97266 36.365234, 231 124.208984 36.365234, 198 130.89453 36.365234, 187 138.3125 36.365234, 200 145.56055 36.365234, 211 150.40625 36.365234, 444 154.49023 36.365234, 198 157.68945 36.365234, 174 165.10742 36.365234, 216 168.13086 36.365234, 150 175.34961 36.365234, 158 182.78516 36.365234, 181 185.8086 36.365234]
+shadow rounded_rect(224 17 89 32 radii 10 10 10 10) offset 0 4 blur 12 spread -4 solid(#fb575d66)
+fill rounded_rect(224 17 89 32 radii 10 10 10 10) solid(#fb575dff)
+fill path(evenodd M 224 27.5 L 224 27 C 224 21.477152 228.47716 17 234 17 L 303 17 C 308.52286 17 313 21.477152 313 27 L 313 27.5 Z M 224 27.5 L 224 27.5 C 224 21.977152 228.47716 17.5 234 17.5 L 303 17.5 C 308.52286 17.5 313 21.977152 313 27.5 L 313 27.5 Z) solid(#ffffff0a)
+fill rounded_rect(240.60156 28 12 1.5 radii 0.75 0.75 0.75 0.75) solid(#1a0d06ff)
+fill rounded_rect(242.60156 30.5 8 9 radii 1.5 1.5 1.5 1.5) solid(#1a0d06ff)
+text "Delete" size 12 weight 500 opsz 14 solid(#1a0d06ff) [19 261.60156 37.365234, 137 270.26172 37.365234, 174 277.31055 37.365234, 137 280.33398 37.365234, 211 287.3828 37.365234, 137 291.3496 37.365234]
+layer opacity 0.45 {
+  shadow rounded_rect(17 65 70 32 radii 10 10 10 10) offset 0 6 blur 20 spread -6 solid(#ff7a3dcc)
+  fill rounded_rect(17 65 70 32 radii 10 10 10 10) linear(0 65, 0 97, pad [0 #ffb15cff, 1 #ff7a3dff])
+  fill path(evenodd M 17 75.5 L 17 75 C 17 69.47715 21.477152 65 27 65 L 77 65 C 82.52285 65 87 69.47715 87 75 L 87 75.5 Z M 17 75.5 L 17 75.5 C 17 69.97715 21.477152 65.5 27 65.5 L 77 65.5 C 82.52285 65.5 87 69.97715 87 75.5 L 87 75.5 Z) solid(#ffffff0a)
+  text "Render" size 12 weight 500 opsz 14 solid(#1a0d06ff) [79 31.506836 85.365234, 137 39.118164 85.365234, 181 46.166992 85.365234, 134 53.385742 85.365234, 137 60.80371 85.365234, 200 67.85254 85.365234]
+}
+layer opacity 0.45 {
+  shadow rounded_rect(103 65 60 32 radii 10 10 10 10) offset 0 2 blur 4 spread 0 solid(#00000066)
+  fill rounded_rect(103 65 60 32 radii 10 10 10 10) solid(#1c1f28ff)
+  stroke rounded_rect(103.25 65.25 59.5 31.5 radii 9.75 9.75 9.75 9.75) width 0.5 cap butt join miter 4 solid(#ffffff0f)
+  fill path(evenodd M 103 75.5 L 103 75 C 103 69.47715 107.47715 65 113 65 L 153 65 C 158.52284 65 163 69.47715 163 75 L 163 75.5 Z M 103 75.5 L 103 75.5 C 103 69.97715 107.47715 65.5 113 65.5 L 153 65.5 C 158.52284 65.5 163 69.97715 163 75.5 L 163 75.5 Z) solid(#ffffff0a)
+  text "Undo" size 12 weight 500 opsz 14 solid(#989eafff) [92 117.61621 85.365234, 181 126.49902 85.365234, 134 133.71777 85.365234, 187 141.13574 85.365234]
+}

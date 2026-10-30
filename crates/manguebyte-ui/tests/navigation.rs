@@ -518,10 +518,18 @@ fn a_sidebar_has_sections_icons_and_the_keys_down_its_length() {
     assert!(manuals.bounds.bottom() <= great.bounds.y);
     assert!(pedal_header.bounds.bottom() <= pedal.bounds.y);
     assert!(manuals.id == list.id && manuals.item.is_some());
-    // Icons are drawn in the text's colour.
+    // Icons are drawn in their text's colour: the selected page's in the
+    // text colour, the other's in the secondary one.
     let dump = ui.dump_of(&list);
-    let text = ui.root().theme().palette.text;
-    assert!(dump.contains(&format!("{text:?}")) || dump.contains("fill rect("));
+    let hex = |c: manguebyte_gfx::Color| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a);
+    let palette = ui.root().theme().palette;
+    let squares: Vec<&str> = dump
+        .lines()
+        .filter(|line| line.starts_with("fill rect(") && !line.contains(&hex(palette.hairline)))
+        .collect();
+    assert_eq!(squares.len(), 2, "{dump}");
+    assert!(squares[0].ends_with(&format!("solid({})", hex(palette.text))));
+    assert!(squares[1].ends_with(&format!("solid({})", hex(palette.text_secondary))));
     ui.assert_accessible();
 
     ui.act(&list, Action::Focus);

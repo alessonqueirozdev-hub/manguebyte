@@ -106,7 +106,7 @@ impl Pill {
 
     /// The primary pill's look in `theme`: its colours from top to bottom,
     /// its text's colour, and its shadow.
-    fn primary_look(theme: &Theme) -> (Color, Color, Color, Shadow) {
+    pub(crate) fn primary_look(theme: &Theme) -> (Color, Color, Color, Shadow) {
         let palette = &theme.palette;
         if theme.elevation.glow.color.a > 0 {
             let shadow = Shadow::new(palette.accent.with_alpha(0xCC))

@@ -6,7 +6,8 @@ use std::rc::Rc;
 use manguebyte_gfx::{Color, Rect, Scene};
 
 /// A small drawing that goes beside a text, such as a page's name in a
-/// [`sidebar`](crate::sidebar).
+/// [`sidebar`](crate::sidebar) or an
+/// [`action_button`](crate::action_button)'s label.
 ///
 /// It is a function that draws into a scene, inside the square it is
 /// given, in the colour it is given: the colour of the text beside it, so

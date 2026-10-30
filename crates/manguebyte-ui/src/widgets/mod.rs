@@ -8,6 +8,7 @@
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
 //! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
 //! | [`Pill`] | [`Button`](crate::Role::Button) | a label, a status dot | a count of presses the application polls, by clicking, Space and Enter |
+//! | [`ActionButton`] | [`Button`](crate::Role::Button) | a label from a [`TextSource`], an optional icon, a primary, secondary or destructive look, disabled or not | a count of presses the application polls, by clicking, Space and Enter |
 //! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
@@ -36,6 +37,7 @@
 //! words ([`Param::plain_to_text`](manguebyte_params::Param::plain_to_text)
 //! and its unit), and switches give theirs to assistive technology.
 
+mod action;
 mod adjust;
 mod canvas;
 mod combo;
@@ -60,6 +62,7 @@ mod wave_data;
 mod waveform;
 mod zone_map;
 
+pub use action::{ActionButton, action_button};
 pub use canvas::{Canvas, CanvasCx, canvas};
 pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;

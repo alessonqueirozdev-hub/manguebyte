@@ -212,12 +212,12 @@ pub use tree::NodeId;
 pub use view::{Children, IntoView, View, card, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, Shown, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, ComboBox, Container, Fit, Icon, ImageView, Knob, Label, ListData, ListEvent,
-    ListState, ListView, MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder,
-    Meter, Pages, Pill, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform,
-    WaveformEvent, WaveformState, WaveformView, ZOOM_STEP, canvas, combo, image, knob, label,
-    list_view, list_view_named, meter, pill, scroll_view, sidebar, slider, tabs, text_field,
-    toggle, waveform_view, waveform_view_named,
+    ActionButton, Canvas, CanvasCx, ComboBox, Container, Fit, Icon, ImageView, Knob, Label,
+    ListData, ListEvent, ListState, ListView, MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker,
+    MarkerKind, MarkerOrder, Meter, Pages, Pill, RowCx, ScrollView, ScrollViewBuilder, Slider,
+    TextField, Toggle, Waveform, WaveformEvent, WaveformState, WaveformView, ZOOM_STEP,
+    action_button, canvas, combo, image, knob, label, list_view, list_view_named, meter, pill,
+    scroll_view, sidebar, slider, tabs, text_field, toggle, waveform_view, waveform_view_named,
 };
 pub use widgets::{
     EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,

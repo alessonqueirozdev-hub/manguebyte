@@ -26,8 +26,8 @@ use manguebyte_params::{ChoiceParam, param_set};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    Action, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, column, combo, knob,
-    label, row, sidebar, tabs, text_field,
+    Action, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, action_button, column,
+    combo, knob, label, row, sidebar, tabs, text_field,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -245,6 +245,74 @@ fn division_sidebar(scale: f32, theme: Theme) -> Harness {
     assert!(ui.tab());
     ui.advance_ms(16);
     ui
+}
+
+/// An icon of a bin: a lid and a body.
+fn bin() -> Icon {
+    Icon::new(|scene, square, color| {
+        let unit = square.width / 16.0;
+        let lid = Rect::new(
+            square.x + 2.0 * unit,
+            square.y + 3.0 * unit,
+            12.0 * unit,
+            1.5 * unit,
+        );
+        let body = Rect::new(
+            square.x + 4.0 * unit,
+            square.y + 5.5 * unit,
+            8.0 * unit,
+            9.0 * unit,
+        );
+        scene.fill(RoundedRect::new(lid, 0.75 * unit), color);
+        scene.fill(RoundedRect::new(body, 1.5 * unit), color);
+    })
+}
+
+/// Action buttons in their three looks, one with an icon and one
+/// disabled; the pointer over the primary one and the secondary one
+/// focused from the keyboard.
+fn button_row(scale: f32, theme: Theme) -> Harness {
+    let view = column((
+        row((
+            action_button("Cancel"),
+            action_button("Export plugin").primary(),
+            action_button("Delete").destructive().icon(bin()),
+        ))
+        .spacing(10.0),
+        row((
+            action_button("Render").primary().disabled(),
+            action_button("Undo").disabled(),
+        ))
+        .spacing(10.0),
+    ))
+    .spacing(10.0)
+    .padding(14.0)
+    .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 120.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    let export = ui.get(Role::Button, "Export plugin");
+    ui.move_to(export.center());
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn action_buttons_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = button_row(scale, theme);
+            let name = format!("buttons{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.get(Role::Button, "Cancel").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
 }
 
 #[test]
