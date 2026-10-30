@@ -12,6 +12,8 @@
 //! gives, whatever the number of threads.
 //!
 //! ```
+//! use std::time::Duration;
+//!
 //! use manguebyte_core::pool::{Job, PoolConfig, RenderPool};
 //!
 //! struct Voice {
@@ -28,7 +30,10 @@
 //! let voices = (0..8)
 //!     .map(|index| Voice { level: index as f32, out: vec![0.0; 64] })
 //!     .collect();
-//! let mut pool = RenderPool::new(voices, PoolConfig::with_workers(2));
+//! // A plugin sets the wait limit from its block's budget; an example can
+//! // afford to wait, so that a slow or busy machine misses nothing.
+//! let config = PoolConfig::with_workers(2).wait_limit(Duration::from_secs(10));
+//! let mut pool = RenderPool::new(voices, config);
 //!
 //! // On the audio thread, every block:
 //! let report = pool.run(8);

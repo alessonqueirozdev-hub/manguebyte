@@ -203,7 +203,10 @@ fn every_worker_reports_its_priority() {
 
 #[test]
 fn helpers_of_another_pool_render_jobs() {
-    let mut pool = RenderPool::new(wheres(32), PoolConfig::with_workers(2));
+    let mut pool = RenderPool::new(
+        wheres(32),
+        PoolConfig::with_workers(2).wait_limit(Duration::from_secs(10)),
+    );
     // A first block, so that the workers have seen a block and parked.
     assert!(pool.run(32).is_complete());
     thread::sleep(Duration::from_millis(50));
