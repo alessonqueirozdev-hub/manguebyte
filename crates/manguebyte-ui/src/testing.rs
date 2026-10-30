@@ -430,8 +430,8 @@ impl Harness {
     /// - every text input has its text as its value and takes the focus;
     /// - every combo box has its value as text, can be pressed to open,
     ///   and says whether it is open;
-    /// - every list and scroll view has a name, and every list item says
-    ///   whether it is selected;
+    /// - every list, scroll view, tab list, tab panel and dialog has a
+    ///   name, and every list item and tab says whether it is selected;
     /// - no two widgets with a name share their role and name within the
     ///   same named group, so a screen reader, and
     ///   [`get`](Harness::get), can tell them apart;

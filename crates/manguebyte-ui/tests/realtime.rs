@@ -286,6 +286,59 @@ fn a_steady_frame_with_names_that_follow_the_language_makes_no_heap_call() {
 }
 
 #[test]
+fn a_steady_frame_with_pages_makes_no_heap_call() {
+    use manguebyte_ui::{IntoView, State, TextSource, label, row, sidebar, tabs};
+
+    let params = params();
+    let levels = levels();
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let page = State::new(0_usize);
+    let division = State::new(1_usize);
+    let view = row((
+        sidebar("Divisions", division.clone())
+            .section(title(["Manuals", "Teclados"]))
+            .page(title(["Great", "Grande órgão"]), label("Great"))
+            .page(title(["Swell", "Expressivo"]), label("Swell")),
+        tabs("Sections", page.clone())
+            .page(title(["Synth", "Síntese"]), panel_view(&params, &levels))
+            .page(title(["Effects", "Efeitos"]), label("Reverb"))
+            .flex(1.0),
+    ));
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(700.0, 400.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+    // A switch and a language change may touch it; the frames after do
+    // not, with the panel hidden behind the other tab.
+    page.set(1);
+    division.set(0);
+    language.set(1);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames after a switch made {calls} heap calls"
+    );
+}
+
+#[test]
 fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
     // What the documentation of `TextSource` warns about, and what the
     // test above would catch.

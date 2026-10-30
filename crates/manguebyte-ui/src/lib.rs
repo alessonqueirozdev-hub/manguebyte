@@ -210,14 +210,14 @@ pub use source::{AtomicSource, Source, State, TextSource, Watch};
 pub use theme::{Corners, Elevation, Hue, Palette, Sizes, Spacing, Theme, Typography};
 pub use tree::NodeId;
 pub use view::{Children, IntoView, View, card, column, filled, panel, row, stack};
-pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
+pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, Shown, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, ComboBox, Container, Fit, ImageView, Knob, Label, ListData, ListEvent,
+    Canvas, CanvasCx, ComboBox, Container, Fit, Icon, ImageView, Knob, Label, ListData, ListEvent,
     ListState, ListView, MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder,
-    Meter, Pill, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform,
+    Meter, Pages, Pill, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform,
     WaveformEvent, WaveformState, WaveformView, ZOOM_STEP, canvas, combo, image, knob, label,
-    list_view, list_view_named, meter, pill, scroll_view, slider, text_field, toggle,
-    waveform_view, waveform_view_named,
+    list_view, list_view_named, meter, pill, scroll_view, sidebar, slider, tabs, text_field,
+    toggle, waveform_view, waveform_view_named,
 };
 pub use widgets::{
     EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,

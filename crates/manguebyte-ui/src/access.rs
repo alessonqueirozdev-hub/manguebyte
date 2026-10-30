@@ -68,6 +68,16 @@ pub enum Role {
     /// What is being dragged, drawn under the pointer: its name is the
     /// description the drag was given.
     DragItem,
+    /// A row of tabs, or a sidebar of pages, that chooses which page is
+    /// shown: its value is the name of the page shown.
+    TabList,
+    /// One tab of a tab list: it says whether it is selected.
+    Tab,
+    /// The page a tab shows, named as its tab.
+    TabPanel,
+    /// A window inside the interface that has all input until it is
+    /// answered, such as a confirmation: its description is its message.
+    Dialog,
 }
 
 /// The range of a widget's numeric value.
@@ -494,8 +504,8 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
 /// - every text input has its text as its value and takes the focus;
 /// - every combo box has its value as text, can be pressed to open, and
 ///   says whether it is open;
-/// - every list and scroll view has a name, and every list item says
-///   whether it is selected;
+/// - every list, scroll view, tab list, tab panel and dialog has a name,
+///   and every list item and tab says whether it is selected;
 /// - no two widgets with a name share their role and name within the same
 ///   named group (groups with no name only arrange their children, and a
 ///   screen reader does not tell them apart);
@@ -565,13 +575,17 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
                 node.name
             ));
         }
-        if node.role == Role::ListItem && node.state.selected.is_none() {
+        if matches!(node.role, Role::ListItem | Role::Tab) && node.state.selected.is_none() {
             return Some(format!(
-                "list item {:?} does not say whether it is selected",
-                node.name
+                "{:?} {:?} does not say whether it is selected",
+                node.role, node.name
             ));
         }
-        if matches!(node.role, Role::List | Role::ScrollView) && node.name.trim().is_empty() {
+        if matches!(
+            node.role,
+            Role::List | Role::ScrollView | Role::TabList | Role::TabPanel | Role::Dialog
+        ) && node.name.trim().is_empty()
+        {
             return Some(format!(
                 "{:?} {:?} has no name, so a screen reader cannot say what it shows",
                 node.role, entry.id

@@ -20,14 +20,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use manguebyte_gfx::Size;
 use manguebyte_gfx::snapshot::Snapshots;
+use manguebyte_gfx::{Rect, RoundedRect, Size};
 use manguebyte_params::{ChoiceParam, param_set};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    Action, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, column, combo, knob, label,
-    row, text_field,
+    Action, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, column, combo, knob,
+    label, row, sidebar, tabs, text_field,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -191,6 +191,78 @@ fn text_and_menus_match_their_goldens() {
         assert!(ui.pixels() == &ui.render_fresh(), "{name}");
         if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
             panic!("{mismatch}");
+        }
+    }
+}
+
+/// An icon of organ pipes: three upright bars of different heights.
+fn pipes() -> Icon {
+    Icon::new(|scene, square, color| {
+        let width = square.width / 5.0;
+        for (at, height) in [(0.0, 0.6), (2.0, 1.0), (4.0, 0.8)] {
+            let tall = square.height * height;
+            let bar = Rect::new(square.x + at * width, square.bottom() - tall, width, tall);
+            scene.fill(RoundedRect::new(bar, width * 0.5), color);
+        }
+    })
+}
+
+/// A tab bar over its pages, the second shown, the bar focused from the
+/// keyboard and the pointer over the third tab.
+fn tab_bar(scale: f32, theme: Theme) -> Harness {
+    let view = tabs("Sections", State::new(1))
+        .page("Synth", label("Oscillators"))
+        .page("Effects", label("Reverb and delay"))
+        .page("Presets", label("Init"))
+        .padding(8.0);
+    let mut ui = Harness::new(view, Size::new(320.0, 110.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    let presets = ui.get(Role::Tab, "Presets");
+    ui.move_to(presets.center());
+    ui.advance_ms(16);
+    ui
+}
+
+/// A sidebar of an organ's divisions under two headers, with icons, the
+/// second division shown and the sidebar focused from the keyboard.
+fn division_sidebar(scale: f32, theme: Theme) -> Harness {
+    let view = sidebar("Divisions", State::new(1))
+        .section("Manuals")
+        .page("Great", label("Great stops"))
+        .icon(pipes())
+        .page("Swell", label("Swell stops"))
+        .icon(pipes())
+        .page("Choir", label("Choir stops"))
+        .icon(pipes())
+        .section("Pedal")
+        .page("Pedal", label("Pedal stops"))
+        .icon(pipes());
+    let mut ui = Harness::new(view, Size::new(300.0, 230.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn tabs_and_sidebars_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            for (kind, ui) in [
+                ("tabs", tab_bar(scale, theme)),
+                ("sidebar", division_sidebar(scale, theme)),
+            ] {
+                let name = format!("{kind}{look}{suffix}");
+                ui.assert_accessible();
+                assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+                if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                    panic!("{mismatch}");
+                }
+            }
         }
     }
 }

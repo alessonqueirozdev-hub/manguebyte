@@ -7,7 +7,7 @@ use crate::layout::{Arrange, LayoutNode};
 use crate::motion::NodeMotion;
 use crate::scroll::ScrollMetrics;
 use crate::view::View;
-use crate::widget::Widget;
+use crate::widget::{Shown, Widget};
 
 /// A widget in a [`Root`](crate::Root).
 ///
@@ -65,6 +65,24 @@ pub(crate) struct Node {
     pub(crate) motion: NodeMotion,
     /// How far beyond its rectangle it draws (see `Widget::overflow`).
     pub(crate) overflow: f32,
+    /// Its children, all of them, in order: the layout tree lists only
+    /// those it shows (see `UpdateCx::show`).
+    pub(crate) kids: Vec<usize>,
+    /// Which of its children it shows.
+    pub(crate) shown: Shown,
+    /// It is inside a child that a container does not show: it is not
+    /// polled, laid out, drawn, hit or described, and costs nothing.
+    pub(crate) hidden: bool,
+}
+
+impl Node {
+    /// Whether the node shows its child `child`, a node index.
+    pub(crate) fn shows(&self, child: usize) -> bool {
+        match self.shown {
+            Shown::All => true,
+            Shown::Only(at) => self.kids.get(at) == Some(&child),
+        }
+    }
 }
 
 /// Every widget, in tree order, with the layout tree beside it.
@@ -137,12 +155,16 @@ impl Tree {
             },
             motion: NodeMotion::new(),
             overflow: 0.0,
+            kids: Vec::new(),
+            shown: Shown::All,
+            hidden: false,
         });
         self.layout
             .push(LayoutNode::new(style, Default::default(), Vec::new()));
         for child in children {
             let child = self.add(child, Some(id));
             self.layout[id.index()].children.push(child.index());
+            self.nodes[id.index()].kids.push(child.index());
         }
         self.nodes[id.index()].end = self.nodes.len();
         id

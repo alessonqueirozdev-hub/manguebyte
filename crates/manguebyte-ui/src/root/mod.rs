@@ -12,6 +12,7 @@ mod drag;
 mod files;
 mod hover;
 mod menus;
+mod pages;
 
 pub use hover::TOOLTIP_DELAY;
 pub(crate) use menus::{Anchor, MenuRequest};
@@ -177,6 +178,8 @@ pub struct Root {
     tip: Option<hover::Tip>,
     /// The drag running, if any.
     drag: Option<drag::DragState>,
+    /// The subtree that has all input, if any (see `UpdateCx::set_modal`).
+    modal: Option<pages::Modal>,
     /// The widget whose tooltip a press or a key took away, until the
     /// pointer leaves it.
     tip_quiet: Option<NodeId>,
@@ -325,6 +328,7 @@ impl Root {
             tip: None,
             tip_quiet: None,
             drag: None,
+            modal: None,
             notifying: false,
             system_motion: true,
             pressed_on: None,
@@ -517,8 +521,12 @@ impl Root {
 
     /// How widget `id` describes itself, with the focus filled in and the
     /// name given with [`IntoView::named`] in place of its own.
+    ///
+    /// `None` for a widget inside a child that a container does not show
+    /// (see [`Shown`](crate::Shown)): assistive technology does not see
+    /// it.
     pub fn access(&self, id: NodeId) -> Option<AccessEntry> {
-        let node = self.tree.get(id)?;
+        let node = self.tree.get(id).filter(|node| !node.hidden)?;
         let focused = self.focus == Some(id);
         let cx = AccessCx {
             theme: &self.theme,
@@ -574,7 +582,7 @@ impl Root {
 
     /// The items widget `id` describes, into `items`.
     fn items_of(&self, id: NodeId, items: &mut Vec<AccessItem>) {
-        let Some(node) = self.tree.get(id) else {
+        let Some(node) = self.tree.get(id).filter(|node| !node.hidden) else {
             return;
         };
         let cx = AccessCx {
@@ -592,7 +600,7 @@ impl Root {
     /// itself takes the focus first. Returns whether it was done. An open
     /// menu closes first.
     pub fn act_item(&mut self, id: NodeId, key: usize, action: Action) -> bool {
-        if id.index() >= self.tree.main {
+        if id.index() >= self.tree.main || !self.reachable(id) {
             return false;
         }
         if self.menus.is_some() {
@@ -713,11 +721,23 @@ impl Root {
         // Later widgets are drawn over earlier ones, and children over
         // their parents.
         // A widget scrolled out of a view's sight is not there to hit.
+        // A hidden widget is not there either, and while a subtree is modal
+        // nothing of the interface outside it is.
+        let (start, end) = match self.modal {
+            Some(modal) if count <= self.tree.main => (
+                modal.node.index(),
+                self.tree.get(modal.node).map_or(0, |node| node.end),
+            ),
+            _ => (0, count),
+        };
         (0..count.min(self.tree.nodes.len()))
             .rev()
+            .filter(|&index| index >= self.tree.main || (start..end).contains(&index))
             .find(|&index| {
                 let node = &self.tree.nodes[index];
-                node.rect.contains(at) && node.clip.is_none_or(|(clip, _)| clip.contains(at))
+                !node.hidden
+                    && node.rect.contains(at)
+                    && node.clip.is_none_or(|(clip, _)| clip.contains(at))
             })
             .map(NodeId::from_index)
     }
@@ -735,11 +755,17 @@ impl Root {
     /// While a menu is open, an action on one of its items is the menu's
     /// (pressing an item chooses it), and an action on anything else first
     /// closes the menu.
+    ///
+    /// While a subtree is modal (a dialog is open), only the widgets inside
+    /// it can be acted on.
     pub fn act(&mut self, id: NodeId, action: Action) -> bool {
         if self.menus.is_some() {
             if let Some(done) = self.menu_act(id, action) {
                 return done;
             }
+        }
+        if !self.reachable(id) {
+            return false;
         }
         let Some(entry) = self.access(id) else {
             return false;
@@ -765,7 +791,7 @@ impl Root {
             self.close_menus(MenuEvent::Closed);
         }
         match id {
-            Some(id) if !self.focusable(id) => false,
+            Some(id) if !self.focusable(id) || !self.reachable(id) => false,
             _ => {
                 self.focus_visible |= id.is_some();
                 self.set_focus(id);
@@ -807,10 +833,7 @@ impl Root {
     /// the previous one; round to the first or last at the ends. Returns
     /// false, and changes nothing, if no widget takes the focus.
     fn move_focus(&mut self, forward: bool) -> bool {
-        let focusable: Vec<NodeId> = (0..self.tree.nodes.len())
-            .map(NodeId::from_index)
-            .filter(|&id| self.focusable(id))
-            .collect();
+        let focusable = self.focus_order();
         if focusable.is_empty() {
             return false;
         }
@@ -925,6 +948,29 @@ impl Root {
         Handled::No
     }
 
+    /// Offers `event`, a key the widget with the focus did not use, to the
+    /// widgets that contain it, innermost first, until one uses it; with
+    /// nothing focused, to every widget shown, in tree order. Only for keys
+    /// that belong to a container, such as Control+Tab for tabs.
+    fn offer_to_containers(&mut self, event: &Event) -> Handled {
+        let targets: Vec<NodeId> = match self.focus {
+            Some(focus) => self.ancestry(focus).into_iter().skip(1).collect(),
+            None => (0..self.tree.main)
+                .map(NodeId::from_index)
+                .filter(|&id| !self.is_hidden(id))
+                .collect(),
+        };
+        for target in targets {
+            if target.index() >= self.tree.main || !self.reachable(target) {
+                continue;
+            }
+            if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
+                return Handled::Yes;
+            }
+        }
+        Handled::No
+    }
+
     /// Offers `event` to `id` and then to the widgets containing it, until
     /// one uses it.
     fn bubble(&mut self, id: NodeId, event: &Event) -> Handled {
@@ -961,6 +1007,16 @@ impl Root {
     ///   host. The release of a key whose press was used is used too,
     ///   whatever the widget does with it, so the host never sees half a
     ///   keystroke.
+    /// - Control+Tab and Control+Shift+Tab that the widget with the focus
+    ///   does not use go to the widgets that contain it, innermost first
+    ///   (with nothing focused, to every widget shown), which is how
+    ///   [`tabs`](crate::tabs) change page from anywhere inside them; they
+    ///   never move the focus.
+    /// - While a subtree is modal (a dialog is open, see
+    ///   [`UpdateCx::set_modal`]), only widgets inside it can be pressed or
+    ///   focused, Tab goes round inside it, keys that the widget with the
+    ///   focus does not use go to the subtree's outermost widget, and every
+    ///   key is used.
     /// - Typed text and compositions go where keys go.
     /// - Losing the window's focus ends a drag where it is
     ///   ([`Event::PointerCancel`]) and takes the keyboard focus away.
@@ -1087,11 +1143,25 @@ impl Root {
                     }
                 }
                 let mut handled = self.offer_to_keyboard(&event);
+                let control_tab = key.key == Key::Tab && key.modifiers.control;
+                if handled == Handled::No && control_tab {
+                    handled = self.offer_to_containers(&event);
+                }
+                if handled == Handled::No {
+                    if let Some(modal) = self.modal {
+                        handled = self.deliver(modal.node, |widget, cx| widget.event(cx, &event));
+                    }
+                }
                 if handled == Handled::No
                     && key.pressed
                     && key.key == Key::Tab
+                    && !key.modifiers.control
                     && self.move_focus(!key.modifiers.shift)
                 {
+                    handled = Handled::Yes;
+                }
+                // A modal subtree, a dialog, has every key.
+                if self.modal.is_some() {
                     handled = Handled::Yes;
                 }
                 if handled == Handled::Yes && key.pressed && held.is_none() {
@@ -1130,8 +1200,17 @@ impl Root {
         self.access_updates.clear();
         let motion = self.motion();
         let (hover, pressed_on) = (self.hover, self.pressed_on);
-        let focus = self.focus.filter(|_| self.focus_visible);
-        for (index, node) in self.tree.nodes.iter_mut().enumerate() {
+        let mut focus_wanted = None;
+        let mut index = 0;
+        while index < self.tree.nodes.len() {
+            let focus = self.focus.filter(|_| self.focus_visible);
+            let node = &mut self.tree.nodes[index];
+            if node.hidden {
+                // A child a container hides is not polled, nor is anything
+                // inside it.
+                index = node.end.max(index + 1);
+                continue;
+            }
             // The hover, press and focus ring, eased. A scroll view counts
             // as hovered while the pointer is over anything inside it, so
             // that its bars can show.
@@ -1177,6 +1256,23 @@ impl Root {
                 }
             }
             animating |= requests.frame;
+            if requests.focus {
+                focus_wanted = Some(NodeId::from_index(index));
+            }
+            // What it hides is hidden before the loop reaches it.
+            if let Some(shown) = requests.shown {
+                self.show_children(index, shown);
+            }
+            if let Some(child) = requests.modal {
+                self.set_modal_child(index, child);
+            }
+            index += 1;
+        }
+        if let Some(id) = focus_wanted {
+            if self.focusable(id) && self.reachable(id) {
+                self.set_focus(Some(id));
+                self.reveal(id);
+            }
         }
         // A tooltip waiting for the pointer to rest long enough wants the
         // frames that measure it.
@@ -1212,6 +1308,10 @@ impl Root {
             scale: self.scale,
         };
         for (node, item) in self.tree.nodes.iter_mut().zip(&mut self.tree.layout) {
+            if node.hidden {
+                // Measured once it is shown again.
+                continue;
+            }
             if node.measure {
                 node.measure = false;
                 item.content = node.widget.measure(&cx);
@@ -1247,6 +1347,10 @@ impl Root {
         let mut shifts: Vec<(i32, i32)> = vec![(0, 0); main];
         let mut clips: Vec<Option<(Rect, IRect)>> = vec![None; main];
         for index in 0..main {
+            if self.tree.nodes[index].hidden {
+                // Not laid out: it keeps where it was until it is shown.
+                continue;
+            }
             let (shift, clip) = match self.tree.nodes[index].parent {
                 Some(parent) if parent.index() < index => {
                     (shifts[parent.index()], clips[parent.index()])
@@ -1343,7 +1447,7 @@ impl Root {
         let full = std::mem::take(&mut self.full);
         let mut painted = 0;
         for (index, node) in self.tree.nodes.iter_mut().enumerate() {
-            if !node.paint {
+            if !node.paint || node.hidden {
                 continue;
             }
             node.paint = false;

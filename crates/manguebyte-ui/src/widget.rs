@@ -243,6 +243,37 @@ pub(crate) struct Requests {
     pub(crate) scroll: Option<Point>,
     /// A drag to start.
     pub(crate) drag: Option<DragPayload>,
+    /// Which of its children a container shows from now on.
+    pub(crate) shown: Option<Shown>,
+    /// `Some(Some(child))` to make a child's subtree modal, `Some(None)`
+    /// to end it.
+    pub(crate) modal: Option<Option<usize>>,
+}
+
+/// Which of its children a container shows (see [`UpdateCx::show`]).
+///
+/// A child that is not shown is kept, with every widget inside it and
+/// their state, but the root does not poll it, lay it out, draw it, let
+/// it be hit or focused, or describe it to assistive technology: it costs
+/// nothing until it is shown again. Pages and tabs are built on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Shown {
+    /// Every child, as containers do unless they ask otherwise.
+    #[default]
+    All,
+    /// Only the child at this position among its children, from 0; none
+    /// if there is no child there.
+    Only(usize),
+}
+
+impl Shown {
+    /// Whether the child at position `child` is shown.
+    pub fn includes(self, child: usize) -> bool {
+        match self {
+            Shown::All => true,
+            Shown::Only(at) => at == child,
+        }
+    }
 }
 
 /// What [`Widget::update`] is given.
@@ -393,6 +424,77 @@ impl UpdateCx<'_> {
     /// a widget that does not scroll.
     pub fn scroll_to(&mut self, offset: Point) {
         self.requests.scroll = Some(offset);
+    }
+
+    /// Shows only some of the widget's children from this frame on (see
+    /// [`Shown`]); the others, and everything inside them, are kept with
+    /// their state but cost nothing until they are shown again. The
+    /// window is not built again: the root lays out again, draws what the
+    /// change uncovered and what it hid, and nothing else.
+    ///
+    /// A widget inside a child that is hidden loses the focus, the
+    /// pointer and the hover. Asking for what is already shown changes
+    /// nothing; a widget usually asks only when what it shows changed.
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    /// use manguebyte_gfx::{Scene, Size};
+    /// use manguebyte_ui::access::{AccessNode, Role};
+    /// use manguebyte_ui::layout::Style;
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{
+    ///     AccessCx, MeasureCx, PaintCx, Shown, UpdateCx, View, Widget, label,
+    /// };
+    ///
+    /// /// Shows one of its children, the one `page` says.
+    /// struct OneOf(Rc<Cell<usize>>);
+    ///
+    /// impl Widget for OneOf {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Group, "Pages")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::default()
+    ///     }
+    ///     fn paint(&mut self, _cx: &PaintCx<'_>, _scene: &mut Scene) {}
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         cx.show(Shown::Only(self.0.get()));
+    ///     }
+    /// }
+    ///
+    /// let page = Rc::new(Cell::new(0));
+    /// let view = View::with_children(OneOf(page.clone()), Style::stack(), (label("One"), label("Two")));
+    /// let mut ui = Harness::new(view, Size::new(100.0, 20.0), 1.0);
+    /// ui.frame();
+    /// assert!(ui.find(Role::Label, "One").is_some());
+    /// assert!(ui.find(Role::Label, "Two").is_none(), "hidden, so not described");
+    /// page.set(1);
+    /// ui.frame();
+    /// assert!(ui.find(Role::Label, "One").is_none());
+    /// assert!(ui.find(Role::Label, "Two").is_some());
+    /// ```
+    pub fn show(&mut self, shown: Shown) {
+        self.requests.shown = Some(shown);
+    }
+
+    /// Makes the subtree of the widget's child at position `child` modal,
+    /// or ends that with `None`: while it is, only the widgets inside it
+    /// can be hit by the pointer, take the focus (Tab goes round inside
+    /// it) or be acted on by assistive technology, keys that the widget
+    /// with the focus does not use go to that child, and every key is
+    /// used. Open menus close, and a drag or a held pointer outside ends.
+    /// When it ends, the focus goes back to the widget that had it before.
+    /// One subtree is modal at a time; asking for another ends the first.
+    pub fn set_modal(&mut self, child: Option<usize>) {
+        self.requests.modal = Some(child);
+    }
+
+    /// Takes the keyboard focus at the end of this frame's polling, if
+    /// the widget accepts [`Action::Focus`] then: what a dialog's default
+    /// button does when the dialog opens.
+    pub fn request_focus(&mut self) {
+        self.requests.focus = true;
     }
 }
 
