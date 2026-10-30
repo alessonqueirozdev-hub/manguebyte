@@ -1209,7 +1209,65 @@ for, and the waveform view's moiré fixed:
   both themes. `examples/synth_screen.rs` draws a synth's page with all
   three. Limits: TECH_DEBT 109.
 
+Floating panels for an effect chain, which Parabolic asked for:
+
+- `floating_panel(title, open, position, content)` and
+  `IntoView::with_panels`: `FloatingPanel`s over a view, inside the
+  window (never a window of the system's, so the same in a standalone
+  program and a plugin editor), with no scrim and nothing modal: the
+  view around and under them goes on taking the pointer, the keys and
+  assistive technology. A panel is a card on the overlay surface with
+  the large shadow, a title bar (its title a `TextSource`) with a close
+  button (`.close_label`), and any view inside, at its natural size,
+  laid out again when that changes. It is open while a `State<bool>` is
+  `true`, as tabs follow a `State<usize>`; the close button and Escape
+  set it to `false`, and `Pill::opens` sets it to `true`. Its top-left
+  corner follows a `State<Point>`, which dragging the title bar writes,
+  so a project keeps where each panel was; it is always kept inside the
+  view, without the state changing when a window is too small for it.
+  Several can be open; a press on one, the focus moving into one and
+  opening one bring it to the front. Opening gives the focus to the
+  first widget inside (Tab goes through the content, then the close
+  button); closing gives it back to the widget that had it, or to the
+  pill pressed to open it, if the focus was inside or nowhere. Escape
+  closes the panel with the focus and no other. A closed panel is hidden
+  and costs nothing. It is a `Role::Region` named by its title.
+- The machinery is general (ADR 0019): `UpdateCx::float_at` makes any
+  widget float over its siblings at a position inside its parent,
+  moved after layout by whole device pixels as a scrolled subtree is;
+  `UpdateCx::raise` brings one in front; the root draws and hit-tests
+  in a drawing order where each node's floating children follow its
+  others in the order they were raised (`Root::scene` is in that order);
+  `EventCx::floating` gives a widget the `FloatMetrics` of the floating
+  widget it is in; `UpdateCx::focus_within` gives the focus to the first
+  widget inside and, for a floating widget, back to the opener when it
+  hides its inside. `TITLE_BAR_HEIGHT` is a panel's title bar height.
+- Accessibility: role `Region`, which the check asks to have a name.
+- Tested headless (`tests/panels.rs`, `golden.rs`, `realtime.rs`):
+  opening and closing from the state, the close button, a pill and
+  assistive technology; dragging by the title bar with the panel kept
+  inside the window and on device pixels at 1x, 1.25x and 2x; the
+  position written to the state and restored by a new interface from
+  it, and kept inside a smaller window without changing the state;
+  z-order by a press, by the focus and by opening again; a knob beside
+  the panels and one inside them turning, and one covered by a panel not
+  hit; Escape closing only the panel with the focus; the focus going in
+  and back by the keys and the pointer; the region named and renamed by
+  a language switch, which resizes it; the damage of opening, of every
+  step of a drag and of closing inside the old and new rectangles with
+  the shadow's reach, and the buffer equal to a whole repaint and to a
+  new interface drawn from the same states; a dialog over open panels;
+  a closed panel never polled; steady frames with panels open, after a
+  move and after a language switch, making no heap call; golden images
+  in both themes at 1x and 2x. `examples/effect_chain.rs` draws an effect
+  chain of pills opening panels over a keyboard. Limits: TECH_DEBT 112.
+
 ### Breaking
+
+- In `manguebyte-ui`: an Escape the focused widget does not use now
+  goes to the widgets containing it, innermost first, before it is left
+  to the host (a floating panel closes on it). `Root::scene` lists the
+  widgets in drawing order, which is tree order unless widgets float.
 
 - In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
   must name it. A `Label::from_state` whose state is set to the same

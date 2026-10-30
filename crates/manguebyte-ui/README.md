@@ -42,6 +42,14 @@ Documentation: <https://docs.rs/manguebyte-ui>
   inside the window over a scrim, holding the focus and every key until
   answered (Escape cancels, Enter presses the default), its answer
   polled from a `DialogState`.
+- `floating_panel` with `IntoView::with_panels`: panels over the
+  interface, inside the window, that do not stop it: any view under a
+  title bar that moves the panel and keeps it inside, a close button,
+  Escape, the focus going in when one opens and back to its opener when
+  it closes, the one pressed last in front. Whether each is open and
+  where it is are states the application keeps (a `State<bool>` and a
+  `State<Point>`), so a project reopens them where they were; closed
+  ones cost nothing (`UpdateCx::float_at`, ADR 0019).
 - Audio widgets: `waveform_view` (a sample drawn from a multi-resolution
   `Waveform` summary, with zoom, markers, a selection and a playhead),
   `piano_keyboard` (notes from the pointer and the computer's letters,
@@ -98,6 +106,10 @@ shadow blurred and cached):
 (Synth, Effects, Presets) and a confirmation dialog, and an organ
 console with a sidebar of divisions, in both themes:
 
+`examples/effect_chain.rs` draws an effect chain of pills, each opening
+its effect's panel over a keyboard; it drags one, brings one to the
+front and closes one with Escape, in both themes:
+
 `examples/synth_screen.rs` draws a synth's page: a wavetable stacked in
 depth beside the cycle playing, a second oscillator's cycle, and the
 pitch bend and modulation wheels left of a keyboard, in both themes at
@@ -105,6 +117,7 @@ pitch bend and modulation wheels left of a keyboard, in both themes at
 
 ```text
 cargo run -p manguebyte-ui --example pages_demo -- <folder>
+cargo run -p manguebyte-ui --example effect_chain -- <folder>
 cargo run -p manguebyte-ui --example synth_screen -- <folder>
 cargo run -p manguebyte-ui --example sampler_screen -- <folder>
 cargo run -p manguebyte-gui --example sampler_window

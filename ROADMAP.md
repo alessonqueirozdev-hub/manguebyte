@@ -371,10 +371,15 @@ our own, and nothing claimed before its test exists.
   nothing (not polled, laid out, drawn or asking for frames, tested),
   action buttons in three looks and a confirmation dialog inside the
   window with a focus trap done
-  ([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)); dragging out of the window, rows of
+  ([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)); floating
+  panels inside the window, not modal, moved by their title bar and kept
+  inside it, their place and whether they are open in states the
+  application keeps, raised by a press, Escape and the focus going in and
+  back, done ([ADR 0019](docs/adr/0019-floating-panels.md)), without
+  resizing, snapping or docking; dragging out of the window, rows of
   different heights, multi-line text, drag and drop by keyboard, dialogs
   with content of their own and overflowing tab bars not started
-  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97 and 105)
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97, 105 and 112)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,
