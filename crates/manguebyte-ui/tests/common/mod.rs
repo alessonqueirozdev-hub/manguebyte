@@ -122,3 +122,5 @@ pub fn panel_view(params: &Arc<PanelParams>, levels: &Levels) -> View {
         .padding(12.0),
     )
 }
+
+pub mod languages;

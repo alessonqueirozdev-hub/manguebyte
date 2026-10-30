@@ -222,3 +222,39 @@ fn a_press_shows_no_focus_ring_and_the_keyboard_does() {
     // Assistive technology is told about the focus either way.
     ui.assert_accessible();
 }
+
+#[test]
+fn an_idle_interface_named_from_a_source_draws_nothing_before_or_after_a_switch() {
+    use common::languages::{WIDGETS, language_params, screen};
+
+    let params = language_params();
+    let language = manguebyte_ui::State::new(String::from("en"));
+    let mut ui = screen(&params, &language);
+    ui.set_motion(true);
+    ui.advance_ms(500);
+    // Eight names read every frame, unchanged: a thousand frames draw
+    // nothing and ask for nothing.
+    assert_eq!(ui.frames_rendered_during(|ui| ui.advance_ms(16_000)), 0);
+    assert!(!ui.root().is_animating());
+
+    language.set(String::from("es"));
+    let frame = ui.frame();
+    assert!(frame.damaged > 0);
+    assert!(!frame.animating, "a new name starts no motion");
+    assert_eq!(ui.access_updates().len(), WIDGETS.len());
+    ui.frame();
+    assert!(ui.access_updates().is_empty(), "each widget is told once");
+
+    assert_eq!(ui.frames_rendered_during(|ui| ui.advance_ms(16_000)), 0);
+    assert!(!ui.root().is_animating());
+    let frame = ui.frame();
+    assert_eq!(
+        (
+            frame.damaged,
+            frame.painted,
+            frame.animating,
+            frame.laid_out
+        ),
+        (0, 0, false, false)
+    );
+}

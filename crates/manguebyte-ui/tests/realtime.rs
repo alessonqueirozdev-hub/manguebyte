@@ -251,3 +251,53 @@ fn a_steady_frame_with_a_tooltip_waiting_or_shown_makes_no_heap_call() {
     });
     assert_eq!(calls, 0, "100 frames showing made {calls} heap calls");
 }
+
+#[test]
+fn a_steady_frame_with_names_that_follow_the_language_makes_no_heap_call() {
+    use common::languages::{language_params, screen};
+
+    let params = language_params();
+    let language = manguebyte_ui::State::new(String::from("en"));
+    let mut ui = screen(&params, &language);
+    ui.advance_ms(100);
+    // Every name is read on each of these frames and found unchanged.
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+
+    // A switch may touch the heap: names are laid out and drawn again.
+    language.set(String::from("pt"));
+    let (summary, _) = counted(|| ui.frame());
+    assert_eq!(summary.painted, 4);
+    assert_eq!(ui.access_updates().len(), 8);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames after the switch made {calls} heap calls"
+    );
+}
+
+#[test]
+fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
+    // What the documentation of `TextSource` warns about, and what the
+    // test above would catch.
+    let language = manguebyte_ui::State::new(String::from("en"));
+    let read = language.clone();
+    let view = manguebyte_ui::Label::dynamic(move || read.with(|code| format!("Language: {code}")));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(200.0, 30.0), 1.0);
+    ui.advance_ms(50);
+    let ((), calls) = counted(|| {
+        for _ in 0..10 {
+            ui.frame();
+        }
+    });
+    assert!(calls >= 10, "10 frames made only {calls} heap calls");
+}
