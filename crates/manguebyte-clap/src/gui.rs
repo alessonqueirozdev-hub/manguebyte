@@ -69,7 +69,9 @@ use clap_sys::ext::gui::{
     CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
     clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window,
 };
-use clap_sys::ext::params::{CLAP_EXT_PARAMS, CLAP_PARAM_RESCAN_VALUES, clap_host_params};
+use clap_sys::ext::params::{
+    CLAP_EXT_PARAMS, CLAP_PARAM_RESCAN_INFO, CLAP_PARAM_RESCAN_VALUES, clap_host_params,
+};
 use clap_sys::ext::posix_fd_support::{
     CLAP_EXT_POSIX_FD_SUPPORT, CLAP_POSIX_FD_ERROR, CLAP_POSIX_FD_READ, clap_host_posix_fd_support,
     clap_plugin_posix_fd_support, clap_posix_fd_flags,
@@ -217,6 +219,11 @@ pub(crate) struct SharedFlags {
     /// `flush` before they report edits: while it is set, an edit may be
     /// waiting to be sent.
     pub(crate) unsent: AtomicBool,
+    /// The parameters' [`labels_version`](ParamSet::labels_version) when
+    /// the host last read their names, or was last asked to. Written on the
+    /// main thread only; the audio side reads it to know whether a change
+    /// it sees is news.
+    labels_told: AtomicU64,
 }
 
 impl SharedFlags {
@@ -230,7 +237,23 @@ impl SharedFlags {
             loading: AtomicU32::new(0),
             processing: AtomicBool::new(false),
             unsent: AtomicBool::new(false),
+            labels_told: AtomicU64::new(params.labels_version()),
         }
+    }
+
+    /// Main thread, before asking the host to read parameter information
+    /// again: whether a parameter was given a new name, short name or unit
+    /// since the host was last asked, and if so, notes that it is being
+    /// asked now. However many were renamed, that is one answer of `true`.
+    pub(crate) fn take_new_labels(&self, params: &dyn ParamSet) -> bool {
+        let now = params.labels_version();
+        self.labels_told.swap(now, Ordering::Relaxed) != now
+    }
+
+    /// Audio side: whether the host has yet to be asked about the names
+    /// counted by `version`. Real-time safe.
+    pub(crate) fn labels_untold(&self, version: u64) -> bool {
+        self.labels_told.load(Ordering::Relaxed) != version
     }
 
     /// Main thread, right before the host is asked to read every value
@@ -551,9 +574,16 @@ impl EditorHost for ClapEditorHost {
                 // The host reads every value again, so it knows them as they
                 // are now; the audio side must not report them back as news.
                 self.flags.host_rereads(&*self.params);
+                // An editor that loaded something of its own, such as a
+                // whole new instrument, may have renamed parameters too:
+                // the host reads their names in the same rescan.
+                let mut flags = CLAP_PARAM_RESCAN_VALUES;
+                if self.flags.take_new_labels(&*self.params) {
+                    flags |= CLAP_PARAM_RESCAN_INFO;
+                }
                 // SAFETY: the host's own function with its own pointer, on
                 // the main thread, where CLAP wants it.
-                unsafe { rescan(self.host.as_ptr(), CLAP_PARAM_RESCAN_VALUES) };
+                unsafe { rescan(self.host.as_ptr(), flags) };
             }
             // A host that cannot read them again is sent them as values.
             None => self.edited(),

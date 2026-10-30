@@ -476,21 +476,104 @@ struct Host {
     /// be a mistake Miri catches: moving a `Box` asserts exclusive access to
     /// what it points to, which invalidates the pointer the plugin holds.
     host: *mut clap_host,
+    /// What this host alone records, for a host made with
+    /// [`recording`](Self::recording). The `clap_host` points at it.
+    recorder: Option<Arc<Recorder>>,
+}
+
+/// What one host was asked for, kept apart from [`RESCANS`], which every
+/// host made with `Host::new` shares, so that tests running at the same
+/// time cannot see each other's calls.
+#[derive(Default)]
+struct Recorder {
+    rescans: Mutex<Vec<u32>>,
+    callbacks: AtomicU32,
+}
+
+impl Recorder {
+    fn take_rescans(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.rescans.lock().unwrap())
+    }
+
+    fn callbacks(&self) -> u32 {
+        self.callbacks.load(Ordering::SeqCst)
+    }
+}
+
+unsafe fn recorder<'a>(host: *const clap_host) -> &'a Recorder {
+    unsafe { &*(*host).host_data.cast::<Recorder>() }
+}
+
+unsafe extern "C" fn recording_rescan(host: *const clap_host, flags: clap_param_rescan_flags) {
+    unsafe { recorder(host) }
+        .rescans
+        .lock()
+        .unwrap()
+        .push(flags);
+}
+
+unsafe extern "C" fn recording_request_callback(host: *const clap_host) {
+    unsafe { recorder(host) }
+        .callbacks
+        .fetch_add(1, Ordering::SeqCst);
+}
+
+static RECORDING_PARAMS: clap_host_params = clap_host_params {
+    rescan: Some(recording_rescan),
+    clear: Some(host_clear),
+    request_flush: Some(host_request),
+};
+
+unsafe extern "C" fn recording_get_extension(
+    _: *const clap_host,
+    id: *const c_char,
+) -> *const c_void {
+    if unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+        ptr::from_ref(&RECORDING_PARAMS).cast()
+    } else {
+        ptr::null()
+    }
 }
 
 impl Host {
     fn new(entry: clap_plugin_entry, id: &str) -> Self {
+        Self::create(entry, id, None)
+    }
+
+    /// A host that records its own rescans and requests for a call on the
+    /// main thread, which `Recorder` gives back.
+    fn recording(entry: clap_plugin_entry, id: &str) -> (Self, Arc<Recorder>) {
+        let recorder = Arc::new(Recorder::default());
+        (
+            Self::create(entry, id, Some(Arc::clone(&recorder))),
+            recorder,
+        )
+    }
+
+    fn create(entry: clap_plugin_entry, id: &str, recorder: Option<Arc<Recorder>>) -> Self {
+        let (host_data, get_extension, request_callback): (
+            *mut c_void,
+            unsafe extern "C" fn(*const clap_host, *const c_char) -> *const c_void,
+            unsafe extern "C" fn(*const clap_host),
+        ) = match &recorder {
+            Some(recorder) => (
+                Arc::as_ptr(recorder).cast_mut().cast(),
+                recording_get_extension,
+                recording_request_callback,
+            ),
+            None => (ptr::null_mut(), host_get_extension, host_request),
+        };
         let host = Box::into_raw(Box::new(clap_host {
             clap_version: CLAP_VERSION,
-            host_data: ptr::null_mut(),
+            host_data,
             name: c"test host".as_ptr(),
             vendor: c"Manguebyte".as_ptr(),
             url: c"".as_ptr(),
             version: c"1".as_ptr(),
-            get_extension: Some(host_get_extension),
+            get_extension: Some(get_extension),
             request_restart: Some(host_request),
             request_process: Some(host_request),
-            request_callback: Some(host_request),
+            request_callback: Some(request_callback),
         }));
         let id = CString::new(id).unwrap();
         unsafe {
@@ -506,8 +589,14 @@ impl Host {
                 factory,
                 plugin,
                 host,
+                recorder,
             }
         }
+    }
+
+    /// Calls the plugin's `on_main_thread`, as a host does when asked.
+    fn on_main_thread(&self) {
+        unsafe { (*self.plugin).on_main_thread.unwrap()(self.plugin) };
     }
 
     fn extension<T>(&self, id: &CStr) -> Option<&T> {
@@ -729,6 +818,8 @@ impl Drop for Host {
             // The plugin is gone, so nothing points at the host any more.
             drop(Box::from_raw(self.host));
         }
+        // And nothing at the recorder.
+        drop(self.recorder.take());
     }
 }
 
@@ -1264,4 +1355,187 @@ fn an_instrument_takes_notes_expression_modulation_and_a_sidechain() {
         processed.output[0],
         [50.25, 50.25, 50.25, 50.25, 0.25, 0.25, 0.25, 0.25]
     );
+}
+
+// --- Parameters renamed while the plugin runs -------------------------------
+
+mod renamed {
+    use super::*;
+    use manguebyte_params::{Param, ParamSet};
+
+    /// A fixed pool of stops driven by number, as an organ that swaps whole
+    /// instruments has: after a swap the same parameters drive the new
+    /// organ's stops, under its names.
+    pub(super) struct Stops(Vec<BoolParam>);
+
+    impl ParamSet for Stops {
+        fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+            for stop in &self.0 {
+                visitor(stop);
+            }
+        }
+    }
+
+    impl Stops {
+        /// Gives every stop the name of `organ`'s rank, from this thread.
+        fn load_organ(&self, organ: &str) {
+            for (n, stop) in self.0.iter().enumerate() {
+                stop.info()
+                    .set_display_name(&format!("{organ} rank {}", n + 1));
+            }
+        }
+    }
+
+    const STOPS: usize = 60;
+
+    static ORGAN_PARAMS: Mutex<Option<Arc<Stops>>> = Mutex::new(None);
+
+    /// The organ tests share `ORGAN_PARAMS`, so they take turns.
+    static ORGAN_ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    fn organ_params() -> Arc<Stops> {
+        ORGAN_PARAMS.lock().unwrap().clone().unwrap()
+    }
+
+    struct Organ {
+        params: Arc<Stops>,
+    }
+
+    impl Plugin for Organ {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.organ",
+            name: "Organ",
+            vendor: "Manguebyte",
+            version: "0.1.0",
+            description: "Renames its stops",
+            kind: PluginKind::Effect,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+        type Params = Stops;
+
+        fn new() -> Self {
+            let params = Arc::new(Stops(
+                (1..=STOPS)
+                    .map(|n| BoolParam::new(&format!("stop-{n:02}"), &format!("Stop {n}"), false))
+                    .collect(),
+            ));
+            *ORGAN_PARAMS.lock().unwrap() = Some(Arc::clone(&params));
+            Self { params }
+        }
+
+        fn params(&self) -> Arc<Stops> {
+            Arc::clone(&self.params)
+        }
+
+        fn prepare(&mut self, _: &ProcessSpec) {}
+
+        fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+    }
+
+    fn organ_host() -> (std::sync::MutexGuard<'static, ()>, Host, Arc<Recorder>) {
+        let guard = ORGAN_ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (host, recorder) = Host::recording(plugin_entry::<Organ>(), Organ::INFO.id);
+        (guard, host, recorder)
+    }
+
+    fn names(host: &Host) -> Vec<String> {
+        (0..STOPS as u32)
+            .map(|index| name(&host.param_info(index).unwrap().name))
+            .collect()
+    }
+
+    /// Sixty stops renamed on another thread while blocks run: no block
+    /// uses the heap, the audio side asks for a call on the main thread,
+    /// and the host is asked once to read the parameters' information
+    /// again, after which `get_info` gives the new names. A second organ
+    /// loaded between two blocks is one request and one rescan more.
+    #[test]
+    fn a_batch_of_renames_is_one_info_rescan_and_get_info_gives_the_new_names() {
+        let (_turn, host, recorder) = organ_host();
+        host.activate(48_000.0, 64);
+        assert_eq!(recorder.take_rescans(), Vec::<u32>::new());
+        assert_eq!(name(&host.param_info(0).unwrap().name), "Stop 1");
+
+        let stops = organ_params();
+        let organist = {
+            let stops = Arc::clone(&stops);
+            std::thread::spawn(move || stops.load_organ("Haarlem"))
+        };
+        let mut blocks = 0;
+        loop {
+            let done = organist.is_finished();
+            let processed = host.process(&mut stereo(0.5, 64), None, vec![], None);
+            assert_eq!(
+                processed.heap_calls, 0,
+                "a block during renames used the heap"
+            );
+            blocks += 1;
+            if done {
+                break;
+            }
+        }
+        organist.join().unwrap();
+        assert!(blocks > 0);
+        assert!(
+            recorder.callbacks() >= 1,
+            "no call on the main thread was asked for"
+        );
+        // Nothing is told to the host from the audio thread.
+        assert_eq!(recorder.take_rescans(), Vec::<u32>::new());
+
+        host.on_main_thread();
+        assert_eq!(recorder.take_rescans(), [CLAP_PARAM_RESCAN_INFO]);
+        host.on_main_thread();
+        assert_eq!(recorder.take_rescans(), Vec::<u32>::new());
+        let expected: Vec<String> = (1..=STOPS).map(|n| format!("Haarlem rank {n}")).collect();
+        assert_eq!(names(&host), expected);
+
+        // The next organ, loaded whole before the next block.
+        let asked = recorder.callbacks();
+        let other = Arc::clone(&stops);
+        std::thread::spawn(move || other.load_organ("Alkmaar"))
+            .join()
+            .unwrap();
+        for _ in 0..3 {
+            let processed = host.process(&mut stereo(0.5, 64), None, vec![], None);
+            assert_eq!(processed.heap_calls, 0);
+        }
+        assert_eq!(recorder.callbacks(), asked + 1, "one request per batch");
+        host.on_main_thread();
+        assert_eq!(recorder.take_rescans(), [CLAP_PARAM_RESCAN_INFO]);
+        assert_eq!(name(&host.param_info(59).unwrap().name), "Alkmaar rank 60");
+        // The id never changed, so automation and state still find it.
+        assert_eq!(
+            host.param_info(59).unwrap().id,
+            ParamId::from_name("stop-60").0
+        );
+    }
+
+    /// Renames made while nothing runs reach the host when it activates the
+    /// plugin, and renames made as state loads are read with the values.
+    #[test]
+    fn renames_reach_the_host_at_activation_and_with_a_state_load() {
+        let (_turn, host, recorder) = organ_host();
+        let stops = organ_params();
+        stops.load_organ("Freiberg");
+        host.activate(48_000.0, 64);
+        assert_eq!(recorder.take_rescans(), [CLAP_PARAM_RESCAN_INFO]);
+        assert_eq!(name(&host.param_info(0).unwrap().name), "Freiberg rank 1");
+
+        let saved = host.save().unwrap();
+        assert!(host.load(&saved));
+        assert_eq!(recorder.take_rescans(), [CLAP_PARAM_RESCAN_VALUES]);
+        stops.load_organ("Weingarten");
+        assert!(host.load(&saved));
+        assert_eq!(
+            recorder.take_rescans(),
+            [CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_INFO]
+        );
+        // Already told: the audio side does not ask again.
+        let asked = recorder.callbacks();
+        host.process(&mut stereo(0.5, 64), None, vec![], None);
+        assert_eq!(recorder.callbacks(), asked);
+    }
 }

@@ -3152,6 +3152,39 @@ fn values_changed_asks_the_host_to_read_them_and_does_not_send_them_back() {
     ui.destroy();
 }
 
+/// An editor that loads a whole new instrument renames parameters as well
+/// as setting them: the one rescan it asks for reads the names too, and the
+/// audio side, which then finds the host told, asks for nothing more.
+#[test]
+fn values_changed_after_renames_has_the_host_read_the_names_in_the_same_rescan() {
+    set_up(Setup::default());
+    let session = Session::panel();
+    let ui = session.ui();
+    session.start();
+    assert!(ui.create(CLAP_WINDOW_API_WIN32));
+    assert!(ui.open(CLAP_WINDOW_API_WIN32, PARENT));
+    params().cutoff.info().set_display_name("Brightness");
+    params().gain.info().set_display_name("Level");
+    params().gain.set(0.25);
+    with_probe(|probe| probe.out(|context| context.values_changed()));
+    assert_eq!(
+        session.take_calls(),
+        [HostCall::Rescan(
+            CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_INFO
+        )]
+    );
+    assert_eq!(session.process(), []);
+    assert_eq!(session.take_calls(), []);
+    // Values alone, later, are values alone.
+    params().gain.set(0.5);
+    with_probe(|probe| probe.out(|context| context.values_changed()));
+    assert_eq!(
+        session.take_calls(),
+        [HostCall::Rescan(CLAP_PARAM_RESCAN_VALUES)]
+    );
+    ui.destroy();
+}
+
 /// ADR 0007, section 5: restored state is never reported back to the host
 /// as a person's edit. A host that loads state reads every value again and
 /// asks for no events. A gesture that happens to be open must not carry the

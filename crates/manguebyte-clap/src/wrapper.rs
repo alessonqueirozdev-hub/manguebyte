@@ -43,6 +43,21 @@
 //! the editor stores at that moment still counts as news; and after the
 //! host was asked to read every value again, the values it was asked to
 //! read count as known, gestures or not.
+//!
+//! # New parameter names
+//!
+//! A plugin may give parameters new names, short names and units while it
+//! runs ([`ParamInfo::set_display_name`](manguebyte_params::ParamInfo::set_display_name)),
+//! and `get_info` always reports the current ones. The audio side polls
+//! the set's [`labels_version`](ParamSet::labels_version), an atomic count,
+//! before each block and in `flush`; when it changes and the host has not
+//! been told, it asks for `on_main_thread` with `request_callback`, which
+//! is thread-safe. On the main thread, `on_main_thread`, `activate`, a
+//! state load and the editor's `values_changed` compare the count with the
+//! one the host was last told and, if it moved, call the host's
+//! `rescan(CLAP_PARAM_RESCAN_INFO)` once (with `VALUES` in the last two),
+//! however many parameters were renamed in between. Neither side ever
+//! takes the names' lock to find out (ADR 0020).
 
 use std::any::TypeId;
 use std::cell::UnsafeCell;
@@ -440,6 +455,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                     OutputBuffer::new()
                 },
                 resend_values: false,
+                labels_seen: params.labels_version(),
             }),
             ids,
             params,
@@ -543,6 +559,10 @@ struct Audio<P> {
     /// block it did not finish were stored and remembered as seen, but may
     /// never have reached it.
     resend_values: bool,
+    /// The parameters' [`labels_version`](ParamSet::labels_version) as the
+    /// audio side last saw it, so that it asks for a call on the main
+    /// thread once per change it sees, not once per block.
+    labels_seen: u64,
 }
 
 /// Turns the editor's gesture counts into events, and remembers what the
@@ -748,6 +768,8 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
             }
         }
         instance.active.store(true, Ordering::Relaxed);
+        // SAFETY: `activate` runs on the main thread.
+        unsafe { instance.tell_new_labels() };
         true
     })
 }
@@ -823,6 +845,16 @@ unsafe extern "C" fn plugin_stop_processing<P: Plugin>(plugin: *const clap_plugi
 }
 
 unsafe extern "C" fn plugin_on_main_thread<P: Plugin>(plugin: *const clap_plugin) {
+    // New parameter names first: the audio side asks for this call when it
+    // sees some, with or without an editor.
+    guard((), || {
+        // SAFETY: the host passes a plugin it created through our factory,
+        // on the main thread.
+        if let Some(instance) = unsafe { instance::<P>(plugin) } {
+            // SAFETY: this is the main thread.
+            unsafe { instance.tell_new_labels() };
+        }
+    });
     // SAFETY: the host passes a plugin it created through our factory, on
     // the main thread. A plugin without an editor has nothing to do here.
     unsafe { gui::on_main_thread::<P>(plugin) };
@@ -929,6 +961,7 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         audio.buffer.clear();
         audio.aux.start_block(frames);
         let layout = audio.layout;
+        instance.notice_new_labels(audio);
 
         // SAFETY: the pointers in `process` are valid for this call.
         unsafe {
@@ -1776,7 +1809,7 @@ unsafe extern "C" fn params_get_info<P: Plugin>(
         info.id = param.param_id().0;
         info.flags = clap_flags;
         info.cookie = ptr::null_mut();
-        copy_text(param.name(), &mut info.name);
+        copy_text(&param.display_name(), &mut info.name);
         copy_text("", &mut info.module);
         info.min_value = 0.0;
         info.max_value = stepped.unwrap_or(1.0);
@@ -1820,10 +1853,10 @@ unsafe extern "C" fn params_value_to_text<P: Plugin>(
             return false;
         }
         let mut text = param.plain_to_text(from_clap(param, value));
-        let unit = param.info().unit();
+        let unit = param.info().display_unit();
         if !unit.is_empty() {
             text.push(' ');
-            text.push_str(unit);
+            text.push_str(&unit);
         }
         // SAFETY: the host provides `capacity` writable characters at `out`.
         copy_text(&text, unsafe {
@@ -1881,6 +1914,7 @@ unsafe extern "C" fn params_flush<P: Plugin>(
         // SAFETY: `output` is valid for this call, or null, and this runs
         // where `process` would.
         unsafe { instance.report_to_host(audio, output) };
+        instance.notice_new_labels(audio);
 
         // Then the host's values. They are stored straight into
         // the parameters; the plugin's watcher is left alone, so the next
@@ -1991,20 +2025,58 @@ unsafe extern "C" fn state_load<P: Plugin>(
             // audio side must not report them back as if they were news.
             flags.host_rereads(&*instance.params);
         }
+        // A plugin may rename parameters as it loads, as one that loads a
+        // whole new instrument does: the names are read in the same rescan.
+        let mut rescan = CLAP_PARAM_RESCAN_VALUES;
+        if flags.take_new_labels(&*instance.params) {
+            rescan |= CLAP_PARAM_RESCAN_INFO;
+        }
         // SAFETY: `load` runs on the main thread, where the host's parameter
         // extension may be called, and the host outlives the plugin.
-        unsafe { rescan_values(instance.host.as_ptr()) };
+        unsafe { rescan_params(instance.host.as_ptr(), rescan) };
         true
     })
 }
 
-/// Asks the host to read every parameter value again.
+impl<P: Plugin> Instance<P> {
+    /// Audio side, before each block and in `flush`: if the parameters'
+    /// names changed since it last looked, and the host has not been told,
+    /// asks for a call on the main thread, which tells it. Real-time safe:
+    /// it loads one atomic per parameter and never takes the names' lock.
+    fn notice_new_labels(&self, audio: &mut Audio<P>) {
+        let now = self.params.labels_version();
+        if now != audio.labels_seen {
+            audio.labels_seen = now;
+            if self.flags.labels_untold(now) {
+                self.host.request_callback();
+            }
+        }
+    }
+
+    /// Main thread: if any parameter was renamed since the host was last
+    /// told, asks it once to read the parameters' information again, which
+    /// CLAP allows while the plugin is active.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main thread.
+    unsafe fn tell_new_labels(&self) {
+        if self.flags.take_new_labels(&*self.params) {
+            // SAFETY: on the main thread, per this function's contract; the
+            // host outlives the plugin.
+            unsafe { rescan_params(self.host.as_ptr(), CLAP_PARAM_RESCAN_INFO) };
+        }
+    }
+}
+
+/// Asks the host to read again what `flags` names: every parameter's value,
+/// information, or both.
 ///
 /// # Safety
 ///
 /// `host` must be the live host that created the plugin, or null, and this
 /// must be called on the main thread.
-unsafe fn rescan_values(host: *const clap_host) {
+unsafe fn rescan_params(host: *const clap_host, flags: clap_param_rescan_flags) {
     // SAFETY: guaranteed by this function's contract.
     let Some(get_extension) = (unsafe { host.as_ref() }).and_then(|host| host.get_extension) else {
         return;
@@ -2019,7 +2091,7 @@ unsafe fn rescan_values(host: *const clap_host) {
     };
     if let Some(rescan) = params.and_then(|params| params.rescan) {
         // SAFETY: as above, and we are on the main thread.
-        unsafe { rescan(host, CLAP_PARAM_RESCAN_VALUES) };
+        unsafe { rescan(host, flags) };
     }
 }
 
