@@ -103,7 +103,7 @@ deadline and gives a budget for the next block in cost units the
 instrument defines (a partial, a voice at a tier); the instrument spends
 it in its own order of priority and reports what it spent and whether it
 wanted more. The governor learns the cost of a unit on this machine, now,
-answers a slowdown that lasts three blocks, ignores a lone preemption,
+answers a slowdown within a block (or, if asked, once it has lasted a few),
 and recovers by at most a doubling every half second. Offline it always
 gives the full budget and never reads the clock; a quality floor and a
 maximum bound it. ADR 0018 explains the design.
@@ -128,7 +128,10 @@ governor.end_block(128, allowance.spent(), allowance.limited());
 
 `cargo run --release -p manguebyte-dsp --example governor_organ` plays a
 synthetic organ of `PartialBank` pipes asked for twice what the machine
-fits, on the real clock, and prints the loads it measured.
+fits, on the real clock, and prints the loads it measured. On the
+development laptop, busy with other programs, the defaults kept all but
+0.3 to 0.7 % of the blocks in time, but let the organ render only a few
+percent of itself (ADR 0018).
 
 ## The binary's own file
 

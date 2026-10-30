@@ -3,7 +3,8 @@
 //! real clock.
 //!
 //! ```text
-//! cargo run --release -p manguebyte-dsp --example governor_organ [seconds] [factor] [sleep|spin]
+//! cargo run --release -p manguebyte-dsp --example governor_organ \
+//!     [seconds] [factor] [sleep|spin] [spike_blocks] [max_rise]
 //! ```
 //!
 //! Each pipe is a [`PartialBank`] of 32 partials, whose levels fall with
@@ -20,12 +21,14 @@
 //! `factor` (2 unless given) times that many and plays them for `seconds`
 //! (20 unless given), one block per deadline, sleeping until the next one
 //! as a sound card's callback would wait, or spinning (`spin`), which keeps
-//! the thread on its core. It prints, after the first second, the measured
-//! load's percentiles, the blocks over the target and over the deadline,
-//! and the share of the asked-for partials rendered, beside a second
-//! without the governor. The thread has the system's normal priority. Build
-//! it optimised: the debug figures mean nothing. Other work on the machine
-//! shows in the worst blocks.
+//! the thread on its core; `spike_blocks` and `max_rise` set the
+//! governor's (1 and 2 unless given). It prints, after the first second,
+//! the measured load's percentiles, the blocks over the target and over
+//! the deadline, and the share of the asked-for partials rendered, beside a
+//! second without the governor. The thread has the system's normal
+//! priority. Build it optimised: the debug figures mean nothing. Other work
+//! on the machine shows in the worst blocks, and in how much the governor
+//! lets the organ render.
 
 use std::hint::black_box;
 use std::thread;
@@ -235,6 +238,13 @@ fn main() {
         Some("spin") => Pacing::Spin,
         _ => Pacing::Sleep,
     };
+    let mut config = GovernorConfig::default();
+    if let Some(blocks) = arguments.next() {
+        config = config.spike_blocks(blocks.parse().expect("spike blocks"));
+    }
+    if let Some(rise) = arguments.next() {
+        config = config.max_rise(rise.parse().expect("max rise"));
+    }
 
     // Twice over: first in a small organ, then at the size that gives.
     let mut pipes = 64;
@@ -257,7 +267,7 @@ fn main() {
     );
 
     let mut organ = Organ::new(pipes);
-    let mut governor = Governor::new(GovernorConfig::default());
+    let mut governor = Governor::new(config);
     let target = governor.target();
     governor.set_sample_rate(RATE);
     governor.set_max_budget(organ.demand());

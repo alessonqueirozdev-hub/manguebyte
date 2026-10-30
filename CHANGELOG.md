@@ -41,25 +41,30 @@ break the API.
   next block in abstract cost units, which the instrument spends in its
   own order of priority: demote voices, drop partials, steal voices. The
   instrument states relative costs; the governor learns the load of one
-  unit, from the lowest of the last three blocks (`spike_blocks`), so a
-  lone preemption moves nothing, with a fast attack (half the way a block,
-  all of it above the ceiling, at most twice the estimate a block), a slow
-  release, a 5 % hysteresis, and a recovery of at most a doubling every
-  half second; it settles at the target (70 % unless set) less the
-  hysteresis. Offline it gives the maximum budget and never reads the
-  clock; `set_quality_floor` and `set_max_budget` bound it; `note_missed`
-  counts a render pool's missed jobs as a full deadline's load.
-  `Allowance` spends a budget tier by tier and says whether the
-  instrument was limited. Nothing allocates or locks. Tested on a fake
-  clock: a step to twice what fits brought under the target within three
-  blocks and kept there, a rise between target and ceiling answered within
-  six, a slow ramp never more than 1 % over the target, recovery monotonic
-  and never faster than the doubling rate whatever the block size, lone
-  preemptions ignored, a budget below the cheapest voice recovering, noise
-  inside the band moving nothing and larger noise within stated bounds,
-  offline, floor, maximum, missed jobs; no heap use under the counting
-  allocator. `manguebyte-dsp`'s `examples/governor_organ.rs` plays a
-  `PartialBank` organ asked for twice what fits, on the real clock
+  unit, with a fast attack (half the way a block, all of it above the
+  ceiling, at most twice the estimate a block), a slow release, a 5 %
+  hysteresis, and a recovery of at most a doubling every half second; it
+  settles at the target (70 % unless set) less the hysteresis.
+  `spike_blocks(n)` makes a rise count only once it has lasted `n`
+  blocks. Offline it gives the maximum budget and never reads the clock;
+  `set_quality_floor` and `set_max_budget` bound it; `note_missed` counts
+  a render pool's missed jobs as a full deadline's load. `Allowance`
+  spends a budget tier by tier and says whether the instrument was
+  limited. Nothing allocates or locks. Tested on a fake clock: a step to
+  twice what fits brought under the target within three blocks and kept
+  there, a rise between target and ceiling answered within four, a slow
+  ramp never more than 1 % over the target, recovery monotonic and never
+  faster than the doubling rate whatever the block size, a lone 56 ms
+  preemption halving the budget at most (ignored with `spike_blocks(3)`),
+  a budget below the cheapest voice recovering, noise inside the band
+  moving nothing and larger noise within stated bounds, offline, floor,
+  maximum, missed jobs; no heap use under the counting allocator.
+  `manguebyte-dsp`'s `examples/governor_organ.rs` plays a `PartialBank`
+  organ asked for twice what fits, on the real clock: on the development
+  laptop, busy with other programs, at normal priority, the default left
+  0.3 to 0.7 % of the blocks late (all of them without it) but rendered
+  only 0.3 to 6 % of the organ; `spike_blocks(3)` rendered 7 to 18 % with
+  6 to 39 % late
   (TECH_DEBT item 111).
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
   `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,

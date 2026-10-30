@@ -60,12 +60,12 @@ under half the target (`learn_above`, 35 % of the deadline) is not learnt
 from, so fixed work inflates the estimate by at most a factor of
 `1 + o / (0.35 - o)`: 17 % for fixed work of 5 % of the deadline.
 
-**4. How it moves.** The estimate goes by the lowest load per unit of the
-last three blocks learnt from (`spike_blocks`); it moves towards a higher
-value by half the way a block (`attack`), all the way when that load is
-above the ceiling (90 %), never by more than a factor of two in one block
+**4. How it moves.** The estimate moves towards a block's higher load per
+unit by half the way (`attack`), all the way when that load is above the
+ceiling (90 %), never by more than a factor of two in one block
 (`max_rise`), and towards a lower one with a time constant of half a
-second (`release`). The budget aims at the target (70 %) less the
+second (`release`); with `spike_blocks(n)` it goes by the lowest load per
+unit of the last `n` blocks learnt from (one unless set). The budget aims at the target (70 %) less the
 hysteresis (5 %): it falls at once when the aim drops below it by the
 hysteresis or the load passes the target, starts rising only when the aim
 is the hysteresis above it, and then rises by at most a factor of two
@@ -75,28 +75,51 @@ last chord's budget; a limited block in which nothing fitted lets the
 estimate fall at the release rate, so the budget cannot stay below the
 cheapest thing the instrument renders.
 
-**5. Spikes are not believed until they last.** The first version believed
-every block, as the request asked ("a fast reaction to spikes"). On the
-real clock, on the development laptop, one block during which the thread
-was preempted for 56 ms (2118 % of the deadline) multiplied the estimate
+**5. Spikes: what the real clock taught.** The first version believed every
+block, as asked ("a fast reaction to spikes"), without bound. On the real
+clock, on the development laptop, one block during which the thread was
+preempted for 56 ms (2118 % of the deadline) multiplied the estimate
 twentyfold, the budget fell below the organ's cheapest pipe, nothing was
 rendered, and with nothing spent the governor learnt nothing more: the
-organ stayed silent. Bounding the rise (`max_rise`) alone still left it
-rendering 3 % of its pipes, because preemptions came several times a second
-and each halved the budget. Time stolen by the system does not shrink when
-the instrument renders less; a machine that has become slower stays slower
-over several blocks. So the estimate takes the lowest of the last three:
-a lone spike, or two, moves nothing, and a sustained rise moves it after
-three blocks, 8 ms at 128 frames and 48 kHz. `spike_blocks(1)` gives the
-first behaviour back. A pool's missed jobs count as a whole deadline's
-load and go through the same rule.
+organ stayed silent. Two changes fix that for good. The instrument says
+whether it was limited, and a limited block in which nothing fitted lets
+the estimate fall at the release rate. One block raises the estimate by
+at most `max_rise`.
 
-The cost is measured in the tests: under a cost that moves by ±10 % every
-block, the budget stays within 2.5 % under and 4 % over its mean; under
-±50 %, within 17 % under and 19 % over, turning round nine times a second
-in small steps, with blocks over the target 28 % of the time and none over
-the deadline. Believing every block keeps the budget still under ±20 % but
-lower, where the costliest blocks fit.
+What is left is a choice. Time stolen by the system does not shrink when
+the instrument renders less, but neither can the governor tell it from a
+machine that has become slower. Believing every block (the default)
+answers within a block, and follows the costliest blocks; going by the
+lowest of the last few (`spike_blocks(3)`) ignores a spike shorter than
+that, and lets more of the blocks whose cost really varies be late.
+`examples/governor_organ.rs`, a `PartialBank` organ asked for twice what
+fits, measured on the development laptop (an i3-1215U, two performance
+and four efficiency cores) while other programs used most of it (without
+the governor, the organ's median block took 1.7 to 14 times its
+calibrated time), at normal thread priority, 10 or 20 seconds a run:
+
+| Setting | Blocks late | Organ rendered | Median load |
+|---|---|---|---|
+| default (`spike_blocks` 1, `max_rise` 2) | 0.3 to 0.7 % | 0.3 to 6 % | 1 to 16 % |
+| `max_rise` 1.1 | 3.1 % | 8.7 % | 16 % |
+| `spike_blocks` 3 | 6 to 39 % | 7 to 18 % | 28 to 46 % |
+| `spike_blocks` 3, `max_rise` 1.25 | 5.3 % | 15 % | 50 % |
+| no governor | 100 % | 100 % | 170 to 1430 % |
+
+The default keeps the deadline, which is what the governor is for, and
+pays for it in sound on a machine this busy: the estimate climbs to the
+costliest blocks faster than the release brings it down. Rendering 35 %
+would load the target at the calibrated cost. On a quiet machine or a
+real-time thread, nothing has been measured yet.
+
+The fake-clock tests measure the same trade under a cost that moves by a
+random amount every block: by default ±20 % moves nothing once settled,
+the budget sitting where the costliest blocks fit, and ±50 % keeps it
+within 3.6 % under and 9.7 % over its mean, turning round three times a
+second; with `spike_blocks(3)`, ±50 % keeps it within 17 % under and 19 %
+over, turning round nine times a second, nearer the target on average. In
+none of these was a block late. A pool's missed jobs count as a whole
+deadline's load and go through the same rules.
 
 **6. The clock.** `Clock::now` gives a monotonic `Duration`; `SystemClock`
 reads `Instant::now`, twice a block: `QueryPerformanceCounter` on Windows,
@@ -124,15 +147,15 @@ if it knows; unlimited otherwise.
   to a cheaper tier changes sound at once unless the instrument
   cross-fades its tiers. The budget rises slowly, so promotions are spread
   out, but each is still a step.
-- A rise in cost shorter than three blocks is not answered, by design: if
-  it is the instrument's own work, those blocks may be late.
+- On a busy machine the default degrades far more than the work alone
+  would need, since it cannot tell stolen time from cost; an instrument
+  that would rather risk late blocks than thin out sets `spike_blocks` or
+  a smaller `max_rise`.
 - The first block after `new` or `reset`, with nothing learnt, renders the
   full demand; an instrument that knows it will overload can set a
   maximum.
-- On a loaded machine at normal thread priority, preemption dominates:
-  the example `governor_organ` holds the median load under the target
-  while a third of its blocks are still late, for reasons no budget can
-  change. The governor is meant to run on a real-time thread.
+- The governor is meant to run on a real-time thread, where preemption is
+  rarer; it has been measured only at normal priority.
 
 ## Alternatives not taken
 
@@ -144,8 +167,14 @@ if it knows; unlimited otherwise.
   (additive increase, multiplicative decrease). It forgets the cost during
   a rest, so the first chord after one overloads; and its steps are
   audible whatever their size.
-- **A median of the recent loads** instead of their minimum. It rejects one
-  spike in three but not two; stolen time only ever adds, so the minimum
-  is the better estimate of what the work itself cost.
+- **A median of the recent loads** instead of their minimum, for
+  `spike_blocks`. It rejects one spike in three but not two; stolen time
+  only ever adds, so the minimum is the better estimate of what the work
+  itself cost.
+- **Tracking a quantile of the cost** (a step up on every block over the
+  estimate, a smaller one down on every other, so that a chosen share of
+  blocks is over). It would hold the share of blocks over the target, but
+  if stolen time alone puts more blocks than that over, it climbs without
+  end just the same; not tried.
 - **Deciding inside the render pool.** The pool knows its jobs, not what a
   voice at a cheaper tier costs; the governor reads its misses instead.

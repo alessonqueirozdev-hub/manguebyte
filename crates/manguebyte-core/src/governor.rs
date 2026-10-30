@@ -33,23 +33,25 @@
 //!
 //! # How it moves
 //!
-//! - **Spikes.** The estimate goes by the lowest load per unit of the last
-//!   [`spike_blocks`](GovernorConfig::spike_blocks) blocks learnt from
-//!   (three unless set), so a rise in cost moves it once it has lasted that
-//!   many: 8 ms in blocks of 128 frames at 48 kHz. A thread preempted for
-//!   tens of milliseconds, or a pool's worker that was, makes one block
-//!   late, and rendering less would not have helped; a machine that has
-//!   become slower (other programs, a lower clock) stays slower. Measured
-//!   on a loaded laptop, an estimate that believed every block followed
-//!   the preemptions down and left a synthetic organ rendering 3 % of its
-//!   pipes (ADR 0018).
-//! - **Attack.** When that load per unit is above the estimate, the
+//! - **Attack.** When a block's load per unit is above the estimate, the
 //!   estimate moves towards it by [`attack`](GovernorConfig::attack) of the
-//!   way at once (half, unless set), and all the way when the load it
-//!   gives the block is above the [ceiling](GovernorConfig::ceiling). The
-//!   budget follows down in the same block. One block raises the estimate
-//!   by at most [`max_rise`](GovernorConfig::max_rise) (a factor of two
-//!   unless set). The first block learnt from is taken as it is.
+//!   way at once (half, unless set), and all the way when the block's load
+//!   is above the [ceiling](GovernorConfig::ceiling). The budget follows
+//!   down in the same block. One block raises the estimate by at most
+//!   [`max_rise`](GovernorConfig::max_rise) (a factor of two unless set),
+//!   so a thread preempted for tens of milliseconds halves the budget
+//!   rather than silence the instrument. The first block learnt from is
+//!   taken as it is.
+//! - **Spikes.** By default every block is believed.
+//!   [`spike_blocks`](GovernorConfig::spike_blocks) makes the estimate go
+//!   by the lowest load per unit of the last few blocks learnt from, so a
+//!   rise moves it only once it has lasted that many: a lone preemption
+//!   then moves nothing, but a cost that really varies from block to block
+//!   makes more blocks late. On a laptop busy with other programs, with a
+//!   synthetic organ asked for twice what fits, believing every block left
+//!   0.3 to 0.7 % of the blocks late and rendered 0.3 to 6 % of the organ;
+//!   going by the last three, 6 to 39 % late and 7 to 18 % rendered
+//!   (ADR 0018). Which is better is the instrument's choice.
 //! - **Release.** When it is below, the estimate falls with the
 //!   [release](GovernorConfig::release) time constant, and the budget rises
 //!   by at most a factor of two every [`doubling`](GovernorConfig::doubling)
@@ -95,12 +97,12 @@
 //!
 //! A block in which a render pool (ADR 0015) missed jobs, because its wait
 //! limit passed while a worker still held them, counts as at least a whole
-//! deadline's load, whatever the clock said, and like any other load it
-//! moves the estimate once it has lasted
-//! [`spike_blocks`](GovernorConfig::spike_blocks): tell the governor through
-//! [`note_missed`](Governor::note_missed) before
-//! [`end_block`](Governor::end_block). Time the pool's `run` and the mix
-//! after it between [`begin_block`](Governor::begin_block) and
+//! deadline's load, whatever the clock said, and goes through the same
+//! rules as any other load (with
+//! [`spike_blocks`](GovernorConfig::spike_blocks) above one, it must
+//! last). Tell the governor through [`note_missed`](Governor::note_missed)
+//! before [`end_block`](Governor::end_block), and time the pool's `run` and
+//! the mix after it between [`begin_block`](Governor::begin_block) and
 //! `end_block`.
 //!
 //! # Real time
@@ -209,8 +211,8 @@ impl GovernorConfig {
     /// 90 %, a hysteresis of 5 %, an attack of half the way a block, a
     /// release time constant of half a second, a budget that at most
     /// doubles every half second, learning from blocks loaded to at least
-    /// half the target, an estimate that one block at most doubles, and a
-    /// rise in cost believed once it has lasted three blocks learnt from.
+    /// half the target, an estimate that one block at most doubles, and
+    /// every block believed (see [`spike_blocks`](Self::spike_blocks)).
     pub const fn new() -> GovernorConfig {
         GovernorConfig {
             target: 0.7,
@@ -221,7 +223,7 @@ impl GovernorConfig {
             doubling: Duration::from_millis(500),
             learn_above: 0.5,
             max_rise: 2.0,
-            spike_blocks: 3,
+            spike_blocks: 1,
         }
     }
 
@@ -606,8 +608,8 @@ impl<C: Clock> Governor<C> {
 
         // What the decisions below go by: the block's load, or, for a block
         // learnt from, the load its units would have had at the lowest cost
-        // per unit of the last few such blocks, so that one block's spike
-        // moves nothing.
+        // per unit of the last `spike_blocks` such blocks (its own unless
+        // set), so that a spike shorter than that moves nothing.
         let mut steady_load = load;
         if spent > 0.0 && (limited || load >= config.learn_above * config.target) {
             self.recent[self.recent_next] = load / spent;
