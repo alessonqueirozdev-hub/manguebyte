@@ -167,3 +167,73 @@ fn vector_operations_never_allocate() {
     });
     assert_eq!(calls, 0, "a vector operation used the heap");
 }
+
+#[test]
+fn running_a_pool_never_allocates() {
+    use std::time::{Duration, Instant};
+
+    use manguebyte_core::pool::{Job, PoolConfig, RenderPool};
+
+    /// Fills its buffer for a while, so that the audio thread also waits
+    /// for workers, which reads the clock.
+    struct Busy {
+        out: Vec<f32>,
+        seed: f32,
+    }
+
+    impl Job for Busy {
+        fn render(&mut self) {
+            let start = Instant::now();
+            let length = Duration::from_micros(if cfg!(miri) { 1 } else { 40 });
+            while start.elapsed() < length {
+                for sample in &mut self.out {
+                    self.seed = (self.seed * 1.000_1 + 0.001).fract();
+                    *sample = self.seed;
+                }
+            }
+        }
+    }
+
+    let jobs = (0..24)
+        .map(|index| Busy {
+            out: vec![0.0; 128],
+            seed: index as f32 / 24.0,
+        })
+        .collect();
+    let mut pool = RenderPool::new(jobs, PoolConfig::with_workers(3));
+    let helper = pool.helper();
+    let mut mix = [0.0f32; 128];
+    // A first block, so that nothing below is done for the first time.
+    pool.run(24);
+    let blocks = if cfg!(miri) { 2 } else { 50 };
+    let calls = heap_calls(|| {
+        for block in 0..blocks {
+            // Every path: waiting for workers within the limit, giving up
+            // on them at once, and offering the work to helpers.
+            pool.set_wait_limit(if block % 5 == 4 {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(1)
+            });
+            let _ = if block % 2 == 0 {
+                pool.run(24)
+            } else {
+                pool.run_with(block % 24, |_| false)
+            };
+            mix.fill(0.0);
+            for (_, job) in pool.rendered() {
+                for (sum, sample) in mix.iter_mut().zip(&job.out) {
+                    *sum += sample;
+                }
+            }
+            for index in 0..24 {
+                if let Some(job) = pool.job_mut(index) {
+                    job.seed *= 0.5;
+                }
+            }
+            helper.help();
+        }
+        let _ = pool.stats();
+    });
+    assert_eq!(calls, 0, "running the pool used the heap");
+}
