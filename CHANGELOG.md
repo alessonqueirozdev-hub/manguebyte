@@ -693,6 +693,45 @@ break the API.
     go out on four stereo buses and together on the main output. CI runs
     clap-validator, Steinberg's validator, lilv and auval on it.
 
+- **Parameter names that change at run time** ([ADR 0020](docs/adr/0020-parameter-names-at-run-time.md)),
+  for a plugin whose parameters stand for different things at different
+  times, such as an organ whose numbered stops drive whichever organ is
+  loaded. `ParamInfo::set_display_name`, `set_short_name` and
+  `set_display_unit` work from any thread but the audio thread; the id
+  and `ParamId` never change. `display_name`, `short_name` and
+  `display_unit` read the current labels (`Param::display_name` too),
+  while `name` and `unit` keep what the parameter was made with.
+  `with_short_name` gives a short name from the start. The labels sit
+  behind a lock taken off the audio thread only; `labels_version`, on
+  `ParamInfo` and summed on `ParamSet`, counts changes in an atomic and is
+  what the wrappers poll, so a batch of renames is one notice to the host.
+  `ParamDescription` and the text of values (`display_plain`,
+  `parse_display`) follow the current name and unit.
+  - CLAP: `get_info` gives the current name. The audio side notices a new
+    count before each block and in `flush` and asks for `on_main_thread`,
+    which calls `rescan(CLAP_PARAM_RESCAN_INFO)` once; `activate` does
+    the same, and a state load and the editor's `values_changed` add
+    `INFO` to the `VALUES` rescan they ask for.
+  - VST 3: `getParameterInfo` gives the current title, short title and
+    units; `restartComponent(kParamTitlesChanged)` is asked for once at
+    `setActive`, `setState`, `setComponentState` or `setComponentHandler`,
+    and an editor's `values_changed` asks for values and titles in one
+    restart. VST 3 offers no call on the main thread to ask for, so a
+    rename waits for one of these.
+  - AU: `ParameterInfo` gives the current name and picks the unit from the
+    current unit text; `Initialize` and a restored `ClassInfo` tell the
+    listeners of `kAudioUnitProperty_ParameterList` once.
+  - LV2: hosts see the names in the shipped Turtle files only.
+  Tested: renames on one thread while others read them, the count never
+  waiting for a writer that holds the lock, sixty renames coalescing into
+  one change; polling while another thread renames uses no heap
+  (`manguebyte-plugin`'s `realtime.rs`), nor do CLAP blocks run during
+  renames; one CLAP `INFO` rescan per batch, at activation, and with the
+  values at a state load and from the editor; one VST 3 title restart per
+  batch and with the values from the editor; one AU parameter-list notice
+  per batch; and `manguebyte-host` listing the new names of a plugin
+  hosted through both wrappers in process. Not tried in a DAW
+  (TECH_DEBT item 113).
 - **Identity at run time** ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)).
   `Plugin::info()` gives a plugin's id, name, vendor, version and
   description, `Plugin::INFO` unless overridden, so one pre-built engine

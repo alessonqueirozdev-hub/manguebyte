@@ -326,6 +326,15 @@ Write a processor once and ship it in every format.
   on Linux, not run on macOS (appended data breaks a signature there), and
   AU `Info.plist` and LV2 Turtle files are not rewritten per copy
   (TECH_DEBT 100)
+- 🚧 Parameter names that change at run time ([ADR 0020](docs/adr/0020-parameter-names-at-run-time.md)):
+  display name, short name and unit set from any thread but the audio
+  thread, with ids unchanged, reported by the CLAP, VST 3 and AU wrappers
+  and told to the host once per batch (CLAP `rescan(INFO)`, VST 3
+  `kParamTitlesChanged`, AU `ParameterList`), tested against fake hosts
+  and through `manguebyte-host`. VST 3 and AU have no main-thread call to
+  ask for, so a rename waits for the host's next call that can carry it;
+  LV2 hosts see the shipped names; `manguebyte-ui`'s labels show the
+  names parameters were made with; not tried in a DAW (TECH_DEBT 113)
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
