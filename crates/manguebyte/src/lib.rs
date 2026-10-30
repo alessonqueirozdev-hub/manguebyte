@@ -121,7 +121,9 @@ pub mod prelude {
         BoolParam, Changed, ChoiceParam, FloatParam, FloatRange, IntParam, Param, ParamSet,
         ParamSmoother, ParamState, Smoothing, param_set,
     };
-    pub use crate::plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
+    pub use crate::plugin::{
+        AudioLayout, AuxOutput, AuxOutputs, Harness, Plugin, PluginInfo, PluginKind,
+    };
     pub use crate::source::{AudioSource, BufferSource, PositionableSource};
     pub use crate::{
         AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,

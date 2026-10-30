@@ -1,0 +1,28 @@
+[package]
+name = "mangue-divisions"
+description = "An example CLAP, VST 3, LV2 and Audio Unit instrument built with Manguebyte: a small organ with each division on an output bus of its own."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3", "lv2"] }
+# The Audio Unit wrapper, used directly, as Mangue Pluck does.
+manguebyte-au.workspace = true
+
+[dev-dependencies]
+# The test is a host: it loads the library cargo built for this package.
+manguebyte-host.workspace = true
+
+[package.metadata.manguebyte]
+name = "Mangue Divisions"
+
+[lints]
+workspace = true

@@ -250,9 +250,11 @@ jobs:
       # plugin go through the validator.
       - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
       - run: ./scripts/bundle-clap.sh mangue-duck "Mangue Duck"
+      # And an instrument with four auxiliary output buses.
+      - run: ./scripts/bundle-clap.sh mangue-divisions "Mangue Divisions"
       - name: Validate
         run: |
-          for plugin in "Mangue Pluck" "Mangue Duck"; do
+          for plugin in "Mangue Pluck" "Mangue Duck" "Mangue Divisions"; do
             "$RUNNER_TEMP/clap-validator/target/release/clap-validator" validate \
               "target/bundled/$plugin.clap" | tee validation.txt
             # The tool reports failures in its summary; make them fail the job.
@@ -311,10 +313,12 @@ jobs:
       # plugin go through the validator.
       - run: ./scripts/bundle-vst3.sh mangue-pluck "Mangue Pluck"
       - run: ./scripts/bundle-vst3.sh mangue-duck "Mangue Duck"
+      # And an instrument with four auxiliary output buses.
+      - run: ./scripts/bundle-vst3.sh mangue-divisions "Mangue Divisions"
       - name: Validate
         run: |
           validator="$(find "$RUNNER_TEMP/vst3-validator" -type f -name 'validator*' | head -n 1)"
-          for plugin in "Mangue Pluck" "Mangue Duck"; do
+          for plugin in "Mangue Pluck" "Mangue Duck" "Mangue Divisions"; do
             "$validator" -e "target/bundled/$plugin.vst3" > validation.txt || true
             # The full log lists every parameter, the hidden ones that stand
             # for MIDI controllers included, and a line after every test.
@@ -429,11 +433,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lilv-utils lv2-dev
       - run: cargo run -p cargo-mangue -- mangue bundle -p mangue-pluck --format lv2 --release --out target/lv2
       - run: cargo run -p cargo-mangue -- mangue bundle -p mangue-duck --format lv2 --release --out target/lv2
+      - run: cargo run -p cargo-mangue -- mangue bundle -p mangue-divisions --format lv2 --release --out target/lv2
       - name: Load the bundles with lilv
         run: |
           export LV2_PATH="$PWD/target/lv2:/usr/lib/lv2"
           lv2ls | tee plugins.txt
-          for uri in urn:manguebyte:org.manguebyte.pluck urn:manguebyte:org.manguebyte.duck; do
+          for uri in urn:manguebyte:org.manguebyte.pluck urn:manguebyte:org.manguebyte.duck urn:manguebyte:org.manguebyte.divisions; do
             grep -Fxq "$uri" plugins.txt
             lv2info "$uri"
           done
@@ -453,12 +458,14 @@ jobs:
       # job does.
       # The AU host's macOS code (AudioToolbox, CoreFoundation's property
       # lists) is linted here too: no other job compiles it.
-      - run: cargo clippy -p manguebyte-au -p manguebyte-host -p mangue-pluck -p mangue-duck --all-targets
+      - run: cargo clippy -p manguebyte-au -p manguebyte-host -p mangue-pluck -p mangue-duck -p mangue-divisions --all-targets
       - run: cargo test -p manguebyte-au
       # An instrument and an effect with a sidechain, installed where hosts
       # look, so that Apple's own validator finds them by their codes.
       - run: cargo run -p cargo-mangue -- mangue install -p mangue-pluck --format au --release
       - run: cargo run -p cargo-mangue -- mangue install -p mangue-duck --format au --release
+      # And an instrument with four auxiliary output elements.
+      - run: cargo run -p cargo-mangue -- mangue install -p mangue-divisions --format au --release
       # auval is Apple's conformance tool, part of macOS. It loads a unit the
       # way Logic Pro and GarageBand do and checks its properties, formats,
       # parameters, state, MIDI and rendering. Any failure fails the job.
@@ -467,7 +474,7 @@ jobs:
           # The system caches the units it has seen: make it look again.
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           auval -a | grep -i manguebyte || true
-          for bundle in "Mangue Pluck" "Mangue Duck"; do
+          for bundle in "Mangue Pluck" "Mangue Duck" "Mangue Divisions"; do
             plist="$HOME/Library/Audio/Plug-Ins/Components/$bundle.component/Contents/Info.plist"
             codes=()
             for key in type subtype manufacturer; do

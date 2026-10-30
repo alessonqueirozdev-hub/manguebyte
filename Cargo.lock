@@ -587,6 +587,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mangue-divisions"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+ "manguebyte-au",
+ "manguebyte-host",
+]
+
+[[package]]
 name = "mangue-duck"
 version = "0.1.0"
 dependencies = [
