@@ -141,6 +141,15 @@ break the API.
   sample for sample; the mono sum `L + R` is unchanged to 1e-14 at every
   width, with bass mono on or off; the side below the cutoff follows the
   crossover's high band to 0.05 dB (24.6 dB down an octave below it).
+- `TransientShaper`: the attack and the sustain of each note raised or
+  lowered, independently of its level, from an `EnvelopeFollower` of the
+  peak level and two followers of that envelope, one slow to rise and one
+  slow to fall; a gain is applied in proportion to how far the envelope is
+  from its follower, all of it from 12 dB. Measured: the first millisecond
+  of a hit out of silence moves by the attack gain to 0.1 dB, at levels
+  from 0 to -40 dB and gains from -12 to +12 dB; the tail from 150 to
+  300 ms by the sustain gain to 0.05 dB; steady tones at 100 Hz and 1 kHz
+  stay within 1 dB of their level with both gains at +12 dB.
 
 ### Formats
 

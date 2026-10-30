@@ -1587,7 +1587,7 @@ fn a_partial_bank_does_not_use_the_heap() {
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
         AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingCarrier, RingModulator, StereoWidener,
-        Tremolo,
+        TransientShaper, Tremolo,
     };
 
     check(
@@ -1645,6 +1645,13 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_bass_mono_hz(150.0),
     );
 
+    check(
+        "TransientShaper",
+        TransientShaper::<f32>::new()
+            .with_attack_db(18.0)
+            .with_sustain_db(-12.0),
+    );
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1687,7 +1694,8 @@ fn the_workstation_effects_do_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, StereoWidener, Tremolo,
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, StereoWidener,
+        TransientShaper, Tremolo,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1702,6 +1710,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     shifter.prepare(&SPEC);
     let mut widener = StereoWidener::<f32>::new();
     widener.prepare(&SPEC);
+    let mut shaper = TransientShaper::<f32>::new();
+    shaper.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1758,6 +1768,12 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             widener.set_bass_mono(step % 3 != 1);
             widener.set_bass_mono_hz(40.0 + 60.0 * turn);
             widener.process(&mut buffer);
+
+            shaper.set_attack_db(3.0 * turn - 20.0);
+            shaper.set_sustain_db(20.0 - 3.0 * turn);
+            shaper.set_attack_ms(1.0 + 10.0 * turn);
+            shaper.set_sustain_ms(50.0 + 200.0 * turn);
+            shaper.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

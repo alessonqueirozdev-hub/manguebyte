@@ -69,6 +69,7 @@ mod synth;
 #[cfg(test)]
 mod testing;
 pub mod timeline;
+mod transient;
 mod tremolo;
 pub mod wavetable;
 mod widener;
@@ -108,6 +109,7 @@ pub use shifter::FrequencyShifter;
 pub use stft::{SpectralProcessor, Stft, StftError, StftSettings};
 pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
+pub use transient::TransientShaper;
 pub use tremolo::{AutoPan, Tremolo};
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};
 pub use widener::StereoWidener;
