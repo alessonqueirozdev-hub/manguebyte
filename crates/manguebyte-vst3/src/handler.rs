@@ -77,6 +77,11 @@ impl Handler {
         self.current.borrow().clone()
     }
 
+    /// Whether the host has given a handler, so that `restart` reaches it.
+    pub(crate) fn is_set(&self) -> bool {
+        self.current.borrow().is_some()
+    }
+
     /// Keeps `handler` from now on, in place of the one before, which is
     /// released. Edits begun on the old handler are ended on it and begun
     /// on the new one. Setting the handler that is already kept changes

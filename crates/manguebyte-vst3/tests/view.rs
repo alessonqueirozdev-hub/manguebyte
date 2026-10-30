@@ -1844,6 +1844,124 @@ fn values_the_editor_changed_without_gestures_are_read_again() {
     assert_eq!(session.shown(CUTOFF), 0.8);
 }
 
+/// The title, short title and units the controller gives for `param`.
+fn titles(session: &Session, param: ParamId) -> (String, String, String) {
+    let wanted = param_id(param);
+    let count = unsafe { session.controller.getParameterCount() };
+    for index in 0..count {
+        let mut info: vst::ParameterInfo = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { session.controller.getParameterInfo(index, &mut info) },
+            kResultOk
+        );
+        if info.id == wanted {
+            let text = |field: &[u16]| {
+                let end = field.iter().position(|&c| c == 0).unwrap_or(field.len());
+                String::from_utf16_lossy(&field[..end])
+            };
+            return (text(&info.title), text(&info.shortTitle), text(&info.units));
+        }
+    }
+    panic!("no parameter {param:?}");
+}
+
+/// The parameters renamed on another thread, all at once, as a plugin
+/// that loads a whole new instrument does.
+fn load_instrument(prefix: &'static str) {
+    let params = params();
+    std::thread::spawn(move || {
+        for param in [&params.cutoff as &dyn Param, &params.mode, &params.gain] {
+            let name = format!("{prefix} {}", param.name());
+            param.info().set_display_name(&name);
+            param.info().set_short_name(&name[..4]);
+        }
+        params.gain.info().set_display_unit("dB");
+    })
+    .join()
+    .unwrap();
+}
+
+/// Three parameters renamed, and their unit changed, are one
+/// `restartComponent(kParamTitlesChanged)` at the next call the host makes
+/// into the controller that may carry it, and `getParameterInfo` gives the
+/// new titles. Calls with nothing renamed in between ask for nothing.
+#[test]
+fn a_batch_of_renames_is_one_title_restart_and_the_info_gives_the_new_titles() {
+    let session = Session::panel();
+    session.host.take_edits();
+    assert_eq!(
+        titles(&session, GAIN),
+        ("Gain".into(), "Gain".into(), String::new())
+    );
+
+    load_instrument("Swell");
+    session.activate();
+    let titles_changed = vst::RestartFlags_::kParamTitlesChanged as i32;
+    assert_eq!(
+        session.host.take_edits(),
+        [HostCall::Restart(titles_changed)]
+    );
+    assert_eq!(
+        titles(&session, GAIN),
+        ("Swell Gain".into(), "Swel".into(), "dB".into())
+    );
+    assert_eq!(titles(&session, CUTOFF).0, "Swell Cutoff");
+    unsafe {
+        assert_eq!(
+            session.controller.setComponentState(ptr::null_mut()),
+            kResultOk
+        );
+        assert_eq!(session.component.setActive(0), kResultOk);
+    }
+    assert_eq!(session.host.take_edits(), []);
+
+    // A state load that comes with a new instrument.
+    load_instrument("Choir");
+    unsafe {
+        assert_eq!(
+            session.controller.setComponentState(ptr::null_mut()),
+            kResultOk
+        );
+    }
+    assert_eq!(
+        session.host.take_edits(),
+        [HostCall::Restart(titles_changed)]
+    );
+    assert_eq!(titles(&session, MODE).0, "Choir Mode");
+    // The id is the same, so automation and state still find the
+    // parameter.
+    assert_eq!(params().mode.param_id(), MODE);
+    session.host.assert_no_failures();
+}
+
+#[test]
+fn values_changed_after_renames_has_the_host_read_the_titles_in_the_same_restart() {
+    let session = Session::panel();
+    let ui = session.view();
+    assert_eq!(ui.attach_hwnd(), kResultOk);
+    session.host.take_edits();
+    load_instrument("Great");
+    params().gain.set(0.25);
+    with_probe(|probe| probe.out(EditorContext::values_changed));
+    assert_eq!(
+        session.host.take_edits(),
+        [HostCall::Restart(
+            (vst::RestartFlags_::kParamValuesChanged | vst::RestartFlags_::kParamTitlesChanged)
+                as i32
+        )]
+    );
+    assert_eq!(session.shown(GAIN), 0.25);
+    assert_eq!(titles(&session, GAIN).0, "Great Gain");
+    // Values alone, later, are values alone.
+    with_probe(|probe| probe.out(EditorContext::values_changed));
+    assert_eq!(
+        session.host.take_edits(),
+        [HostCall::Restart(
+            vst::RestartFlags_::kParamValuesChanged as i32
+        )]
+    );
+}
+
 // --- The view's lifecycle ----------------------------------------------------
 
 #[test]

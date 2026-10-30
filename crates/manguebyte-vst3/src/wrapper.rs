@@ -54,6 +54,19 @@
 //! at once, as `setParamNormalized` stores it. No edit is ever inferred by
 //! comparing values, which would report the host's automation and restored
 //! state back to it as a person's edits.
+//!
+//! # New parameter names
+//!
+//! `getParameterInfo` always gives a parameter's current display name,
+//! short name and unit. When the set's
+//! [`labels_version`](ParamSet::labels_version) has moved since the host
+//! was last told, the host is asked once to read every title again,
+//! `restartComponent(kParamTitlesChanged)`, however many parameters were
+//! renamed. VST 3 has no way for a plugin to ask for a call on the main
+//! thread, so this is checked where the host calls in anyway: `setActive`,
+//! `setState`, `setComponentState` and `setComponentHandler`, and an open
+//! editor's `values_changed`, which asks for both values and titles in one
+//! restart (ADR 0020).
 
 // The bindings give enumerations a different integer type on Windows than
 // elsewhere, so a cast that is needed on one platform is redundant on the
@@ -66,7 +79,7 @@ use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
@@ -78,6 +91,7 @@ use manguebyte_plugin::{
     AudioLayout, AuxOutputs, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
     apply_param_events, load_state, offered_layouts, save_state,
 };
+use vst3::Steinberg::Vst::RestartFlags_::kParamTitlesChanged;
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};
 use vst3::Steinberg::{
     self as sb, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, TBool, TUID, kInvalidArgument,
@@ -321,6 +335,9 @@ pub(crate) struct Controls {
     /// Whether the host is delivering blocks, so that parameter changes
     /// arrive in `process`.
     running: AtomicBool,
+    /// The parameters' [`labels_version`](ParamSet::labels_version) when
+    /// the host was last asked to read their titles. Main thread only.
+    labels_told: AtomicU64,
 }
 
 impl Controls {
@@ -342,6 +359,15 @@ impl Controls {
     /// The plugin parameter with this VST 3 id.
     fn param(&self, id: u32) -> Option<&dyn Param> {
         self.params.find_param(self.ids[self.index_of(id)?].0)
+    }
+
+    /// Main thread, about to ask the host to read the parameters' titles
+    /// again: whether any parameter was given a new name, short name or
+    /// unit since it was last asked, and if so, notes that it is asked now.
+    /// However many were renamed, that is one answer of `true` (ADR 0020).
+    pub(crate) fn take_new_labels(&self) -> bool {
+        let now = self.params.labels_version();
+        self.labels_told.swap(now, Ordering::Relaxed) != now
     }
 
     /// Makes the controller report the parameters' own values again, after
@@ -448,6 +474,7 @@ impl<P: Plugin> Component<P> {
 
         let shared: Arc<dyn ParamSet> = params.clone();
         let controls = Arc::new(Controls {
+            labels_told: AtomicU64::new(shared.labels_version()),
             params: shared,
             ids,
             shown,
@@ -528,6 +555,21 @@ impl<P: Plugin> Component<P> {
     /// something other than the host's controller calls changed them.
     fn show_current_values(&self) {
         self.controls.show_current_values();
+    }
+
+    /// Main thread: if any parameter was renamed since the host was last
+    /// told, and the host has given a handler, asks it once to read every
+    /// parameter's title again (`restartComponent(kParamTitlesChanged)`).
+    ///
+    /// VST 3 gives a plugin no call on the main thread of its own, so this
+    /// runs where the host calls the controller anyway: `setActive`, the
+    /// state calls and `setComponentHandler`, and, from an open editor,
+    /// `values_changed` (see the view). A rename made while none of those
+    /// comes reaches the host at the next one (TECH_DEBT item 113).
+    fn tell_new_labels(&self) {
+        if self.handler.is_set() && self.controls.take_new_labels() {
+            self.handler.restart(kParamTitlesChanged as i32);
+        }
     }
 
     /// Closes every editor of the plugin and lets go of the host's handler,
@@ -1258,6 +1300,9 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                     audio.notes.reset();
                 }
             }
+            // The audio state is no longer used here: the host may call
+            // back from inside the handler.
+            self.tell_new_labels();
             kResultOk
         })
     }
@@ -1296,6 +1341,8 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
             match load_state::<P>(&self.params, text) {
                 Ok(_) => {
                     self.show_current_values();
+                    // A plugin may rename parameters as it loads.
+                    self.tell_new_labels();
                     kResultOk
                 }
                 Err(_) => kResultFalse,
@@ -1547,10 +1594,14 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
 
 impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
     unsafe fn setComponentState(&self, _state: *mut IBStream) -> tresult {
-        // The component is this same object and already has its state, so
-        // there is nothing to read; the controller only has to report it.
-        self.show_current_values();
-        kResultOk
+        guard(kResultFalse, || {
+            // The component is this same object and already has its state,
+            // so there is nothing to read; the controller only has to report
+            // it, with any names the load gave the parameters.
+            self.show_current_values();
+            self.tell_new_labels();
+            kResultOk
+        })
     }
 
     unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
@@ -1588,9 +1639,9 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
                 bits |= flags::kIsBypass as i32;
             }
             info.id = id;
-            copy_wide(param.name(), &mut info.title);
-            copy_wide(param.name(), &mut info.shortTitle);
-            copy_wide(param.info().unit(), &mut info.units);
+            copy_wide(&param.display_name(), &mut info.title);
+            copy_wide(&param.info().short_name(), &mut info.shortTitle);
+            copy_wide(&param.info().display_unit(), &mut info.units);
             info.stepCount = param
                 .step_count()
                 .map_or(0, |steps| steps.min(i32::MAX as u32) as i32);
@@ -1711,6 +1762,8 @@ impl<P: Plugin> vst::IEditControllerTrait for Component<P> {
             // `terminate`, or when the component goes away.
             let handler = unsafe { ComRef::from_raw(handler) }.map(|handler| handler.to_com_ptr());
             self.handler.set(handler);
+            // Names given before there was a handler to tell.
+            self.tell_new_labels();
             kResultOk
         })
     }

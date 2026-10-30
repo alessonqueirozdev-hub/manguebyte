@@ -17,6 +17,14 @@ auxiliary audio output bus, named, of one width, active by default as
 declared and switched by `activateBus`; a bus switched off is not given
 to the plugin and is written silent. Not there yet: program lists.
 
+`getParameterInfo` gives each parameter's current title, short title and
+units. When a plugin renames parameters (ADR 0020), the host is asked once
+per batch for `restartComponent(kParamTitlesChanged)`, at the next
+`setActive`, `setState`, `setComponentState` or `setComponentHandler`, or
+with the values when an open editor calls `values_changed`. VST 3 gives a
+plugin no call on the main thread of its own, so a rename made outside
+those waits for the next of them.
+
 The factory reports the plugin's identity at run time
 (`manguebyte_plugin::plugin_info`, ADR 0012), and its class id is
 `class_id` of that identity's id, so two copies of one library with

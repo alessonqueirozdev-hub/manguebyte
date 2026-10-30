@@ -16,7 +16,9 @@
 //!   set, which also becomes what the controller reports (see the wrapper's
 //!   module documentation for when it is stored into the parameter);
 //! - values it changed without gestures make the host read every value
-//!   again (`restartComponent` with `kParamValuesChanged`);
+//!   again (`restartComponent` with `kParamValuesChanged`), and their
+//!   titles too if parameters were renamed since the host last read them
+//!   (`kParamTitlesChanged`, ADR 0020);
 //! - its resize requests go to the host's `IPlugFrame::resizeView`;
 //! - its timers and descriptors go to the host's `IRunLoop`, which a host
 //!   on Linux offers through its frame ([`RunLoop`]), and so does its way
@@ -100,7 +102,7 @@ use manguebyte_plugin::editor::{
     OpenEditor, ParentWindow, Resize, WindowApi, checked_scale,
 };
 use vst3::Steinberg::Linux::IRunLoop;
-use vst3::Steinberg::Vst::RestartFlags_::kParamValuesChanged;
+use vst3::Steinberg::Vst::RestartFlags_::{kParamTitlesChanged, kParamValuesChanged};
 use vst3::Steinberg::{
     self as sb, FIDString, IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewContentScaleSupport,
     IPlugViewContentScaleSupportTrait, IPlugViewTrait, TBool, ViewRect, char16, int16,
@@ -421,8 +423,15 @@ impl EditorHost for ViewHost {
 
     fn values_changed(&self) {
         let _out = self.busy.calling_out();
-        self.editors.controls.show_current_values();
-        self.editors.handler.restart(kParamValuesChanged);
+        let controls = &self.editors.controls;
+        controls.show_current_values();
+        // An editor that loaded a whole new instrument may have renamed
+        // parameters too: the host reads their titles in the same restart.
+        let mut flags = kParamValuesChanged;
+        if self.editors.handler.is_set() && controls.take_new_labels() {
+            flags |= kParamTitlesChanged;
+        }
+        self.editors.handler.restart(flags);
     }
 
     fn request_resize(&self, size: HostSize) -> Option<HostSize> {
