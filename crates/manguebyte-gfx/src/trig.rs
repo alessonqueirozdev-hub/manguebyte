@@ -135,7 +135,16 @@ fn reduce(angle: f32) -> (u32, f64) {
 /// The angle is reduced to a quarter turn exactly, so the error against the
 /// true values is below 2e-16 for every finite `f32`, however large. A
 /// non-finite angle gives `NaN` for both.
-pub(crate) fn sin_cos(angle: f32) -> (f64, f64) {
+///
+/// Unlike `f32::sin`, the result is the same bits on every platform, so a
+/// widget that places what it draws with it records the same scene on
+/// Windows, Linux and macOS, as golden tests need.
+///
+/// ```
+/// let (sin, cos) = manguebyte_gfx::sin_cos(std::f32::consts::FRAC_PI_2);
+/// assert!((sin - 1.0).abs() < 1e-15 && cos.abs() < 1e-7);
+/// ```
+pub fn sin_cos(angle: f32) -> (f64, f64) {
     if !angle.is_finite() {
         return (f64::NAN, f64::NAN);
     }

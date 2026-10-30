@@ -12,5 +12,5 @@ clip rect(12 12 150 156) {
   stroke path(nonzero 146 segments 146 points bounds rect(14 36.747242 146 106.50554) fnv1a 43568a8abd9ac305) width 2 cap round join round solid(#ff7a45ff)
 }
 image 258x156 fnv1a ef4e134d4cabd76a rect(170 12 258 156) nearest
-columns rect(211.88692 35.94059 182.71837 88.22063) 183 entries fnv1a e1313646bf6e4371 linear(211.88692 39.94059, 211.88692 120.16122, pad [0 #ff5a1f73, 1 #ff5a1f00])
-stroke path(nonzero 183 segments 183 points bounds rect(211.88692 51.638943 182.71837 56.823933) fnv1a 00fd1f1a2d5a1a8e) width 2 cap round join round solid(#ff7a45ff)
+columns rect(211.88692 35.94059 182.71837 88.22063) 183 entries fnv1a 07fb181bf9164fe8 linear(211.88692 39.94059, 211.88692 120.16122, pad [0 #ff5a1f73, 1 #ff5a1f00])
+stroke path(nonzero 183 segments 183 points bounds rect(211.88692 51.638943 182.71837 56.823933) fnv1a eb28655fd8b26be7) width 2 cap round join round solid(#ff7a45ff)

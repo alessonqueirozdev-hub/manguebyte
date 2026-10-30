@@ -159,10 +159,10 @@ fn oscillators(scale: f32, theme: Theme) -> Harness {
                 .map(|i| {
                     let phase = i as f32 / 512.0 * std::f32::consts::TAU;
                     let saw: f32 = (1..=24)
-                        .map(|h| (phase * h as f32).sin() / h as f32)
+                        .map(|h| sin(phase * h as f32) / h as f32)
                         .sum::<f32>()
                         * 0.55;
-                    phase.sin() + (saw - phase.sin()) * t
+                    sin(phase) + (saw - sin(phase)) * t
                 })
                 .collect()
         })
@@ -486,4 +486,11 @@ fn tabs_and_sidebars_match_their_goldens() {
             }
         }
     }
+}
+
+/// The sine of `angle`, the same bits on every platform: `f32::sin` rounds
+/// differently on Windows, Linux and macOS, which would change the data the
+/// goldens are drawn from.
+fn sin(angle: f32) -> f32 {
+    manguebyte_gfx::sin_cos(angle).0 as f32
 }

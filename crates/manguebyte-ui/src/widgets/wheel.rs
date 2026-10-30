@@ -928,8 +928,8 @@ impl Wheel {
         let middle = face.y + face.height * 0.5;
         // The radius of the wheel, so that the slot shows `SHOWN` either
         // way.
-        let wheel_radius = face.height * 0.5 / SHOWN.sin();
-        let y_of = |angle: f32| middle - wheel_radius * angle.sin();
+        let wheel_radius = face.height * 0.5 / sin(SHOWN);
+        let y_of = |angle: f32| middle - wheel_radius * sin(angle);
         let value = self.position.value();
         let turned = (self.kind.position(value) - 0.5) * 2.0 * TURN;
         let marker = y_of(turned);
@@ -948,7 +948,7 @@ impl Wheel {
                 if angle.abs() >= SHOWN {
                     continue;
                 }
-                let facing = angle.cos();
+                let facing = cos(angle);
                 let y = y_of(angle);
                 let lit = Color::WHITE.with_opacity(ridge_light * facing);
                 let shade = Color::BLACK.with_opacity(ridge_shade * facing);
@@ -975,7 +975,7 @@ impl Wheel {
             }
             // The value: a bar across the wheel, thinner as it turns away,
             // glowing.
-            let thick = (4.0 * turned.cos()).max(1.5);
+            let thick = (4.0 * cos(turned)).max(1.5);
             let bar = Rect::new(face.x, marker - thick * 0.5, face.width, thick);
             glow_fill(scene, bar, accent, theme, 1.0);
             vertical(
@@ -1004,4 +1004,15 @@ impl fmt::Debug for Wheel {
             .field("holding", &self.holding)
             .finish_non_exhaustive()
     }
+}
+
+/// The sine of `angle`, the same bits on every platform, so that the scene
+/// a wheel records is the same on Windows, Linux and macOS.
+fn sin(angle: f32) -> f32 {
+    manguebyte_gfx::sin_cos(angle).0 as f32
+}
+
+/// The cosine of `angle`, the same bits on every platform.
+fn cos(angle: f32) -> f32 {
+    manguebyte_gfx::sin_cos(angle).1 as f32
 }

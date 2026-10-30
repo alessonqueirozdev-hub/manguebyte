@@ -109,6 +109,7 @@ pub use text::{
     Align, Caret, FontMetrics, Glyph, GlyphCacheStats, Line, OpticalSize, TYPEFACE_LICENCE,
     TextLayout, TextStyle,
 };
+pub use trig::sin_cos;
 
 #[cfg(test)]
 mod tests {
