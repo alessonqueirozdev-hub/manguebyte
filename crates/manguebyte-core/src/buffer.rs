@@ -1,6 +1,15 @@
 use crate::Sample;
 use crate::vector;
 
+/// What [`AudioBuffer::narrow`] took away, for [`AudioBuffer::widen`] to
+/// give back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a narrowed buffer stays narrow until `widen` is given this"]
+pub struct Window {
+    offset: usize,
+    frames: usize,
+}
+
 /// A planar, multi-channel block of audio samples.
 ///
 /// Each channel is stored contiguously, so [`channel`](Self::channel) hands out
@@ -198,6 +207,41 @@ impl<S: Sample> AudioBuffer<S> {
         range: core::ops::Range<usize>,
         work: impl FnOnce(&mut Self) -> R,
     ) -> R {
+        let window = self.narrow(range);
+        let result = work(self);
+        self.widen(window);
+        result
+    }
+
+    /// Narrows the buffer to the frames in `range`, as
+    /// [`windowed`](Self::windowed) does, until [`widen`](Self::widen) is
+    /// given what this returns. Nothing is copied or allocated.
+    ///
+    /// This is for narrowing several buffers together, such as a plugin's
+    /// output buses, which nested closures cannot do for a number of
+    /// buffers known only at run time. Prefer `windowed` otherwise: with
+    /// this pair, every `narrow` must be undone by a `widen` of the same
+    /// buffer, the most recent first.
+    ///
+    /// ```
+    /// use manguebyte_core::AudioBuffer;
+    ///
+    /// let mut buses = [AudioBuffer::<f32>::new(1, 4), AudioBuffer::<f32>::new(2, 4)];
+    /// let windows = buses.each_mut().map(|bus| bus.narrow(1..3));
+    /// for bus in &mut buses {
+    ///     assert_eq!(bus.num_frames(), 2);
+    ///     bus.channel_mut(0).fill(1.0);
+    /// }
+    /// for (bus, window) in buses.iter_mut().zip(windows) {
+    ///     bus.widen(window);
+    /// }
+    /// assert_eq!(buses[1].channel(0), &[0.0, 1.0, 1.0, 0.0]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range` does not lie within the active frames.
+    pub fn narrow(&mut self, range: core::ops::Range<usize>) -> Window {
         assert!(
             range.start <= range.end && range.end <= self.frames,
             "window {}..{} is outside the buffer's {} frames",
@@ -205,13 +249,19 @@ impl<S: Sample> AudioBuffer<S> {
             range.end,
             self.frames
         );
-        let (offset, frames) = (self.offset, self.frames);
-        self.offset = offset + range.start;
+        let window = Window {
+            offset: self.offset,
+            frames: self.frames,
+        };
+        self.offset += range.start;
         self.frames = range.end - range.start;
-        let result = work(self);
-        self.offset = offset;
-        self.frames = frames;
-        result
+        window
+    }
+
+    /// Undoes the [`narrow`](Self::narrow) that returned `window`.
+    pub fn widen(&mut self, window: Window) {
+        self.offset = window.offset;
+        self.frames = window.frames;
     }
 
     /// Sets every active sample to silence.

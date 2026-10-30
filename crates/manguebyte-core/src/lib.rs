@@ -42,7 +42,7 @@ pub mod spsc;
 pub mod vector;
 
 pub use atomic::{AtomicF32, AtomicF64};
-pub use buffer::AudioBuffer;
+pub use buffer::{AudioBuffer, Window};
 pub use denormal::NoDenormals;
 pub use log::{DrainedLog, LogLevel, LogQueue, LogRecord};
 pub use param_id::ParamId;

@@ -281,3 +281,43 @@ fn sending_notes_out_does_not_use_the_heap() {
     });
     assert!(packets > blocks as usize * 8 * 3);
 }
+
+/// What a wrapper and a plugin do with auxiliary output buses, block after
+/// block: ready them, cut a block in pieces, and write the buses that are
+/// switched on.
+#[test]
+fn auxiliary_output_buses_do_not_use_the_heap() {
+    use manguebyte_plugin::{AuxOutput, AuxOutputs};
+
+    const BUSES: &[AuxOutput] = &[
+        AuxOutput::stereo("Great"),
+        AuxOutput::stereo("Swell"),
+        AuxOutput::new("Pedal", 1),
+        AuxOutput::stereo("Reverb").inactive(),
+    ];
+    let mut aux = AuxOutputs::with_buses(BUSES, 256);
+    let blocks = if cfg!(miri) { 4 } else { 500 };
+    let mut written = 0_usize;
+    assert_no_heap_use("auxiliary outputs", || {
+        for block in 0..blocks {
+            let frames = 1 + block % 256;
+            aux.set_active(1, block % 3 != 0);
+            aux.start_block(frames);
+            let half = frames / 2;
+            for range in [0..half, half..frames] {
+                aux.windowed(range, |aux| {
+                    for index in 0..aux.len() {
+                        if let Some(bus) = aux.bus_mut(index) {
+                            for channel in bus.iter_channels_mut() {
+                                channel.fill(index as f32);
+                                written += channel.len();
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    });
+    assert!(written > 0);
+    assert!(aux.bus(3).is_none(), "off by default");
+}

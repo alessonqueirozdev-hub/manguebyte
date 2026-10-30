@@ -12,7 +12,8 @@ use manguebyte_params::{LoadReport, ParamSet};
 use crate::editor::EditorSpec;
 use crate::output::{OutputBuffer, OutputKind};
 use crate::{
-    AudioLayout, ParamWatcher, Plugin, StateError, apply_param_events, load_state, save_state,
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, StateError, apply_param_events, load_state,
+    save_state,
 };
 
 /// Most events the harness will deliver in a single block.
@@ -71,6 +72,11 @@ pub struct Harness<P: Plugin> {
     output: OutputBuffer,
     /// What it has sent since the last `take_output`, on the timeline.
     sent: Vec<(u64, OutputKind)>,
+    /// The auxiliary output buses of the block being rendered.
+    aux: AuxOutputs,
+    /// Each auxiliary bus as the last render wrote it, whole; `None` for
+    /// one that was switched off.
+    aux_rendered: Vec<Option<AudioBuffer<f32>>>,
 }
 
 impl<P: Plugin> Harness<P> {
@@ -130,6 +136,8 @@ impl<P: Plugin> Harness<P> {
                 OutputBuffer::new()
             },
             sent: Vec::new(),
+            aux: AuxOutputs::for_plugin::<P>(max_block_size),
+            aux_rendered: vec![None; P::AUX_OUTPUTS.len()],
         }
     }
 
@@ -317,6 +325,32 @@ impl<P: Plugin> Harness<P> {
         std::mem::take(&mut self.sent)
     }
 
+    /// Switches auxiliary output bus `index` of [`Plugin::AUX_OUTPUTS`] on
+    /// or off from the next render, as a host does while audio is
+    /// stopped. Each starts as its
+    /// [`active_by_default`](crate::AuxOutput::active_by_default) says.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the plugin has no such bus.
+    pub fn set_aux_active(&mut self, index: usize, active: bool) {
+        assert!(
+            index < self.aux.len(),
+            "plugin {} has {} auxiliary outputs, not {}",
+            crate::plugin_info::<P>().id,
+            self.aux.len(),
+            index + 1
+        );
+        self.aux.set_active(index, active);
+    }
+
+    /// Auxiliary output bus `index` as the last [`render`](Self::render)
+    /// or [`process`](Self::process) wrote it, as long as that call, or
+    /// `None` if the bus was switched off then or there is no such bus.
+    pub fn aux_output(&self, index: usize) -> Option<&AudioBuffer<f32>> {
+        self.aux_rendered.get(index)?.as_ref()
+    }
+
     /// Schedules an event at `frame` on the timeline.
     ///
     /// An event scheduled for a frame that has already been rendered is
@@ -460,6 +494,12 @@ impl<P: Plugin> Harness<P> {
         // The same arithmetic as inside a host, where the wrappers do this.
         let _quiet = NoDenormals::new();
         let frames = buffer.num_frames();
+        for (index, rendered) in self.aux_rendered.iter_mut().enumerate() {
+            *rendered = self
+                .aux
+                .is_active(index)
+                .then(|| AudioBuffer::new(P::AUX_OUTPUTS[index].channels, frames));
+        }
         let mut done = 0;
         while done < frames {
             let wanted = self.pattern[self.next_in_pattern];
@@ -492,10 +532,19 @@ impl<P: Plugin> Harness<P> {
             }
             let plugin = &mut self.plugin;
             let output = &mut self.output;
+            let aux = &mut self.aux;
             output.clear();
+            aux.start_block(length);
             buffer.windowed(done..done + length, |block| {
-                plugin.process_with_output(block, &context, output);
+                plugin.process_with_aux(block, &context, output, aux);
             });
+            for (index, rendered) in self.aux_rendered.iter_mut().enumerate() {
+                if let (Some(whole), Some(bus)) = (rendered.as_mut(), self.aux.bus(index)) {
+                    for (channel, samples) in bus.iter_channels().enumerate() {
+                        whole.channel_mut(channel)[done..done + length].copy_from_slice(samples);
+                    }
+                }
+            }
             let last = length.saturating_sub(1) as u64;
             for event in &self.output {
                 let frame = self.position + u64::from(event.offset).min(last);
