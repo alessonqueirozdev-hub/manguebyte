@@ -1587,7 +1587,7 @@ fn a_partial_bank_does_not_use_the_heap() {
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
         AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingCarrier,
-        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo,
+        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
     };
 
     check(
@@ -1689,6 +1689,24 @@ fn the_workstation_effects_do_not_use_the_heap() {
         }
     });
 
+    // Vocoded by a sidechain, at the most bands.
+    let mut vocoder = Vocoder::<f32>::new()
+        .with_bands(32)
+        .with_formant_shift(-5.0);
+    vocoder.prepare(&SPEC);
+    let mut voice = AudioBuffer::<f32>::new(1, 256);
+    voice.channel_mut(0).fill(0.3);
+    let voiced = ProcessContext::new(&events, &transport).with_sidechain(&voice);
+    assert_no_heap_use("Vocoder", || {
+        for frames in [256, 1, 100] {
+            buffer.set_num_frames(frames);
+            vocoder.process_with(&mut buffer, &voiced);
+            vocoder.process_with(&mut buffer, &voiced.for_piece(50));
+            vocoder.process(&mut buffer);
+        }
+        vocoder.reset();
+    });
+
     // Multiplied by a sidechain, in pieces.
     let mut key = AudioBuffer::<f32>::new(1, 256);
     key.channel_mut(0).fill(0.5);
@@ -1714,7 +1732,7 @@ fn the_workstation_effects_do_not_use_the_heap() {
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
         AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingModulator,
-        StereoWidener, TapeSaturation, TransientShaper, Tremolo,
+        StereoWidener, TapeSaturation, TransientShaper, Tremolo, Vocoder,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1735,6 +1753,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     multiband.prepare(&SPEC);
     let mut tape = TapeSaturation::<f32>::new();
     tape.prepare(&SPEC);
+    let mut vocoder = Vocoder::<f32>::new();
+    vocoder.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1817,6 +1837,15 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             tape.set_drift(turn / 14.0);
             tape.set_mix(1.0 - turn / 14.0);
             tape.process(&mut buffer);
+
+            vocoder.set_bands(8 + 2 * usize::from(step));
+            vocoder.set_range_hz(50.0 + 10.0 * turn, 4_000.0 + 800.0 * turn);
+            vocoder.set_formant_shift(turn - 7.0);
+            vocoder.set_attack_ms(turn);
+            vocoder.set_release_ms(5.0 * turn);
+            vocoder.set_gain_db(turn);
+            vocoder.set_mix(turn / 14.0);
+            vocoder.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

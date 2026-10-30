@@ -73,6 +73,7 @@ mod testing;
 pub mod timeline;
 mod transient;
 mod tremolo;
+mod vocoder;
 pub mod wavetable;
 mod widener;
 pub mod window;
@@ -115,6 +116,7 @@ pub use synth::{Synth, Voice};
 pub use tape::TapeSaturation;
 pub use transient::TransientShaper;
 pub use tremolo::{AutoPan, Tremolo};
+pub use vocoder::Vocoder;
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};
 pub use widener::StereoWidener;
 

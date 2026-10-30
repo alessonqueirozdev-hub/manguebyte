@@ -172,6 +172,18 @@ break the API.
   does; up to 20 kHz the oversampling holds what folds back more than
   100 dB down, where the same curve at the sample rate leaves it less than
   40 dB down; the impulse arrives at the reported latency.
+- `Vocoder`: a channel vocoder of 8 to 32 bands spaced evenly in pitch,
+  each a fourth-order state-variable band-pass on the modulator (the
+  sidechain of `process_with`, or the input itself) and on the carrier
+  (the input), the carrier's bands weighted by the modulator's levels from
+  an `EnvelopeFollower`, with formant shift of up to an octave either way,
+  gain and mix. Measured: a band reads a sine at its centre at its
+  amplitude to 5%, two bands away more than 20 dB down; with 8, 16 and 32
+  bands, two carrier tones come out at the carrier's amplitude times the
+  modulator's to 0.5 dB, 12 dB apart as the modulator's were; the output
+  follows a modulator that moves between bands; an octave of formant
+  shift opens the carrier an octave up and leaves the original place more
+  than 20 dB down; a silent modulator silences the carrier.
 
 ### Formats
 
