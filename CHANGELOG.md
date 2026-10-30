@@ -43,8 +43,50 @@ break the API.
   `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS` and `GetModuleFileNameW` on
   Windows, `dladdr` elsewhere, `None` under Miri and on WebAssembly
   (ADR 0012).
+- `vector::add_partials` renders a bank of sine partials, given as the
+  slices of a `Partials` (phasor, rotation, gain and its step, left and
+  right gains), into a stereo pair: each frame a partial's gain moves,
+  `gain * sin` is sent to both sides, and its phasor turns, Caecilia's
+  order. The vector backends give each partial a lane and interleave the
+  registers of a group of 16, so the rotation that waits on the one
+  before it no longer sets the speed. Every partial's samples, phasor and
+  gain are those of the plain loop bit for bit on every backend, and a
+  frame's samples are added in a fixed order (16 running sums, pairs,
+  then the rest), so the output is the same on every backend too; against
+  adding the partials one after another it differs only by the rounding
+  of the sums, within `2 (n + 5) 2^-24` of the sum of the terms'
+  magnitudes. Tested against the definition over 0 to 257 partials and 0
+  to 200 frames, and against the plain loop.
+- `vector::add_scaled_ramp` (a gain ramp mixed into a bus) and
+  `vector::add_product` (a block mixed in under a gain that changes every
+  frame, such as an envelope): element-wise, bit for bit on every backend.
 
 ### DSP
+
+- `PartialBank` and `Partial`: a bank of sine partials for additive
+  voices, such as Caecilia's organ pipes. `new(max)` allocates once;
+  `set(i, Partial { freq_hz, gain, pan })`, `set_frequency`,
+  `set_rotation` (increments the caller already has: two stores, no sine
+  or cosine), `set_gain`, `ramp_to(i, target, frames)` (Caecilia's step,
+  added before each sample), `set_pan` (equal power) and `set_pan_gains`,
+  `set_phase` and `set_phasor`; `render_add(&mut left, &mut right)` adds
+  the partials in use on `vector::add_partials`, split only where a ramp
+  ends, so the output does not depend on the caller's block sizes. Every
+  64 frames rendered each phasor gets Caecilia's Newton step back to the
+  unit circle, which keeps its magnitude within 3e-5 of 1 for as long as
+  the bank runs; measured over ten minutes at 48 kHz, 2.8e-6. Sixteen
+  partials from 0 Hz to Nyquist keep their frequency over ten seconds
+  within 1e-4 Hz (5e-8 relative above 20 Hz). The tests check every
+  backend against the scalar code bit for bit with settings changed every
+  64 frames and blocks of 1 to 4 096 frames, every phasor and gain
+  against Caecilia's kernel bit for bit, the mix against it within the
+  stated bound, and that rendering does not allocate.
+  `tests/partial_bank_cost.rs` (ignored) measures Caecilia's tutti, 3 000
+  partials with new rotations and ramps every 64 frames. On an Intel Core
+  i3-1215U under load, as one bank, against Caecilia's scalar kernel (1.0
+  of a core, 3 000 partials per core): SSE2 4.2 times faster, AVX 5.6,
+  AVX2 6.4 to 7.7 (about 19 000 partials per core); as 200 banks of 15,
+  Caecilia's voices: SSE2 3.2, AVX 4.1, AVX2 4.2 (12 900 per core).
 
 - `ConvolutionEngine` and `FirFilter` run on `manguebyte_core::vector`.
   The direct head works across the frames of a piece of the block, a

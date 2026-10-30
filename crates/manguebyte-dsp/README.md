@@ -89,6 +89,48 @@ denoiser.processor_mut().set_learning(true);
 denoiser.processor_mut().set_learning(false);
 ```
 
+## Additive synthesis
+
+`PartialBank` holds a bank of sine partials, each a quadrature phasor
+turned by a fixed rotation every frame, under a gain that can ramp, with
+its own pan, and adds them into a stereo pair of blocks. It is built for
+an additive voice whose settings change every control block, such as
+Caecilia's organ pipes:
+
+- `set_rotation` takes the `(cos w, sin w)` a caller already has and costs
+  two stores; `set_frequency` works them out from hertz. `ramp_to` moves
+  a gain linearly over a number of frames, a step added before each
+  sample, as Caecilia's kernel does.
+- It renders on `manguebyte_core::vector::add_partials`: one partial per
+  lane of a vector register, 16 at a time. Every backend gives the same
+  output bit for bit, and each partial's numbers are those of Caecilia's
+  scalar kernel bit for bit; only the order in which a frame's partials
+  are added differs, within a stated bound.
+- Every 64 frames each phasor is brought back to the unit circle with one
+  Newton step, so its amplitude stays within 3e-5 of where it should be
+  however long it runs. Nothing allocates after `new`, and how the caller
+  cuts its blocks does not change the output.
+
+Caecilia's tutti, 3 000 partials with new rotations and ramps every 64
+frames (`tests/partial_bank_cost.rs`, on an Intel Core i3-1215U under
+load): Caecilia's scalar kernel takes a whole core; the bank on AVX2 takes
+0.16 of one as a single bank (6.4 to 7.7 times faster) and 0.23 as 200
+banks of 15 (4.2 times faster), SSE2 3.2 to 4.2 times faster.
+
+```rust
+use manguebyte_dsp::{Partial, PartialBank};
+
+let mut bank = PartialBank::new(64);
+bank.set_sample_rate(48_000.0);
+bank.set_len(3);
+for (i, ratio) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+    bank.set(i, Partial { freq_hz: 220.0 * ratio, gain: 0.0, pan: 0.0 });
+    bank.ramp_to(i, 0.3 / ratio as f32, 64);
+}
+let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+bank.render_add(&mut left, &mut right);
+```
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

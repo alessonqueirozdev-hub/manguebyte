@@ -157,6 +157,14 @@ Everything a standalone audio application needs, short of a user interface.
   results on every processor; used by `AudioBuffer`, the WAV reader and
   writer, convolution and the graph's and browser engine's mixing. The FFT,
   resampler, oversampler and filters are still scalar (TECH_DEBT 92)
+- ✅ Additive synthesis: `PartialBank`, a bank of sine partials with
+  frequencies, gain ramps and pans set every control block, rendered a
+  partial per vector lane (`vector::add_partials`), the same bit for bit on
+  every backend and Caecilia's kernel bit for bit for every partial;
+  amplitude held within 3e-5 for as long as it runs. 3 000 partials take
+  0.16 of a core on AVX2 against a whole core for the scalar kernel. NEON
+  and WebAssembly SIMD are not yet run, and a block biquad across lanes is
+  not started (TECH_DEBT 103)
 
 **Formats**
 - ✅ Streaming readers and writers that do not load whole files, with
