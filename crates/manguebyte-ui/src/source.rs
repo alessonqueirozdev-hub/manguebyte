@@ -17,6 +17,9 @@
 //!   without copying it. A plugin's editor spec can keep it, so that it
 //!   survives closing and reopening the editor.
 //! - [`Watch`] keeps a source and the last value read from it.
+//! - [`TextSource`] is a text a widget shows or is named by: fixed, or
+//!   from a source or a state, so that names can change while the
+//!   interface is open.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -135,6 +138,183 @@ impl<T: fmt::Debug> fmt::Debug for Watch<T> {
         f.debug_struct("Watch")
             .field("last", &self.last)
             .finish_non_exhaustive()
+    }
+}
+
+/// A text that a widget shows or is named by: fixed, or read once per
+/// frame from a [`Source`] or a [`State`], so that it can change while
+/// the interface is open (the language, say).
+///
+/// A widget [`poll`](TextSource::poll)s it in its
+/// [`update`](crate::Widget::update) and, when the text changed, lays out
+/// again if its size depends on the text, draws again if it shows it, and
+/// asks for its description to be sent to assistive technology again
+/// ([`UpdateCx::request_access_update`](crate::UpdateCx::request_access_update)).
+///
+/// Polling does not touch the heap unless the source does:
+///
+/// - a fixed text is never read again;
+/// - a [`State`] is read again only when its version changed, and its
+///   text is kept shared, not copied;
+/// - a source is read every frame and compared with the last text: one
+///   that returns a `&'static str` from a table, or clones an `Arc<str>`,
+///   makes no heap call, while a closure that builds a `String` builds one
+///   every frame.
+///
+/// A text from a source or a state is read once when it is made, so that
+/// it is there before the first frame, and the first poll reports no
+/// change.
+///
+/// ```
+/// use manguebyte_ui::{State, TextSource};
+///
+/// // A language the person picks, and a table of texts in each.
+/// let language = State::new(0_usize);
+/// let read = language.clone();
+/// let mut name = TextSource::dynamic(move || ["Cutoff", "Corte"][read.get()]);
+/// assert_eq!(name.as_str(), "Cutoff");
+/// assert!(!name.poll(), "read when made");
+/// language.set(1);
+/// assert!(name.poll());
+/// assert_eq!(name.as_str(), "Corte");
+///
+/// let shared = State::new(String::from("Mix"));
+/// let mut name = TextSource::from(shared.clone());
+/// shared.set(String::from("Mix"));
+/// assert!(!name.poll(), "the same text is no change");
+/// shared.set(String::from("Mistura"));
+/// assert!(name.poll());
+/// assert_eq!(name.as_str(), "Mistura");
+/// ```
+pub struct TextSource {
+    kind: TextKind,
+}
+
+enum TextKind {
+    Fixed(String),
+    Polled(Box<dyn PolledText>),
+    Shared {
+        state: State<String>,
+        seen: u64,
+        text: Arc<String>,
+    },
+}
+
+/// A watched source of something that reads as text.
+trait PolledText {
+    fn poll(&mut self) -> bool;
+    fn text(&self) -> &str;
+}
+
+impl<T: AsRef<str> + PartialEq + 'static> PolledText for Watch<T> {
+    fn poll(&mut self) -> bool {
+        Watch::poll(self)
+    }
+
+    fn text(&self) -> &str {
+        self.get().map_or("", AsRef::as_ref)
+    }
+}
+
+impl TextSource {
+    /// `text`, which never changes.
+    pub fn fixed(text: impl Into<String>) -> TextSource {
+        TextSource {
+            kind: TextKind::Fixed(text.into()),
+        }
+    }
+
+    /// What `source` gives, read now and then once per frame. Anything
+    /// that reads as text will do: `String`, `&'static str`, `Arc<str>`.
+    pub fn dynamic<T: AsRef<str> + PartialEq + 'static>(source: impl Source<T>) -> TextSource {
+        let mut watch = Watch::new(source);
+        watch.poll();
+        TextSource {
+            kind: TextKind::Polled(Box::new(watch)),
+        }
+    }
+
+    /// The text in `state`, read again only when its version changes.
+    pub fn from_state(state: State<String>) -> TextSource {
+        TextSource {
+            kind: TextKind::Shared {
+                seen: state.version(),
+                text: state.load(),
+                state,
+            },
+        }
+    }
+
+    /// Reads the text again and returns whether it differs from the one
+    /// read before. A fixed text never changes.
+    pub fn poll(&mut self) -> bool {
+        match &mut self.kind {
+            TextKind::Fixed(_) => false,
+            TextKind::Polled(watch) => watch.poll(),
+            TextKind::Shared { state, seen, text } => {
+                let version = state.version();
+                if version == *seen {
+                    return false;
+                }
+                *seen = version;
+                let new = state.load();
+                let changed = **text != *new;
+                *text = new;
+                changed
+            }
+        }
+    }
+
+    /// The text, as last read.
+    pub fn as_str(&self) -> &str {
+        match &self.kind {
+            TextKind::Fixed(text) => text,
+            TextKind::Polled(watch) => watch.text(),
+            TextKind::Shared { text, .. } => text,
+        }
+    }
+
+    /// Whether the text is fixed, and so never changes.
+    pub fn is_fixed(&self) -> bool {
+        matches!(self.kind, TextKind::Fixed(_))
+    }
+}
+
+impl From<String> for TextSource {
+    fn from(text: String) -> TextSource {
+        TextSource::fixed(text)
+    }
+}
+
+impl From<&str> for TextSource {
+    fn from(text: &str) -> TextSource {
+        TextSource::fixed(text)
+    }
+}
+
+impl From<&String> for TextSource {
+    fn from(text: &String) -> TextSource {
+        TextSource::fixed(text.as_str())
+    }
+}
+
+impl From<State<String>> for TextSource {
+    fn from(state: State<String>) -> TextSource {
+        TextSource::from_state(state)
+    }
+}
+
+impl fmt::Debug for TextSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            TextKind::Fixed(_) => "fixed",
+            TextKind::Polled(_) => "source",
+            TextKind::Shared { .. } => "state",
+        };
+        f.debug_struct("TextSource")
+            .field("text", &self.as_str())
+            .field("from", &kind)
+            .finish()
     }
 }
 

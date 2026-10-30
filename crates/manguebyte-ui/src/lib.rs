@@ -206,7 +206,7 @@ pub use motion::{Animated, Easing, Motion, Transition};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
 pub use scroll::ScrollMetrics;
-pub use source::{AtomicSource, Source, State, Watch};
+pub use source::{AtomicSource, Source, State, TextSource, Watch};
 pub use theme::{Corners, Elevation, Hue, Palette, Sizes, Spacing, Theme, Typography};
 pub use tree::NodeId;
 pub use view::{Children, IntoView, View, card, column, filled, panel, row, stack};

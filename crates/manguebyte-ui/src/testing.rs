@@ -388,6 +388,18 @@ impl Harness {
         }
     }
 
+    /// The widgets the last frame said assistive technology should hear
+    /// about again (see [`Frame::access`](crate::Frame::access)), as they
+    /// are now, in tree order.
+    pub fn access_updates(&self) -> Vec<Found> {
+        self.root
+            .access_updates()
+            .iter()
+            .filter_map(|&id| self.root.access(id))
+            .map(Found::from_entry)
+            .collect()
+    }
+
     /// The widget with the keyboard focus, if any.
     pub fn focused(&self) -> Option<Found> {
         let id = self.root.focus()?;

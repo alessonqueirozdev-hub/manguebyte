@@ -232,6 +232,8 @@ pub(crate) struct Requests {
     pub(crate) paint: bool,
     pub(crate) layout: bool,
     pub(crate) frame: bool,
+    /// The widget's description for assistive technology changed.
+    pub(crate) access: bool,
     /// `Some(true)` to take the pointer, `Some(false)` to let it go.
     pub(crate) capture: Option<bool>,
     pub(crate) focus: bool,
@@ -369,6 +371,14 @@ impl UpdateCx<'_> {
     /// meter), so the window should keep delivering frames.
     pub fn request_frame(&mut self) {
         self.requests.frame = true;
+    }
+
+    /// Says the widget's description for assistive technology changed in
+    /// a way a screen reader should hear about, such as its name: the
+    /// frame lists it in [`Frame::access`](crate::Frame::access), for the
+    /// window layer to tell the platform. It draws nothing by itself.
+    pub fn request_access_update(&mut self) {
+        self.requests.access = true;
     }
 
     /// Where the widget is scrolled, if it is laid out as a scroll node

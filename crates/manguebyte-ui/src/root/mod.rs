@@ -48,6 +48,14 @@ pub struct Frame<'a> {
     pub painted: usize,
     /// Whether layout ran.
     pub laid_out: bool,
+    /// The widgets whose description for assistive technology changed in
+    /// this frame in a way they said a screen reader should hear about
+    /// (see [`UpdateCx::request_access_update`]), such as a name that
+    /// follows the language, in tree order. A window layer that speaks to
+    /// the platform's assistive technology reads each one's new
+    /// description with [`Root::access`] and sends it as a change. Empty
+    /// when nothing changed.
+    pub access: &'a [NodeId],
 }
 
 /// An interface: the widget tree, its size and scale, and the back buffer
@@ -145,6 +153,9 @@ pub struct Root {
     /// Where a widget's scene that reaches past its rectangle is clipped.
     cut: Scene,
     damage: Vec<IRect>,
+    /// The widgets that asked, in the last frame, for their description to
+    /// be sent again (see [`Frame::access`]).
+    access_updates: Vec<NodeId>,
     focus: Option<NodeId>,
     capture: Option<NodeId>,
     clipboard: Rc<dyn Clipboard>,
@@ -301,6 +312,7 @@ impl Root {
             composite: Scene::new(),
             cut: Scene::new(),
             damage: Vec::new(),
+            access_updates: Vec::new(),
             focus: None,
             capture: None,
             clipboard: Rc::new(MemoryClipboard::new()),
@@ -530,6 +542,13 @@ impl Root {
             bounds: node.rect,
             device: node.device,
         })
+    }
+
+    /// The widgets whose description changed in the last frame in a way
+    /// they said assistive technology should hear about (see
+    /// [`Frame::access`]).
+    pub fn access_updates(&self) -> &[NodeId] {
+        &self.access_updates
     }
 
     /// Every widget's description, in tree order, each followed by its
@@ -1108,6 +1127,7 @@ impl Root {
         self.now = now;
 
         let mut animating = false;
+        self.access_updates.clear();
         let motion = self.motion();
         let (hover, pressed_on) = (self.hover, self.pressed_on);
         let focus = self.focus.filter(|_| self.focus_visible);
@@ -1148,6 +1168,9 @@ impl Root {
                 node.measure = true;
                 self.needs_layout = true;
             }
+            if requests.access {
+                self.access_updates.push(NodeId::from_index(index));
+            }
             if let (Some(offset), Some(metrics)) = (requests.scroll, node.scroll.as_mut()) {
                 if set_offset(metrics, offset, self.scale) {
                     self.needs_layout = true;
@@ -1178,6 +1201,7 @@ impl Root {
             animating,
             painted,
             laid_out,
+            access: &self.access_updates,
         }
     }
 

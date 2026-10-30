@@ -3,16 +3,9 @@
 use manguebyte_gfx::{Align, Color, Point, Scene, Size, TextLayout, TextStyle};
 
 use crate::access::{AccessNode, Role};
-use crate::source::{Source, State, Watch};
+use crate::source::{Source, State, TextSource};
 use crate::theme::Theme;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, UpdateCx, Widget};
-
-/// Where a label's text comes from.
-enum Text {
-    Fixed(String),
-    Watched(Watch<String>),
-    Shared { state: State<String>, seen: u64 },
-}
 
 /// Which of the theme's text styles a label uses.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,11 +23,13 @@ enum Kind {
 /// One line of text, cut with an ellipsis if it does not fit.
 ///
 /// The text is fixed, or read once per frame from a [`Source`] or a
-/// [`State`]; a change lays the interface out again, since the text's
-/// width may have changed. It is drawn in the theme's label style unless
-/// told otherwise, centred vertically in the label's rectangle.
+/// [`State`] (see [`TextSource`]); a change lays the interface out again,
+/// since the text's width may have changed, and is sent to assistive
+/// technology (see [`Frame::access`](crate::Frame::access)). It is drawn
+/// in the theme's label style unless told otherwise, centred vertically
+/// in the label's rectangle.
 pub struct Label {
-    text: Text,
+    text: TextSource,
     kind: Kind,
     muted: bool,
     color: Option<Color>,
@@ -72,7 +67,7 @@ pub fn label(text: impl Into<String>) -> Label {
 }
 
 impl Label {
-    fn with_text(text: Text) -> Label {
+    fn with_text(text: TextSource) -> Label {
         Label {
             text,
             kind: Kind::Label,
@@ -85,23 +80,26 @@ impl Label {
 
     /// A label showing `text`.
     pub fn new(text: impl Into<String>) -> Label {
-        Label::with_text(Text::Fixed(text.into()))
+        Label::with_text(TextSource::fixed(text))
     }
 
-    /// A label showing what `source` gives, read once per frame. Reading
-    /// it makes a `String` every frame; [`from_state`](Label::from_state)
-    /// does not.
-    pub fn dynamic(source: impl Source<String>) -> Label {
-        Label::with_text(Text::Watched(Watch::new(source)))
+    /// A label showing what `source` gives, read once per frame. A source
+    /// that builds a `String` builds one every frame; one that returns a
+    /// `&'static str` from a table, or [`from_state`](Label::from_state),
+    /// does not touch the heap (see [`TextSource`]).
+    pub fn dynamic<T: AsRef<str> + PartialEq + 'static>(source: impl Source<T>) -> Label {
+        Label::with_text(TextSource::dynamic(source))
     }
 
     /// A label showing the text in `state`, read again only when its
     /// version changes.
     pub fn from_state(state: State<String>) -> Label {
-        Label::with_text(Text::Shared {
-            seen: state.version(),
-            state,
-        })
+        Label::with_text(TextSource::from_state(state))
+    }
+
+    /// A label showing `text`, fixed or read once per frame.
+    pub fn from_source(text: impl Into<TextSource>) -> Label {
+        Label::with_text(text.into())
     }
 
     /// The same label in the theme's title style.
@@ -166,11 +164,7 @@ impl Label {
 
     /// The text shown.
     pub fn text(&self) -> String {
-        match &self.text {
-            Text::Fixed(text) => text.clone(),
-            Text::Watched(watch) => watch.get().cloned().unwrap_or_default(),
-            Text::Shared { state, .. } => state.get(),
-        }
+        self.text.as_str().to_owned()
     }
 
     fn style_in(&self, theme: &Theme) -> TextStyle {
@@ -204,12 +198,12 @@ impl Label {
 
 impl Widget for Label {
     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
-        AccessNode::new(Role::Label, self.text())
+        AccessNode::new(Role::Label, self.text.as_str())
     }
 
     fn measure(&mut self, cx: &MeasureCx<'_>) -> Size {
         let style = self.style_in(cx.theme());
-        let size = TextLayout::new(&self.text(), &style, None).size();
+        let size = TextLayout::new(self.text.as_str(), &style, None).size();
         // Rounded up, and a pixel more: layout snaps a widget's edges to
         // the nearest device pixels and may take up to a device pixel
         // from it, which would cut the text with an ellipsis. An empty
@@ -223,19 +217,10 @@ impl Widget for Label {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
-        let changed = match &mut self.text {
-            Text::Fixed(_) => false,
-            Text::Watched(watch) => watch.poll(),
-            Text::Shared { state, seen } => {
-                let version = state.version();
-                let changed = version != *seen;
-                *seen = version;
-                changed
-            }
-        };
-        if changed {
+        if self.text.poll() {
             self.layout = None;
             cx.request_layout();
+            cx.request_access_update();
         }
     }
 
@@ -247,7 +232,7 @@ impl Widget for Label {
             .as_ref()
             .is_none_or(|(width, layout)| *width != rect.width || *layout.style() != style)
         {
-            let layout = TextLayout::new(&self.text(), &style, Some(rect.width));
+            let layout = TextLayout::new(self.text.as_str(), &style, Some(rect.width));
             self.layout = Some((rect.width, layout));
         }
         if let Some((_, layout)) = &self.layout {
