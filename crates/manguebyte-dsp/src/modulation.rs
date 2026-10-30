@@ -108,6 +108,16 @@ impl Lfo {
         self.phase = phase.rem_euclid(1.0);
     }
 
+    /// The position in the cycle, from 0 up to but not including 1.
+    pub fn phase(&self) -> f64 {
+        self.phase
+    }
+
+    /// The shape.
+    pub fn shape(&self) -> LfoShape {
+        self.shape
+    }
+
     /// Locks the oscillator to the music: one cycle every `beats_per_cycle`
     /// quarter notes, positioned so that a cycle starts on beat zero.
     ///

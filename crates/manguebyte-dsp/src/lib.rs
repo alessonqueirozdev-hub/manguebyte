@@ -67,6 +67,7 @@ mod synth;
 #[cfg(test)]
 mod testing;
 pub mod timeline;
+mod tremolo;
 pub mod wavetable;
 pub mod window;
 
@@ -102,6 +103,7 @@ pub use shaper::{DcBlocker, ShaperCurve, Waveshaper};
 pub use stft::{SpectralProcessor, Stft, StftError, StftSettings};
 pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
+pub use tremolo::{AutoPan, Tremolo};
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};
 
 use manguebyte_core::{AudioBuffer, Sample};

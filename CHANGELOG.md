@@ -106,6 +106,17 @@ break the API.
   dithered `step² / 4`; dither carries a tone of 0.3 steps through at its
   level to 5%; with anti-aliasing, a 10 kHz tone held at a quarter of
   48 kHz folds back more than 85 dB quieter than without.
+- `Tremolo` and `AutoPan`: a level, or a position between left and right,
+  moved by an `Lfo` of any shape, at a rate in hertz or locked to the
+  tempo from the `Transport` in `process_with` (a cycle every so many
+  quarter notes, starting on beat zero), with a stereo phase offset per
+  channel for the tremolo, the `MixLaw` and `PanMode` of a `Panner` for the
+  auto-pan, and optional smoothing that takes the click out of square and
+  sawtooth shapes. Measured: the gain follows `1 - depth * (1 - v) / 2` on
+  every sample, the depth read on a tone is the depth set, a synced cycle
+  lands on the beat whatever the block size, and the equal-power auto-pan
+  keeps the power of the two sides. `Lfo::phase` and `Lfo::shape` read the
+  LFO's place in its cycle and its shape.
 
 ### Formats
 

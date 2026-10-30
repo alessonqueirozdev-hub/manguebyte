@@ -1585,7 +1585,7 @@ fn a_partial_bank_does_not_use_the_heap() {
 /// The effects a synth workstation needs, at their heaviest settings.
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
-    use manguebyte_dsp::Bitcrusher;
+    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, Tremolo};
 
     check(
         "Bitcrusher",
@@ -1596,14 +1596,56 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_anti_alias(true)
             .with_mix(0.7),
     );
+    check(
+        "Tremolo",
+        Tremolo::<f32>::new()
+            .with_shape(LfoShape::SampleAndHold)
+            .with_stereo_phase(0.5),
+    );
+    check(
+        "AutoPan",
+        AutoPan::<f32>::new()
+            .with_mode(PanMode::MonoToStereo)
+            .with_shape(LfoShape::Square),
+    );
+
+    // Locked to a transport that moves on, block by block.
+    let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
+    let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
+    tremolo.prepare(&SPEC);
+    pan.prepare(&SPEC);
+    let events = EventBuffer::with_capacity(1);
+    let mut transport = Transport::playing_at(128.0);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("tempo-synced tremolo and auto-pan", || {
+        for frames in [256, 1, 64, 255] {
+            buffer.set_num_frames(frames);
+            let context = ProcessContext::new(&events, &transport);
+            tremolo.process_with(&mut buffer, &context);
+            pan.process_with(&mut buffer, &context);
+            transport.advance(frames, SPEC.sample_rate);
+        }
+    });
 }
 
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
-    use manguebyte_dsp::Bitcrusher;
+    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, Tremolo};
 
     let mut crusher = Bitcrusher::<f32>::new();
     crusher.prepare(&SPEC);
+    let mut tremolo = Tremolo::<f32>::new();
+    tremolo.prepare(&SPEC);
+    let mut pan = AutoPan::<f32>::new();
+    pan.prepare(&SPEC);
+    let shapes = [
+        LfoShape::Sine,
+        LfoShape::Triangle,
+        LfoShape::SawUp,
+        LfoShape::SawDown,
+        LfoShape::Square,
+        LfoShape::SampleAndHold,
+    ];
     let mut buffer = AudioBuffer::<f32>::new(2, 256);
     assert_no_heap_use("changing workstation effect settings", || {
         for step in 0..14u8 {
@@ -1617,6 +1659,26 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             crusher.set_anti_alias(step % 3 != 0);
             crusher.set_mix(turn / 14.0);
             crusher.process(&mut buffer);
+
+            let shape = shapes[usize::from(step) % shapes.len()];
+            tremolo.set_shape(shape);
+            tremolo.set_rate_hz(0.5 + turn);
+            tremolo.set_depth(turn / 14.0);
+            tremolo.set_stereo_phase(1.0 - turn / 14.0);
+            tremolo.set_smoothing_ms(turn);
+            tremolo.set_sync_beats((step % 2 == 0).then_some(0.25 * turn));
+            tremolo.process(&mut buffer);
+            pan.set_shape(shape);
+            pan.set_rate_hz(0.5 + turn);
+            pan.set_width(turn / 14.0);
+            pan.set_law(MixLaw::ALL[usize::from(step) % MixLaw::ALL.len()]);
+            pan.set_mode(if step % 2 == 0 {
+                PanMode::MonoToStereo
+            } else {
+                PanMode::StereoBalance
+            });
+            pan.set_smoothing_ms(turn);
+            pan.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));
