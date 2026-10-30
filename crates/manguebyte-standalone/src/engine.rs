@@ -11,7 +11,7 @@ use manguebyte_dsp::timeline::{TempoMap, TimeSignature, TransportClock};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
-use manguebyte_plugin::{ParamWatcher, Plugin};
+use manguebyte_plugin::{AuxOutputs, ParamWatcher, Plugin};
 
 /// Most events delivered to the plugin in one block.
 const EVENTS_PER_BLOCK: usize = 2_048;
@@ -45,6 +45,32 @@ pub struct Engine<P: Plugin> {
     output: OutputBuffer,
     /// Where what it sends goes, written for the port, if anywhere.
     midi_out: Option<(OutputTranslator, MidiTransmitter)>,
+    /// The plugin's auxiliary output buses.
+    aux: AuxOutputs,
+    /// The device channel each auxiliary bus's first channel goes to, the
+    /// others following it, or `None` for a bus that is not heard.
+    aux_channels: Vec<Option<usize>>,
+}
+
+/// The device channels the auxiliary buses of `P` go to unless told
+/// otherwise: those after the main output's (two for a mono plugin, which
+/// is heard on both speakers), one bus after another, for the buses on by
+/// default; a bus off by default is not heard.
+fn default_aux_channels<P: Plugin>() -> Vec<Option<usize>> {
+    let mut next = match P::LAYOUT.outputs {
+        1 => 2,
+        outputs => outputs,
+    };
+    P::AUX_OUTPUTS
+        .iter()
+        .map(|aux| {
+            aux.active_by_default.then(|| {
+                let first = next;
+                next += aux.channels;
+                first
+            })
+        })
+        .collect()
 }
 
 impl<P: Plugin> Engine<P> {
@@ -95,7 +121,37 @@ impl<P: Plugin> Engine<P> {
                 OutputBuffer::new()
             },
             midi_out: None,
+            aux: AuxOutputs::for_plugin::<P>(max_block_size),
+            aux_channels: default_aux_channels::<P>(),
         })
+    }
+
+    /// Sends the plugin's auxiliary output buses, those of
+    /// [`Plugin::AUX_OUTPUTS`], to other device channels: for each bus in
+    /// order, the device channel its first channel goes to, its others
+    /// following, or `None` to leave it unheard. Buses past the end of
+    /// `channels` keep where they go by default, which is the device
+    /// channels after the main output's, one bus after another, for every
+    /// bus on by default. Allocates.
+    ///
+    /// A bus is mixed into what is already on its channels, so two buses,
+    /// or a bus and the main output, can share them. A bus that is not
+    /// heard, or whose first channel the device does not have, is not
+    /// given to the plugin, which spends nothing on it; channels past the
+    /// device's last are dropped.
+    #[must_use]
+    pub fn with_aux_channels(mut self, channels: &[Option<usize>]) -> Self {
+        for (slot, &first) in self.aux_channels.iter_mut().zip(channels) {
+            *slot = first;
+        }
+        self
+    }
+
+    /// The device channel each auxiliary bus's first channel goes to, or
+    /// `None` for a bus that is not heard. See
+    /// [`with_aux_channels`](Self::with_aux_channels).
+    pub fn aux_channels(&self) -> &[Option<usize>] {
+        &self.aux_channels
     }
 
     /// Sends what the plugin sends out, from
@@ -203,8 +259,16 @@ impl<P: Plugin> Engine<P> {
         let context =
             ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
         self.output.clear();
+        // A bus is given to the plugin only if the device has somewhere
+        // for it to go.
+        let device_channels = output.num_channels();
+        for (bus, first) in self.aux_channels.iter().enumerate() {
+            let heard = first.is_some_and(|first| first < device_channels);
+            self.aux.set_active(bus, heard);
+        }
+        self.aux.start_block(frames);
         self.plugin
-            .process_with_output(&mut self.work, &context, &mut self.output);
+            .process_with_aux(&mut self.work, &context, &mut self.output, &mut self.aux);
         if let Some((translator, transmitter)) = &mut self.midi_out {
             let last = frames.saturating_sub(1) as u32;
             // What does not fit in the queue is dropped, and counted by
@@ -230,6 +294,20 @@ impl<P: Plugin> Engine<P> {
                     target[frames..].fill(0.0);
                 }
                 None => target.fill(0.0),
+            }
+        }
+        for (bus, &first) in self.aux_channels.iter().enumerate() {
+            let (Some(first), Some(written)) = (first, self.aux.bus(bus)) else {
+                continue;
+            };
+            for (channel, samples) in written.iter_channels().enumerate() {
+                if first + channel >= device_channels {
+                    break;
+                }
+                let target = &mut output.channel_mut(first + channel)[..frames];
+                for (out, &sample) in target.iter_mut().zip(samples) {
+                    *out += sample;
+                }
             }
         }
     }
@@ -762,5 +840,99 @@ mod tests {
         assert!(control.stop());
         engine.render(None, &mut device);
         assert!(!control.is_playing());
+    }
+
+    /// How many blocks each of `Divisions`' buses was given in.
+    static GIVEN: [std::sync::atomic::AtomicUsize; 3] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
+    /// 0.5 on its main output, and bus `b` channel `c` at `(b + 1) + c / 10`.
+    struct Divisions(Arc<LevelParams>);
+    impl Plugin for Divisions {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-divisions",
+            name: "Divisions",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Each division on a bus of its own",
+            kind: PluginKind::Instrument,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+        const AUX_OUTPUTS: &'static [manguebyte_plugin::AuxOutput] = &[
+            manguebyte_plugin::AuxOutput::stereo("Great"),
+            manguebyte_plugin::AuxOutput::new("Pedal", 1).inactive(),
+            manguebyte_plugin::AuxOutput::stereo("Swell"),
+        ];
+        type Params = LevelParams;
+
+        fn new() -> Self {
+            Self(Arc::new(LevelParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 1.0), 0.5),
+            }))
+        }
+        fn params(&self) -> Arc<LevelParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+        fn process_with_aux(
+            &mut self,
+            buffer: &mut AudioBuffer<f32>,
+            _: &ProcessContext<'_, f32>,
+            _: &mut OutputBuffer,
+            aux: &mut AuxOutputs,
+        ) {
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.5);
+            }
+            for (bus, given) in GIVEN.iter().enumerate() {
+                if let Some(written) = aux.bus_mut(bus) {
+                    given.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    for (channel, samples) in written.iter_channels_mut().enumerate() {
+                        samples.fill((bus + 1) as f32 + channel as f32 / 10.0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn device_channels(device: &AudioBuffer<f32>) -> Vec<f32> {
+        device.iter_channels().map(|channel| channel[3]).collect()
+    }
+
+    #[test]
+    fn each_bus_goes_to_device_channels_of_its_own() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        // By default: after the main output, the buses on by default, one
+        // after another. The pedal is off by default and not given.
+        let (mut engine, _notes) = engine::<Divisions>();
+        assert_eq!(engine.aux_channels(), [Some(2), None, Some(4)]);
+        let mut device = AudioBuffer::<f32>::new(7, 16);
+        engine.render(None, &mut device);
+        assert_eq!(
+            device_channels(&device),
+            [0.5, 0.5, 1.0, 1.1, 3.0, 3.1, 0.0]
+        );
+        assert_eq!(GIVEN[1].load(Relaxed), 0, "the pedal is not rendered");
+
+        // Routed by hand: the pedal heard on the last channel, the swell
+        // mixed into the main output, and the great on channels the device
+        // lacks, so that it is not rendered either.
+        let great = GIVEN[0].load(Relaxed);
+        let mut engine = engine.with_aux_channels(&[Some(9), Some(6), Some(0)]);
+        engine.render(None, &mut device);
+        assert_eq!(
+            device_channels(&device),
+            [3.5, 3.6, 0.0, 0.0, 0.0, 0.0, 2.0]
+        );
+        assert_eq!(GIVEN[0].load(Relaxed), great, "nowhere to go, not rendered");
+        assert!(GIVEN[1].load(Relaxed) > 0);
+
+        // A device with fewer channels hears what fits.
+        let mut stereo = AudioBuffer::<f32>::new(2, 16);
+        let mut engine = engine.with_aux_channels(&[Some(1), None, None]);
+        engine.render(None, &mut stereo);
+        assert_eq!(device_channels(&stereo), [0.5, 1.5]);
     }
 }

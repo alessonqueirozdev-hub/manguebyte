@@ -89,6 +89,12 @@ pub struct StandaloneOptions {
     pub tempo_bpm: f64,
     /// Whether to listen to every MIDI input port that is connected.
     pub open_midi_inputs: bool,
+    /// Where the plugin's auxiliary output buses go: for each bus in
+    /// order, the device channel of its first channel, or `None` to leave
+    /// it unheard, as [`Engine::with_aux_channels`] takes them. Empty, the
+    /// default, sends each bus that is on by default to the channels after
+    /// the main output's, one bus after another.
+    pub aux_channels: &'static [Option<usize>],
 }
 
 impl Default for StandaloneOptions {
@@ -98,6 +104,7 @@ impl Default for StandaloneOptions {
             output: StreamSettings::default(),
             tempo_bpm: 120.0,
             open_midi_inputs: true,
+            aux_channels: &[],
         }
     }
 }
@@ -259,7 +266,9 @@ impl<P: Plugin> Standalone<P> {
         let map = TempoMap::new(options.tempo_bpm, TimeSignature::FOUR_FOUR).unwrap_or_default();
         let (mut clock, transport) = TransportClock::with_control(map, sample_rate);
         clock.play();
-        let mut engine = engine.with_transport_clock(clock);
+        let mut engine = engine
+            .with_transport_clock(clock)
+            .with_aux_channels(options.aux_channels);
         let params = engine.params();
 
         let mut sender = None;
