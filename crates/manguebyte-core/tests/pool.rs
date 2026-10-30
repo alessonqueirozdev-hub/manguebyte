@@ -412,3 +412,57 @@ fn idle_workers_sleep() {
     // A parked thread may wake spuriously, but rarely.
     assert!(woken <= 4, "idle workers woke {woken} times");
 }
+
+/// Panics the first time a worker renders it.
+struct Fragile {
+    panicked: Arc<AtomicBool>,
+    renders: u64,
+}
+
+impl Job for Fragile {
+    fn render(&mut self) {
+        let on_worker = thread::current()
+            .name()
+            .is_some_and(|name| name.starts_with("manguebyte-pool"));
+        if on_worker {
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("a job panicked on purpose");
+            }
+        } else {
+            // Give the worker the time to take a job and panic.
+            let start = Instant::now();
+            while !self.panicked.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(5)
+            {
+                thread::yield_now();
+            }
+        }
+        self.renders += 1;
+    }
+}
+
+#[test]
+fn a_job_that_panics_on_a_worker_ends_that_worker_only() {
+    let panicked = Arc::new(AtomicBool::new(false));
+    let jobs = (0..6)
+        .map(|_| Fragile {
+            panicked: Arc::clone(&panicked),
+            renders: 0,
+        })
+        .collect();
+    let mut pool = RenderPool::new(
+        jobs,
+        PoolConfig::with_workers(2).wait_limit(Duration::from_secs(5)),
+    );
+    // The job the worker dropped is given back and rendered by the audio
+    // thread in the same block.
+    assert!(pool.run(6).is_complete());
+    assert!(panicked.load(Ordering::SeqCst));
+    for _ in 0..10 {
+        assert!(pool.run(6).is_complete());
+    }
+    for index in 0..6 {
+        assert_eq!(pool.job(index).unwrap().renders, 11);
+    }
+    // Dropping joins the worker that ended and the one that did not.
+    drop(pool);
+}
