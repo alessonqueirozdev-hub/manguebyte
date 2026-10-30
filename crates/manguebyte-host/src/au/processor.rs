@@ -30,6 +30,17 @@ pub(crate) struct Setup {
     pub(crate) inputs: [(bool, usize); 2],
     /// The output element's channels.
     pub(crate) outputs: usize,
+    /// The other output elements, each as its number and channels.
+    pub(crate) aux_outputs: Vec<(u32, usize)>,
+}
+
+/// One output element besides the main one: its number, where it renders
+/// to, and the `AudioBufferList` that describes that memory, in 8-byte
+/// words.
+struct AuxElement {
+    element: u32,
+    memory: AudioBuffer<f32>,
+    list: Box<[u64]>,
 }
 
 /// What the render callback hands a unit: the audio of the slice for each
@@ -136,6 +147,8 @@ pub struct AuProcessor {
     /// An `AudioBufferList` with one buffer per output channel, in 8-byte
     /// words.
     list: Box<[u64]>,
+    /// The output elements after the main one.
+    aux: Vec<AuxElement>,
     takes_midi: bool,
     /// What the unit sends; see [`MidiSink`]. Freed when this value goes.
     midi: *mut MidiSink,
@@ -298,6 +311,19 @@ impl AuProcessor {
             has_element: [setup.inputs[0].0, setup.inputs[1].0],
             output: AudioBuffer::new(setup.outputs, slice),
             list: vec![0u64; words.max(2)].into_boxed_slice(),
+            aux: setup
+                .aux_outputs
+                .iter()
+                .map(|&(element, channels)| {
+                    let words =
+                        (AUDIO_BUFFER_LIST_BUFFERS + channels * size_of::<AuBuffer>()).div_ceil(8);
+                    AuxElement {
+                        element,
+                        memory: AudioBuffer::new(channels, slice),
+                        list: vec![0u64; words.max(2)].into_boxed_slice(),
+                    }
+                })
+                .collect(),
             carry: Vec::with_capacity(CARRIED_EVENTS),
             sample_time: 0.0,
             previous: None,
@@ -371,6 +397,27 @@ impl AuProcessor {
     /// The longest slice the unit renders.
     pub fn max_block_size(&self) -> usize {
         self.slice
+    }
+
+    /// Renders one block as [`process_with`](Processor::process_with) does,
+    /// and each output element after the main one, those after the first
+    /// of [`AuPlugin::audio_outputs`](super::AuPlugin::audio_outputs), into
+    /// `aux`: one buffer per element, in their order, each slice rendered
+    /// with the main output's time stamp, as an Audio Unit host pulls the
+    /// elements of one slice.
+    ///
+    /// Each buffer gets as many channels as both it and its element have,
+    /// on the frames of `buffer`; anything else in it is left as it was. An
+    /// element without a buffer is not rendered. Every buffer is silent
+    /// for a slice the unit failed. Real-time safe.
+    pub fn process_with_aux(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
+        let _quiet = NoDenormals::new();
+        self.run(buffer, context, aux);
     }
 
     /// What the unit sent through its MIDI output callback during the last
@@ -571,11 +618,106 @@ impl AuProcessor {
         true
     }
 
-    fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    /// Renders the output elements after the main one for the slice just
+    /// rendered, with its time stamp, into frames `start..start + frames`
+    /// of `aux`, one buffer per element; silence where `rendered` is false
+    /// or the unit fails. Channels a buffer has and its element lacks, and
+    /// frames past a buffer's end, are left as they were.
+    fn render_aux(
+        &mut self,
+        aux: &mut [AudioBuffer<f32>],
+        start: usize,
+        frames: usize,
+        sample_time: f64,
+        rendered: bool,
+    ) {
+        let end = start + frames;
+        let stamp = AudioTimeStamp {
+            mSampleTime: sample_time,
+            mFlags: kAudioTimeStampSampleTimeValid,
+            ..AudioTimeStamp::default()
+        };
+        for (element, target) in self.aux.iter_mut().zip(aux.iter_mut()) {
+            let channels = element.memory.num_channels();
+            let list = element.list.as_mut_ptr().cast::<AudioBufferList>();
+            // SAFETY: the words hold the header and a buffer per channel.
+            let buffers = unsafe {
+                (*list).mNumberBuffers = channels as u32;
+                std::slice::from_raw_parts_mut(
+                    list.cast::<u8>()
+                        .add(AUDIO_BUFFER_LIST_BUFFERS)
+                        .cast::<AuBuffer>(),
+                    channels,
+                )
+            };
+            for (slot, samples) in buffers.iter_mut().zip(element.memory.iter_channels_mut()) {
+                samples[..frames].fill(0.0);
+                *slot = AuBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: (frames * 4) as u32,
+                    mData: samples.as_mut_ptr().cast(),
+                };
+            }
+            let mut flags: AudioUnitRenderActionFlags = 0;
+            // SAFETY: as in `render_slice`, for this element's list and
+            // memory.
+            let good = rendered
+                && unsafe {
+                    self.shared.unit.render_element(
+                        element.element,
+                        &mut flags,
+                        &stamp,
+                        frames as u32,
+                        list,
+                    )
+                }
+                .is_ok();
+            // SAFETY: the list as the unit left it, each buffer's memory
+            // valid until its next render.
+            let given = unsafe {
+                std::slice::from_raw_parts(
+                    list.cast::<u8>()
+                        .add(AUDIO_BUFFER_LIST_BUFFERS)
+                        .cast::<AuBuffer>(),
+                    ((*list).mNumberBuffers as usize).min(channels),
+                )
+            };
+            for (channel, target) in target.iter_channels_mut().enumerate() {
+                let Some(target) = target.get_mut(start..end) else {
+                    continue;
+                };
+                let source = given
+                    .get(channel)
+                    .filter(|slot| good && !slot.mData.is_null() && slot.mNumberChannels == 1);
+                match source {
+                    Some(slot) => {
+                        let length = (slot.mDataByteSize as usize / 4).min(frames);
+                        // SAFETY: the buffer holds `mDataByteSize` bytes.
+                        let samples =
+                            unsafe { std::slice::from_raw_parts(slot.mData.cast::<f32>(), length) };
+                        target[..length].copy_from_slice(samples);
+                        target[length..].fill(0.0);
+                    }
+                    None if channel < channels => target.fill(0.0),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn run(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
         self.sink().sent.clear();
         let events = context.events.as_slice();
         if self.wrong_rate {
             buffer.clear();
+            for bus in aux.iter_mut() {
+                bus.clear();
+            }
             self.keep(events);
             self.shared.failed_blocks.fetch_add(1, Ordering::Relaxed);
             self.shared.wrong_rate.store(true, Ordering::Relaxed);
@@ -618,7 +760,12 @@ impl AuProcessor {
             let sink = self.sink();
             sink.base = start;
             sink.frames = frames;
-            if !self.render_slice(buffer, start, frames) {
+            let sample_time = self.sample_time;
+            let rendered = self.render_slice(buffer, start, frames);
+            if !aux.is_empty() {
+                self.render_aux(aux, start, frames, sample_time, rendered);
+            }
+            if !rendered {
                 failed = true;
             }
             start = end;
@@ -649,7 +796,7 @@ impl Processor<f32> for AuProcessor {
 
     fn process_with(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
         let _quiet = NoDenormals::new();
-        self.run(buffer, context);
+        self.run(buffer, context, &mut []);
     }
 
     /// Calls `AudioUnitReset`, which clears the unit's voices and tails,

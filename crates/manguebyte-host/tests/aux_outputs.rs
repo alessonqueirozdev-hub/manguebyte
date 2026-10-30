@@ -6,7 +6,10 @@
 //! and never have the plugin render it, and use no heap while it runs.
 //!
 //! Not under Miri, which is too slow for the wrappers.
-#![cfg(all(any(feature = "clap", feature = "vst3", feature = "lv2"), not(miri)))]
+#![cfg(all(
+    any(feature = "clap", feature = "vst3", feature = "lv2", feature = "au"),
+    not(miri)
+))]
 
 mod common;
 
@@ -113,6 +116,11 @@ type Run<'a> =
 /// the pedal, which is off and has to come back silent. No heap may be
 /// used while the plugin runs.
 fn check_buses(format: usize, blocks: &[usize], run: Run<'_>) {
+    check_buses_with(format, blocks, false, run);
+}
+
+/// [`check_buses`], with the pedal on or off.
+fn check_buses_with(format: usize, blocks: &[usize], pedal_on: bool, run: Run<'_>) {
     let quiet = EventBuffer::new();
     let transport = Transport::STOPPED;
     let context = ProcessContext::new(&quiet, &transport);
@@ -137,7 +145,7 @@ fn check_buses(format: usize, blocks: &[usize], run: Run<'_>) {
         for (bus, written) in aux.iter().enumerate() {
             for (channel, samples) in written.iter_channels().enumerate() {
                 for (offset, &sample) in samples.iter().enumerate() {
-                    let expected = if bus == 3 {
+                    let expected = if bus == 3 && !pedal_on {
                         0.0
                     } else {
                         level(bus, channel, frame + offset as u64)
@@ -154,11 +162,12 @@ fn check_buses(format: usize, blocks: &[usize], run: Run<'_>) {
     for (bus, given) in GIVEN[format].iter().enumerate().take(3) {
         assert!(given.load(Ordering::Relaxed) > 0, "bus {bus}");
     }
-    assert_eq!(
-        GIVEN[format][3].load(Ordering::Relaxed),
-        pedal_before,
-        "the pedal is off and never rendered"
-    );
+    let pedal = GIVEN[format][3].load(Ordering::Relaxed);
+    if pedal_on {
+        assert!(pedal > pedal_before, "the pedal is on");
+    } else {
+        assert_eq!(pedal, pedal_before, "the pedal is off and never rendered");
+    }
 }
 
 /// Blocks shorter, as long as and longer than the plugin's pieces (256).
@@ -362,6 +371,45 @@ mod lv2 {
 
         let mut processor = plugin.activate(RATE, 256).unwrap();
         check_buses(2, BLOCKS, &mut |main, context, aux| {
+            processor.process_with_aux(main, context, aux);
+        });
+        drop(processor);
+        plugin.deactivate().unwrap();
+        assert_eq!(plugin.failed_blocks(), 0);
+    }
+}
+
+// --- Audio Units ----------------------------------------------------------------
+
+#[cfg(feature = "au")]
+mod au {
+    use super::*;
+
+    #[test]
+    fn an_audio_unit_host_sees_each_division_on_an_element_of_its_own() {
+        let library = common::au_library::<Organ<3>>();
+        let codes = library.components()[0].codes;
+        let mut plugin = library.create(codes).unwrap();
+        let elements: Vec<(u32, &str, u32)> = plugin
+            .audio_outputs()
+            .iter()
+            .map(|bus| (bus.element, bus.name.as_str(), bus.channels))
+            .collect();
+        assert_eq!(
+            elements,
+            [
+                (0, "Output", 2),
+                (1, "Great", 2),
+                (2, "Swell", 2),
+                (3, "Choir", 2),
+                (4, "Pedal", 2),
+            ]
+        );
+        // An Audio Unit cannot switch an element off: the pedal, off by
+        // default elsewhere, is rendered too, once per slice whichever
+        // element is pulled first.
+        let mut processor = plugin.activate(RATE, 256).unwrap();
+        check_buses_with(3, BLOCKS, true, &mut |main, context, aux| {
             processor.process_with_aux(main, context, aux);
         });
         drop(processor);

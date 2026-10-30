@@ -316,6 +316,9 @@ pub struct AudioTimeStamp {
     pub mReserved: u32,
 }
 
+/// `AudioTimeStamp::mFlags`: `mSampleTime` is valid.
+pub const kAudioTimeStampSampleTimeValid: u32 = 1 << 0;
+
 pub const kAudioUnitRenderAction_PreRender: AudioUnitRenderActionFlags = 1 << 2;
 pub const kAudioUnitRenderAction_PostRender: AudioUnitRenderActionFlags = 1 << 3;
 pub const kAudioUnitRenderAction_OutputIsSilence: AudioUnitRenderActionFlags = 1 << 4;

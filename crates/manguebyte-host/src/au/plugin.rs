@@ -281,7 +281,8 @@ impl AuPlugin {
         &self.inputs
     }
 
-    /// The unit's output element.
+    /// The unit's output elements: the main one, element 0, then any others,
+    /// which [`AuProcessor::process_with_aux`](super::AuProcessor::process_with_aux) reads.
     pub fn audio_outputs(&self) -> &[AuBus] {
         &self.outputs
     }
@@ -556,6 +557,12 @@ impl AuPlugin {
             .find(|bus| bus.element == 1)
             .map_or(0, |bus| bus.channels as usize);
         let outputs = self.outputs.first().map_or(0, |bus| bus.channels as usize);
+        let aux_outputs = self
+            .outputs
+            .iter()
+            .skip(1)
+            .map(|bus| (bus.element, bus.channels as usize))
+            .collect();
         self.shared.wrong_rate.store(false, Ordering::Relaxed);
         let processor = AuProcessor::new(Setup {
             shared: Arc::clone(&self.shared),
@@ -567,6 +574,7 @@ impl AuPlugin {
                 (self.inputs.iter().any(|bus| bus.element == 1), sidechain),
             ],
             outputs,
+            aux_outputs,
         })?;
         let latency = self.read_latency();
         self.shared.latency.store(latency, Ordering::Relaxed);

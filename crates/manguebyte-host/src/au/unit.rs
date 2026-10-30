@@ -415,8 +415,26 @@ impl Unit {
         frames: u32,
         list: *mut AudioBufferList,
     ) -> Status {
+        // SAFETY: per this function's contract.
+        unsafe { self.render_element(0, flags, timestamp, frames, list) }
+    }
+
+    /// Renders output element `element`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`render`](Self::render), with `list` laid out for that
+    /// element.
+    pub(crate) unsafe fn render_element(
+        &self,
+        element: u32,
+        flags: &mut AudioUnitRenderActionFlags,
+        timestamp: &AudioTimeStamp,
+        frames: u32,
+        list: *mut AudioBufferList,
+    ) -> Status {
         // SAFETY: the unit's own method, with the host's arguments.
-        check(unsafe { (self.methods.render)(self.this, flags, timestamp, 0, frames, list) })
+        check(unsafe { (self.methods.render)(self.this, flags, timestamp, element, frames, list) })
     }
 
     pub(crate) fn reset(&self) -> Status {

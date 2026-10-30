@@ -11,6 +11,10 @@ use super::unit::Unit;
 /// sidechain are all this host connects.
 pub(crate) const MAX_INPUT_ELEMENTS: u32 = 2;
 
+/// Most output elements read from one unit: the main output and the
+/// auxiliary ones after it.
+pub(crate) const MAX_OUTPUT_ELEMENTS: u32 = 64;
+
 /// Most channels on one element.
 pub(crate) const MAX_CHANNELS: u32 = 64;
 
@@ -123,14 +127,22 @@ pub(crate) fn read_buses(unit: &Unit) -> (Vec<AuBus>, Vec<AuBus>) {
             channels,
         });
     }
-    let outputs = channels_of(unit, kAudioUnitScope_Output, 0)
-        .map(|channels| AuBus {
-            element: 0,
-            name: element_name(unit, kAudioUnitScope_Output, 0, "Output"),
+    // The main output, then any others, each read with the same slice.
+    let count = element_count(unit, kAudioUnitScope_Output).clamp(1, MAX_OUTPUT_ELEMENTS);
+    let mut outputs = Vec::new();
+    for element in 0..count {
+        let Some(channels) = channels_of(unit, kAudioUnitScope_Output, element) else {
+            if element == 0 {
+                break;
+            }
+            continue;
+        };
+        outputs.push(AuBus {
+            element,
+            name: element_name(unit, kAudioUnitScope_Output, element, "Output"),
             channels,
-        })
-        .into_iter()
-        .collect();
+        });
+    }
     (inputs, outputs)
 }
 
