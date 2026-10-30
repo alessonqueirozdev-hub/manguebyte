@@ -237,3 +237,39 @@ fn running_a_pool_never_allocates() {
     });
     assert_eq!(calls, 0, "running the pool used the heap");
 }
+
+#[test]
+fn governing_never_allocates() {
+    use std::time::Duration;
+
+    use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+
+    let mut governor = Governor::new(GovernorConfig::default());
+    governor.set_sample_rate(48_000.0);
+    governor.set_quality_floor(4.0);
+    let calls = heap_calls(|| {
+        for block in 0..2_000u32 {
+            let mut allowance = Allowance::new(governor.budget());
+            governor.begin_block();
+            for _voice in 0..64 {
+                if !allowance.try_take(32.0) {
+                    allowance.take_up_to(8.0);
+                }
+            }
+            if block % 97 == 0 {
+                governor.note_missed(1);
+            }
+            governor.end_block(128, allowance.spent());
+            // Some blocks are timed by the caller, as around a pool.
+            governor.record(Duration::from_micros(u64::from(block % 5) * 900), 64, 100.0);
+        }
+        governor.set_offline(true);
+        governor.begin_block();
+        governor.end_block(128, 1.0);
+        governor.set_offline(false);
+        governor.set_max_budget(1_000.0);
+        governor.reset();
+        let _ = (governor.load(), governor.stats(), governor.unit_load());
+    });
+    assert_eq!(calls, 0, "the governor used the heap");
+}

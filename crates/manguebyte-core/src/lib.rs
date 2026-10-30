@@ -10,6 +10,9 @@
 //! - [`spsc`]: a wait-free single-producer single-consumer queue.
 //! - [`log`]: a log that any thread, the audio thread included, can write to.
 //! - [`decibels`]: gain conversions.
+//! - [`governor`]: measures each block against its deadline and gives an
+//!   instrument a budget to spend, so that it renders less rather than
+//!   glitch.
 //! - [`NoDenormals`]: stops near-silence from slowing the processor down.
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
 //! - [`pool`]: rendering independent jobs (voices, divisions, chains) on
@@ -27,6 +30,7 @@ mod atomic;
 mod buffer;
 pub mod decibels;
 mod denormal;
+pub mod governor;
 pub mod log;
 pub mod module;
 mod param_id;
