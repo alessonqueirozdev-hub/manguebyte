@@ -403,6 +403,14 @@ pub(crate) struct Zone {
     /// -1 to 1.
     pub(crate) veltrack: f64,
     pub(crate) rt_decay: f64,
+    /// Seconds held a release-triggered region plays for: from
+    /// `held_low`, up to and not including `held_high`.
+    pub(crate) held_low: f64,
+    pub(crate) held_high: f64,
+    /// Seconds of the crossfade from the sustaining voices, and the frames
+    /// searched for a start in phase with them.
+    pub(crate) release_crossfade: f64,
+    pub(crate) release_align: u32,
     pub(crate) keycenter: f64,
     pub(crate) keytrack: f64,
     /// `transpose` and `tune`, in cents.
@@ -522,6 +530,12 @@ impl Zone {
         (self.lokey..=self.hikey).contains(&key)
             && (self.lovel..=self.hivel).contains(&velocity)
             && (self.lochan..=self.hichan).contains(&channel)
+    }
+
+    /// Whether a release-triggered region plays for a note held `held`
+    /// seconds.
+    pub(crate) fn accepts_held(&self, held: f64) -> bool {
+        held >= self.held_low && held < self.held_high
     }
 
     pub(crate) fn accepts_random(&self, random: f64) -> bool {
@@ -1584,6 +1598,10 @@ fn zone(region: &Region, sample: Option<(usize, &SampleData)>, generated: bool) 
         pan: region.pan / 100.0,
         veltrack: region.amp_veltrack / 100.0,
         rt_decay: region.rt_decay,
+        held_low: region.held_low,
+        held_high: region.held_high,
+        release_crossfade: region.release_crossfade,
+        release_align: region.release_align,
         keycenter: f64::from(keycenter),
         keytrack: region.pitch_keytrack,
         detune: f64::from(region.transpose) * 100.0 + region.tune,

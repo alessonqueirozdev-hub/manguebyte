@@ -137,7 +137,11 @@ impl SamplerVoice {
                 (Some(wanted), trigger) => wanted == trigger,
                 _ => false,
             };
+            let held = self.held_frames as f64 / self.sample_rate;
             if !wanted || !zone.accepts(channel, key, self.velocity) {
+                continue;
+            }
+            if release.is_some() && !zone.accepts_held(held) {
                 continue;
             }
             if !instrument.take_turn(index) || !zone.accepts_random(random) {
@@ -151,7 +155,18 @@ impl SamplerVoice {
             if zone.sample.is_none() {
                 continue;
             }
-            let held = self.held_frames as f64 / self.sample_rate;
+            // The loudest sustaining layer, which a release with a
+            // crossfade takes over from.
+            let sustain = if release.is_some() && zone.release_crossfade > 0.0 {
+                self.layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, layer)| layer.active && !layer.release_trigger && !layer.dying)
+                    .max_by(|a, b| a.1.loudness().total_cmp(&b.1.loudness()))
+                    .map(|(at, _)| at)
+            } else {
+                None
+            };
             let start = Start {
                 zone: index,
                 note: self.note,
@@ -168,7 +183,12 @@ impl SamplerVoice {
                 },
                 sample_rate: self.sample_rate,
             };
-            let slot = match self.layers.iter().position(|layer| !layer.active) {
+            let free = self
+                .layers
+                .iter()
+                .enumerate()
+                .position(|(at, layer)| !layer.active && Some(at) != sustain);
+            let slot = match free {
                 Some(free) => free,
                 None => {
                     // All busy: the quietest layer gives way.
@@ -183,11 +203,19 @@ impl SamplerVoice {
                     chosen
                 }
             };
+            let upcoming = sustain.map(|at| self.layers[at].upcoming(instrument));
             let layer = &mut self.layers[slot];
             if layer.start(instrument, &start, &*instrument.controller_defaults, 0) {
                 layer.set_volume(self.volume);
                 layer.set_pan(self.pan);
                 layer.set_tuning(self.tuning);
+                if let (Some(at), Some(upcoming)) = (sustain.filter(|&at| at != slot), upcoming) {
+                    if zone.release_align > 0 {
+                        layer.align(instrument, &upcoming, zone.release_align);
+                    }
+                    layer.fade_in(zone.release_crossfade, self.sample_rate);
+                    self.layers[at].hand_over(zone.release_crossfade, self.sample_rate);
+                }
             }
         }
     }

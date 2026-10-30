@@ -768,9 +768,30 @@ impl<S: Sample> Sampler<S> {
             if !wanted || !zone.accepts(channel, key, velocity) {
                 continue;
             }
+            if release.is_some_and(|(_, held)| !zone.accepts_held(held)) {
+                continue;
+            }
             if !instrument.take_turn(index) || !zone.accepts_random(random) {
                 continue;
             }
+            // The note's loudest sustaining voice, which a release with a
+            // crossfade takes over from.
+            let sustain = if release.is_some() && zone.release_crossfade > 0.0 {
+                self.voices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, voice)| {
+                        voice.player.active
+                            && voice.slot == slot
+                            && !voice.player.release_trigger
+                            && !voice.player.dying
+                            && note.matches(&voice.player.note)
+                    })
+                    .max_by(|a, b| a.1.player.loudness().total_cmp(&b.1.player.loudness()))
+                    .map(|(at, _)| at)
+            } else {
+                None
+            };
             let attenuation_db = release.map_or(0.0, |(_, held)| zone.rt_decay * held);
             let start = Start {
                 zone: index,
@@ -785,7 +806,7 @@ impl<S: Sample> Sampler<S> {
                 sample_rate: self.sample_rate,
             };
             let controls = (&self.controllers, self.clock);
-            start_voice(
+            let started = start_voice(
                 &mut self.voices,
                 self.polyphony,
                 instrument,
@@ -793,6 +814,20 @@ impl<S: Sample> Sampler<S> {
                 &start,
                 controls,
             );
+            if let (Some(sustain), Some(started)) = (sustain, started) {
+                if sustain != started {
+                    let rate = self.sample_rate;
+                    let upcoming = self.voices[sustain].player.upcoming(instrument);
+                    let release = &mut self.voices[started].player;
+                    if zone.release_align > 0 {
+                        release.align(instrument, &upcoming, zone.release_align);
+                    }
+                    release.fade_in(zone.release_crossfade, rate);
+                    self.voices[sustain]
+                        .player
+                        .hand_over(zone.release_crossfade, rate);
+                }
+            }
         }
     }
 
@@ -865,7 +900,7 @@ impl<S: Sample> Sampler<S> {
 }
 
 /// Finds a voice for a region and starts it, after silencing what its
-/// choke group and polyphony call for.
+/// choke group and polyphony call for. Returns the voice, if it started.
 fn start_voice(
     voices: &mut [Voice],
     polyphony: usize,
@@ -873,12 +908,10 @@ fn start_voice(
     slot: usize,
     start: &Start,
     (controls, now): (&ControllerTable, u64),
-) {
-    let Some(zone) = instrument.zones.get(start.zone) else {
-        return;
-    };
+) -> Option<usize> {
+    let zone = instrument.zones.get(start.zone)?;
     if voices.is_empty() {
-        return;
+        return None;
     }
     // Choke groups: this region's group silences the voices that name it
     // in `off_by`, except those started by the same event.
@@ -892,10 +925,8 @@ fn start_voice(
             player.off(instrument, start.sample_rate);
         }
     }
-    if zone.sample.is_none() {
-        // A region that never sounds still chokes, as `end=-1` is for.
-        return;
-    }
+    // A region that never sounds still chokes, as `end=-1` is for.
+    zone.sample?;
     // The region's own polyphony, over the voices it covers: those of its
     // group if it names one, and otherwise those of the regions under the
     // header that set the limit. Voices of other notes go first.
@@ -968,10 +999,12 @@ fn start_voice(
             chosen
         }
     };
-    if let Some(voice) = voices.get_mut(free) {
-        voice.slot = slot;
-        voice.player.start(instrument, start, controls, now);
-    }
+    let voice = voices.get_mut(free)?;
+    voice.slot = slot;
+    voice
+        .player
+        .start(instrument, start, controls, now)
+        .then_some(free)
 }
 
 impl<S: Sample> Processor<S> for Sampler<S> {

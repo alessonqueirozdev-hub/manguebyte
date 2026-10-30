@@ -402,6 +402,23 @@ break the API.
   (`tests/streaming.rs`, streamed and packed at two block sizes, and
   whole and packed); 24 four-second 16-bit pipes with two-second loops
   take 18.4 MB whole, 10.8 MB streamed and 2.7 MB streamed and packed.
+- Releases chosen by how long the note was held, for organs: SFZ has no
+  opcode for it (`lotimer`/`hitimer` count from the last sample of a
+  group, and ARIA does not play them), so `mangue_loheld` and
+  `mangue_hiheld` give a release-triggered region a range of seconds held.
+  `mangue_release_crossfade` starts a release with an equal-power
+  crossfade from the note's sustaining loop, which takes back its own
+  release and stops when the crossfade ends, and `mangue_release_align`
+  starts the release, within that many frames after its `offset`, where
+  its next 128 frames best match the sustain's (normalised
+  cross-correlation, bounded work on the audio thread, no allocation),
+  with the sustain's fraction of a frame. `tests/held_release.rs`: the
+  release follows the time held; a sine sustain into a sine release at
+  eight random loop positions keeps its phase within 0.01 rad (measured
+  0.0000) and steps no more than two sines in phase can, where without
+  alignment the phase jumps by up to 2.2 rad; with no sustain to cross
+  from, the release starts at full level. `tests/blocks.rs` and
+  `tests/realtime.rs` play them too. Both `Sampler` and `SamplerVoice`.
 
 ### Fixed
 

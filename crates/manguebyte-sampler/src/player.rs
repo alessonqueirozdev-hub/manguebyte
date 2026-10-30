@@ -160,7 +160,31 @@ pub(crate) struct Player {
     starved: bool,
     held_left: f64,
     held_right: f64,
+    /// Started by a key coming up.
+    pub(crate) release_trigger: bool,
+    /// Its envelopes as they were before its key came up, so that a release
+    /// that crossfades from it can take that release back.
+    unreleased: Option<(Envelope, Envelope)>,
+    /// An equal-power crossfade under way, its length and the frames of it
+    /// done.
+    crossfade: Crossfade,
+    crossfade_frames: u64,
+    crossfade_done: u64,
 }
+
+/// Which way a voice crosses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Crossfade {
+    None,
+    /// Rising as a sine from 0, a release taking over.
+    In,
+    /// Falling as a cosine to 0, then stopping: a sustain handing over.
+    Out,
+}
+
+/// Frames compared when a release looks for the start that continues the
+/// phase of the sustain it crossfades from.
+pub(crate) const ALIGN_FRAMES: usize = 128;
 
 impl Player {
     pub(crate) const IDLE: Self = Self {
@@ -214,6 +238,11 @@ impl Player {
         starved: false,
         held_left: 0.0,
         held_right: 0.0,
+        release_trigger: false,
+        unreleased: None,
+        crossfade: Crossfade::None,
+        crossfade_frames: 1,
+        crossfade_done: 0,
     };
 
     /// Starts playing a region, with the controllers in `controls` as they
@@ -243,6 +272,7 @@ impl Player {
         self.active = true;
         self.zone = start.zone;
         self.note = start.note;
+        self.release_trigger = start.release_trigger;
         self.hold = if start.release_trigger {
             Hold::Released
         } else {
@@ -377,9 +407,119 @@ impl Player {
         if zone.one_shot {
             return;
         }
+        if !self.envelope.is_released() {
+            self.unreleased = Some((self.envelope, self.filter_envelope));
+        }
         self.envelope.release();
         self.filter_envelope.release();
         self.end_sustain(zone);
+    }
+
+    /// Hands the note over to a release-triggered region: its own release,
+    /// if its key has just come up, is taken back, its loop keeps going,
+    /// and it falls as a cosine over `seconds`, then stops. The release
+    /// rises as a sine over the same frames ([`fade_in`](Self::fade_in)),
+    /// so that their powers add to one.
+    pub(crate) fn hand_over(&mut self, seconds: f64, sample_rate: f64) {
+        if let Some((envelope, filter_envelope)) = self.unreleased.take() {
+            self.envelope = envelope;
+            self.filter_envelope = filter_envelope;
+            self.leave_loop = false;
+        }
+        self.crossfade = Crossfade::Out;
+        self.crossfade_frames = (seconds.max(0.0) * sample_rate).round().clamp(1.0, 1e12) as u64;
+        self.crossfade_done = 0;
+    }
+
+    /// Rises as a sine over `seconds`: the release side of
+    /// [`hand_over`](Self::hand_over).
+    pub(crate) fn fade_in(&mut self, seconds: f64, sample_rate: f64) {
+        self.crossfade = Crossfade::In;
+        self.crossfade_frames = (seconds.max(0.0) * sample_rate).round().clamp(1.0, 1e12) as u64;
+        self.crossfade_done = 0;
+    }
+
+    /// The next [`ALIGN_FRAMES`] frames it reads at its pitch (each the
+    /// whole frame nearest), from the one its position is in, both channels
+    /// averaged, and its position's fraction in 32 bits: what a release
+    /// compares itself with to start in phase.
+    pub(crate) fn upcoming(&self, instrument: &Instrument) -> ([f32; ALIGN_FRAMES], u64) {
+        let mut frames = [0.0; ALIGN_FRAMES];
+        let fraction = self.position & (ONE - 1);
+        let (Some(zone), true) = (instrument.zones.get(self.zone), self.active) else {
+            return (frames, fraction);
+        };
+        let Some(sample) = zone.sample.and_then(|index| instrument.samples.get(index)) else {
+            return (frames, fraction);
+        };
+        let first = (self.position >> 32) as i64;
+        let step = self.step_frames;
+        for (k, frame) in frames.iter_mut().enumerate() {
+            let at = first + (k as f64 * step).round() as i64;
+            let (left, right) = match self.map(zone, at) {
+                Tap::Data(at) => self.frame(sample, at as u64).unwrap_or((0.0, 0.0)),
+                Tap::Tail(at) => zone.lp.as_ref().map_or((0.0, 0.0), |lp| {
+                    let left = lp.tail_left.get(at).copied().unwrap_or(0.0);
+                    (left, lp.tail_right.get(at).copied().unwrap_or(left))
+                }),
+                Tap::Zero => (0.0, 0.0),
+            };
+            *frame = 0.5 * (left + right);
+        }
+        (frames, fraction)
+    }
+
+    /// Moves its start, within `window` frames after its offset, to where
+    /// its next [`ALIGN_FRAMES`] frames best match `upcoming` (by
+    /// normalised cross-correlation), and takes `fraction` as its own, so
+    /// that it continues the phase of the voice those frames come from.
+    /// Bounded work (`window` times [`ALIGN_FRAMES`] products, `window` at
+    /// most [`MAX_RELEASE_ALIGN`](crate::region::MAX_RELEASE_ALIGN)), on
+    /// the stack, for the audio thread.
+    pub(crate) fn align(
+        &mut self,
+        instrument: &Instrument,
+        (upcoming, fraction): &([f32; ALIGN_FRAMES], u64),
+        window: u32,
+    ) {
+        const MAX: usize = crate::region::MAX_RELEASE_ALIGN as usize;
+        let (Some(zone), true) = (instrument.zones.get(self.zone), self.active) else {
+            return;
+        };
+        let Some(sample) = zone.sample.and_then(|index| instrument.samples.get(index)) else {
+            return;
+        };
+        let offset = zone.offset;
+        let step = self.step_frames;
+        // The frames the comparison reaches past a start.
+        let reach = ((ALIGN_FRAMES - 1) as f64 * step).round() as usize + 1;
+        let room = (zone.end + 1).saturating_sub(offset) as usize;
+        let window = (window as usize).min(MAX).min(room.saturating_sub(reach));
+        if window == 0 {
+            return;
+        }
+        let span = (window + reach).min(MAX + 4 * ALIGN_FRAMES);
+        let mut own = [0.0f32; MAX + 4 * ALIGN_FRAMES];
+        for (k, frame) in own[..span].iter_mut().enumerate() {
+            let (left, right) = self.frame(sample, offset + k as u64).unwrap_or((0.0, 0.0));
+            *frame = 0.5 * (left + right);
+        }
+        let mut best = (f64::NEG_INFINITY, 0usize);
+        for start in 0..window.min(span - reach) {
+            let mut product = 0.0;
+            let mut energy = 1e-12;
+            for (k, &value) in upcoming.iter().enumerate() {
+                let at = start + (k as f64 * step).round() as usize;
+                let own = f64::from(own[at]);
+                product += f64::from(value) * own;
+                energy += own * own;
+            }
+            let score = product / energy.sqrt();
+            if score > best.0 {
+                best = (score, start);
+            }
+        }
+        self.position = ((offset + best.1 as u64) << 32) | fraction;
     }
 
     /// A sustain loop stops repeating, once the reading allows it (see
@@ -684,6 +824,24 @@ impl Player {
                 }
                 gain *= self.fade();
                 self.fade_left -= 1;
+            }
+            if self.crossfade != Crossfade::None {
+                if self.crossfade == Crossfade::Out && self.crossfade_done >= self.crossfade_frames
+                {
+                    self.stop();
+                    return;
+                }
+                let angle = core::f64::consts::FRAC_PI_2 * self.crossfade_done as f64
+                    / self.crossfade_frames as f64;
+                gain *= if self.crossfade == Crossfade::In {
+                    angle.sin()
+                } else {
+                    angle.cos()
+                };
+                self.crossfade_done += 1;
+                if self.crossfade == Crossfade::In && self.crossfade_done > self.crossfade_frames {
+                    self.crossfade = Crossfade::None;
+                }
             }
             let fraction_bits = self.position & (ONE - 1);
             let fraction = fraction_bits as f64 / ONE as f64;

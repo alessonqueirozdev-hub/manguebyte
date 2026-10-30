@@ -70,6 +70,8 @@
 //! | `seq_length`, `seq_position` | Round robin. Each region counts the notes that match its keys, velocities, channels and trigger, and plays on its turn. |
 //! | `lorand`, `hirand` | Each note draws one number in `0..1` from the instrument's seeded generator; a region plays when it falls in `lorand..hirand`. |
 //! | `trigger` | `attack`, `release` (waits for the pedal), `release_key` (does not), `first`, `legato`. A release-triggered region plays with its note-on's velocity and never loops. |
+//! | `mangue_loheld`, `mangue_hiheld` | Ours, as no SFZ opcode does it (`lotimer` and `hitimer` count from the last sample of a group, and ARIA does not play them): a release-triggered region plays only for a note held from `mangue_loheld` seconds (0 by default) up to, not including, `mangue_hiheld` (no limit by default), so that an organ's short and long releases follow how long the key was down. |
+//! | `mangue_release_crossfade`, `mangue_release_align` | Ours too. A release-triggered region with `mangue_release_crossfade` (seconds) starts with an equal-power crossfade from the note's loudest sustaining voice: the sustain takes back its own release, keeps looping and falls as a cosine while the release rises as a sine, and then stops. With `mangue_release_align` (frames, up to 4096), the release starts where, within that many frames after its `offset`, its next 128 frames best match the sustain's next 128 (by normalised cross-correlation, worked out on the audio thread at the key's release: at most 4096 times 128 products), with the sustain's fraction of a frame, so that it carries the loop's phase on. Without a sustaining voice, the release starts at its `offset` at full level. |
 //! | `volume`, `amplitude`, `pan`, `amp_veltrack` (also read as `ampeg_veltrack`), `rt_decay` | Gain. Velocity gives `1 - t + t * (v / 127)²` for `amp_veltrack` = `100 * t`; `rt_decay` takes decibels per second held off a release-triggered region. Mono samples pan at constant power, unity in the centre; stereo samples are balanced. |
 //! | `offset`, `end` | The frames played; `end` is included, and `end=-1` silences the region (it still chokes). The interpolator hears silence outside them, so a region cut from a longer file never hears its neighbours. |
 //! | `loop_mode`, `loop_start`, `loop_end`, `loop_crossfade` | `no_loop`, `one_shot`, `loop_continuous`, `loop_sustain`. Without them a WAV file's `smpl` loop is used, continuously. Loop points are read through the loop by the interpolator, so the join adds nothing; `loop_crossfade` fades the loop's last frames into those before its start, linearly in amplitude. A released `loop_sustain` leaves its loop at the first frame that reads the same with the loop as without it, so the release never clicks, even inside the crossfade. |
@@ -192,8 +194,8 @@ pub use instrument::{
 };
 pub use interpolate::Interpolation;
 pub use region::{
-    EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, Modulation, ModulationTarget,
-    OffMode, Region, Trigger,
+    EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, MAX_RELEASE_ALIGN, Modulation,
+    ModulationTarget, OffMode, Region, Trigger,
 };
 pub use sampler::{
     MAX_HELD_NOTES, MAX_LOADER_CAPACITY, MAX_PENDING_CONTROLLER_CHANGES, MAX_POLYPHONY, Sampler,

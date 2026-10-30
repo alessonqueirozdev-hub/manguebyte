@@ -5,6 +5,9 @@ use std::sync::Arc;
 use crate::controllers::MAX_CONTROLLERS;
 use crate::sfz::{Location, Opcode, SfzError, SfzErrorKind, Warning, WarningKind, parse_number};
 
+/// Most frames `mangue_release_align` searches.
+pub const MAX_RELEASE_ALIGN: u32 = 4_096;
+
 /// When a region plays (`trigger`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Trigger {
@@ -400,6 +403,23 @@ pub struct Region {
     /// Seconds over which the end of the loop fades into the frames before
     /// its start.
     pub loop_crossfade: f64,
+    /// Seconds the note must have been held, at least, for this
+    /// release-triggered region to play (`mangue_loheld`, 0 by default).
+    pub held_low: f64,
+    /// Seconds the note must have been held for less than, for this
+    /// release-triggered region to play (`mangue_hiheld`, no limit by
+    /// default).
+    pub held_high: f64,
+    /// Seconds of the equal-power crossfade from the note's sustaining
+    /// voices that starts this release-triggered region
+    /// (`mangue_release_crossfade`); 0, the default, starts it at full
+    /// level and leaves the sustaining voices to their own release.
+    pub release_crossfade: f64,
+    /// Frames after `offset` searched for the start that best continues
+    /// the phase of the sustaining voice the release crossfades from
+    /// (`mangue_release_align`, 0 to 4096); 0, the default, starts at
+    /// `offset`.
+    pub release_align: u32,
     /// The amplitude envelope.
     pub ampeg: EnvelopeSpec,
     /// The choke group the region belongs to (`group`, also
@@ -488,6 +508,10 @@ impl Region {
             loop_start: None,
             loop_end: None,
             loop_crossfade: 0.0,
+            held_low: 0.0,
+            held_high: f64::INFINITY,
+            release_crossfade: 0.0,
+            release_align: 0,
             ampeg: EnvelopeSpec::default(),
             group: 0,
             off_by: None,
@@ -603,6 +627,12 @@ impl Region {
                 self.loop_end = Some(value.number(0.0, 4_294_967_296.0)? as u64);
             }
             "loop_crossfade" => self.loop_crossfade = value.number(0.0, 10.0)?,
+            "mangue_loheld" => self.held_low = value.number(0.0, 1e9)?,
+            "mangue_hiheld" => self.held_high = value.number(0.0, 1e9)?,
+            "mangue_release_crossfade" => self.release_crossfade = value.number(0.0, 10.0)?,
+            "mangue_release_align" => {
+                self.release_align = value.number(0.0, MAX_RELEASE_ALIGN as f64)? as u32;
+            }
             "ampeg_delay" | "amp_delay" => self.ampeg.delay = value.number(0.0, 100.0)?,
             "ampeg_start" | "amp_start" => self.ampeg.start = value.number(0.0, 100.0)?,
             "ampeg_attack" | "amp_attack" => self.ampeg.attack = value.number(0.0, 100.0)?,

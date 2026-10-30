@@ -36,7 +36,8 @@ const TEXT: &str = "
 <group> key=36 group=6
 <region> sample=c.wav loop_mode=loop_continuous loop_start=100 loop_end=5000
 <group> lokey=40 hikey=90
-<region> sample=c.wav trigger=release volume=-12 rt_decay=10
+<region> sample=c.wav trigger=release volume=-12 rt_decay=10 mangue_release_crossfade=0.01 mangue_release_align=200
+<region> sample=b.wav trigger=release volume=-12 mangue_loheld=0.3 mangue_release_crossfade=0.005
 ";
 
 fn events() -> Vec<(usize, EventKind)> {

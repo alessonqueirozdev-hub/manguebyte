@@ -83,7 +83,7 @@ const TEXT: &str = "
 <group> key=36 group=6 fil_type=bpf_2p
 <region> sample=*sine
 <group> lokey=40 hikey=90 fil_type=lpf_1p
-<region> sample=a.wav trigger=release rt_decay=3
+<region> sample=a.wav trigger=release rt_decay=3 mangue_release_crossfade=0.004 mangue_release_align=300 mangue_hiheld=4
 <region> sample=*silence trigger=release_key end=-1 group=6
 ";
 
