@@ -26,9 +26,9 @@ use manguebyte_params::{ChoiceParam, param_set};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme,
-    WaveData, WheelState, action_button, card, column, combo, confirm_dialog, knob, label,
-    mod_wheel, pitch_wheel, row, sidebar, tabs, text_field, wave_view, wavetable_view,
+    Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, WaveData,
+    WheelState, action_button, card, column, combo, confirm_dialog, knob, label, mod_wheel,
+    pitch_wheel, row, sidebar, tabs, text_field, wave_view, wavetable_view,
 };
 
 use common::{PANEL, levels, panel_view, params};
