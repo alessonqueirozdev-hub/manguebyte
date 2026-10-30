@@ -138,8 +138,8 @@ Everything a standalone audio application needs, short of a user interface.
   controllers (`<opcode>_onccN`, `set_ccN`, controllers up to 511 that a
   plugin sets without MIDI) are done and measured. Samples stream from
   disk with a preload in memory, packed without loss if asked, and other
-  players stream through the same layer (`SampleStore`; ADR 0013,
-  TECH_DEBT 102); releases are chosen by the time a key was held and cross
+  players stream through the same layer (`SampleStore`; ADR 0014,
+  TECH_DEBT 106); releases are chosen by the time a key was held and cross
   from the sustain in phase, and a model outside moves each key's pitch
   and level frame by frame (`modulate_key`, `SincReader`); LFOs, controller
   curves and smoothing

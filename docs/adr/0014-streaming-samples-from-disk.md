@@ -1,4 +1,4 @@
-# ADR 0013: Streaming samples from disk
+# ADR 0014: Streaming samples from disk
 
 Status: accepted, 2026-10-29
 

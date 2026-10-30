@@ -9,7 +9,7 @@
 //! The voice writes the request and how far it has read; a reader thread
 //! fills the ring ahead of it and publishes how far it has filled. Neither
 //! side ever waits for the other, and neither allocates once the pool is
-//! made. See ADR 0013.
+//! made. See ADR 0014.
 
 use std::fmt;
 use std::fs::File;

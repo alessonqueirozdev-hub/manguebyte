@@ -363,7 +363,7 @@ break the API.
   MIDI messages and the independence from block sizes; `tests/realtime.rs`
   runs filters, modulations and `set_controller` under the counting
   allocator. Limits: TECH_DEBT 101.
-- Streaming from disk (ADR 0013): `Instrument::open_streaming` and
+- Streaming from disk (ADR 0014): `Instrument::open_streaming` and
   `load_streaming` keep in memory only the head of each WAV, AIFF or FLAC
   sample (`StreamOptions::preload_frames`, 65 536 frames by default, from
   the earliest `offset` that plays it) and its loops, and read the rest
@@ -386,7 +386,7 @@ break the API.
   underruns with no step between frames larger than the sine's own;
   checks a store's cursors, its budget and the readers stopping on drop;
   and reports memory per mode. `tests/realtime.rs` runs streaming voices
-  and cursors under the counting allocator. Limits: TECH_DEBT 102.
+  and cursors under the counting allocator. Limits: TECH_DEBT 106.
 - Lossless compression in memory: `StreamOptions::compress` packs what
   stays in memory (heads, loops, samples kept whole; with
   `preload_frames(usize::MAX)`, whole samples and no streaming) in

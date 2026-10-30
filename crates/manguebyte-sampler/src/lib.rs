@@ -177,7 +177,7 @@
 //! ([`Instrument::stream_underruns`]). With a disk that keeps up, what
 //! plays is the same, bit for bit, as from memory. A player with voices of
 //! its own streams through the same layer with a [`SampleStore`] and a
-//! [`StreamCursor`] per voice. See ADR 0013.
+//! [`StreamCursor`] per voice. See ADR 0014.
 
 #![forbid(unsafe_code)]
 
