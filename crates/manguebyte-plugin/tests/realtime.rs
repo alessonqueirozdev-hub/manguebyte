@@ -223,6 +223,81 @@ fn announcing_and_storing_parameter_values_does_not_use_the_heap() {
     assert_eq!(params.edited.value(), 1.0);
 }
 
+/// What a wrapper's audio side does while another thread renames
+/// parameters, as a plugin that swaps whole instruments does: before each
+/// block it announces values and polls the count of renames, which loads
+/// atomics and never takes the names' lock. The measured stretch lasts
+/// until it has seen the count change, so the test cannot pass by polling
+/// while the other thread does nothing. (That the count never waits for
+/// the lock is proved in `manguebyte-params`, which can hold it.)
+#[test]
+fn polling_for_new_names_while_another_thread_renames_does_not_use_the_heap() {
+    use manguebyte_dsp::event::EventBuffer;
+    use manguebyte_params::{BoolParam, Param, ParamSet};
+    use manguebyte_plugin::ParamWatcher;
+
+    struct Stops(Vec<BoolParam>);
+    impl ParamSet for Stops {
+        fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+            for stop in &self.0 {
+                visitor(stop);
+            }
+        }
+    }
+    let stops = Arc::new(Stops(
+        (1..=60)
+            .map(|n| BoolParam::new(&format!("stop-{n:02}"), &format!("Stop {n}"), false))
+            .collect(),
+    ));
+    let stop = Arc::new(AtomicBool::new(false));
+    let organist = {
+        let (stops, stop) = (Arc::clone(&stops), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut organs = 0_usize;
+            while !stop.load(Ordering::Acquire) {
+                organs += 1;
+                for (n, param) in stops.0.iter().enumerate() {
+                    param
+                        .info()
+                        .set_display_name(&format!("Organ {organs}, rank {n}"));
+                    param.set(organs % 2 == 0);
+                }
+            }
+            organs
+        })
+    };
+
+    let mut watcher = ParamWatcher::new(&*stops);
+    let mut events = EventBuffer::with_capacity(64);
+    let mut told = stops.labels_version();
+    let mut changes = 0_u32;
+    let mut blocks = 0_u64;
+    let at_least = if cfg!(miri) { 3 } else { 1_000 };
+    let at_most = if cfg!(miri) { 20_000 } else { 200_000_000 };
+    assert_no_heap_use("polling for new names during renames", || {
+        while changes < 3 || blocks < at_least {
+            events.clear();
+            watcher.emit_changes(&*stops, &mut events);
+            let now = stops.labels_version();
+            if now != told {
+                told = now;
+                changes += 1;
+            }
+            blocks += 1;
+            if blocks == at_most {
+                break;
+            }
+        }
+    });
+    stop.store(true, Ordering::Release);
+    let organs = organist.join().expect("the renaming thread panicked");
+    assert!(organs > 0);
+    assert!(
+        changes >= 3,
+        "{changes} change(s) seen in {blocks} blocks while the other thread loaded {organs} organs"
+    );
+}
+
 /// What a plugin and its wrapper do with notes sent out: fill the output
 /// buffer, and write it as MIDI 2.0, as MIDI 1.0 and as MPE, block after
 /// block.

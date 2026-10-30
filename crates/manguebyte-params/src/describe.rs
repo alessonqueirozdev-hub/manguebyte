@@ -143,9 +143,11 @@ pub struct ParamDescription {
     pub id: String,
     /// The compact number that stands for `id` in events.
     pub param_id: ParamId,
-    /// The name shown to people.
+    /// The name shown to people when the description was made: the
+    /// parameter's [`display_name`](crate::ParamInfo::display_name).
     pub name: String,
-    /// The unit shown after the value, or an empty string.
+    /// The unit shown after the value when the description was made, or an
+    /// empty string.
     pub unit: String,
     /// The lowest value, in the parameter's own unit.
     pub min: f64,
@@ -209,8 +211,8 @@ impl ParamDescription {
         Self {
             id: info.id().to_owned(),
             param_id: info.param_id(),
-            name: info.name().to_owned(),
-            unit: info.unit().to_owned(),
+            name: info.display_name().as_ref().to_owned(),
+            unit: info.display_unit().as_ref().to_owned(),
             min,
             max,
             default,

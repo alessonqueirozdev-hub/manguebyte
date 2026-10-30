@@ -85,6 +85,42 @@ pub trait ParamSet: Send + Sync {
         found
     }
 
+    /// A number that changes whenever any parameter of the set is given a
+    /// new display name, short name or unit, and only then: the sum of
+    /// their [`ParamInfo::labels_version`](crate::ParamInfo::labels_version)s.
+    ///
+    /// Real-time safe: it walks the set loading one atomic per parameter,
+    /// and neither locks nor allocates. A wrapper polls it and, when it has
+    /// changed since the host was last told, tells the host once to read
+    /// every parameter's name again, however many were renamed in between
+    /// (ADR 0020).
+    ///
+    /// ```
+    /// use manguebyte_params::{BoolParam, Param, ParamSet, param_set};
+    ///
+    /// struct Organ { stop_1: BoolParam, stop_2: BoolParam }
+    /// param_set!(Organ { stop_1, stop_2 });
+    ///
+    /// let organ = Organ {
+    ///     stop_1: BoolParam::new("stop-01", "Stop 1", false),
+    ///     stop_2: BoolParam::new("stop-02", "Stop 2", false),
+    /// };
+    /// let told = organ.labels_version();
+    /// organ.stop_1.info().set_display_name("Bourdon 16'");
+    /// organ.stop_2.info().set_display_name("Principal 8'");
+    /// // Two renames, one change to tell a host about.
+    /// assert_ne!(organ.labels_version(), told);
+    /// // The same name again is no change.
+    /// let now = organ.labels_version();
+    /// organ.stop_2.info().set_display_name("Principal 8'");
+    /// assert_eq!(organ.labels_version(), now);
+    /// ```
+    fn labels_version(&self) -> u64 {
+        let mut sum = 0_u64;
+        self.visit(&mut |param| sum = sum.wrapping_add(param.info().labels_version()));
+        sum
+    }
+
     /// Checks that every parameter can be told apart from the others: no
     /// two share an identifier, and no two identifiers hash to the same
     /// [`ParamId`].
@@ -590,6 +626,83 @@ impl FromStr for ParamState {
 mod tests {
     use super::*;
     use crate::{BoolParam, ChoiceParam, FloatParam, FloatRange, IntParam};
+    use std::sync::Arc;
+
+    /// A fixed pool of stops, driven by number, as an organ that swaps
+    /// whole instruments has.
+    struct Stops(Vec<BoolParam>);
+
+    impl ParamSet for Stops {
+        fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+            for stop in &self.0 {
+                visitor(stop);
+            }
+        }
+    }
+
+    fn stops(count: usize) -> Stops {
+        Stops(
+            (1..=count)
+                .map(|n| BoolParam::new(&format!("stop-{n:02}"), &format!("Stop {n}"), false))
+                .collect(),
+        )
+    }
+
+    /// Sixty renames between two polls are one change to the poller, and
+    /// a poll with nothing renamed in between finds none.
+    #[test]
+    fn the_set_count_coalesces_a_batch_of_renames() {
+        let organ = stops(60);
+        let mut told = organ.labels_version();
+        let mut changes = 0;
+        let mut poll = |organ: &Stops| {
+            let now = organ.labels_version();
+            if now != told {
+                told = now;
+                changes += 1;
+            }
+        };
+        poll(&organ);
+        for (n, stop) in organ.0.iter().enumerate() {
+            stop.info().set_display_name(&format!("Rank {n}"));
+        }
+        poll(&organ);
+        poll(&organ);
+        // The same names again: nothing to tell.
+        for (n, stop) in organ.0.iter().enumerate() {
+            stop.info().set_display_name(&format!("Rank {n}"));
+        }
+        poll(&organ);
+        assert_eq!(changes, 1);
+        assert_eq!(organ.labels_version(), 60);
+        assert_eq!(&*organ.find("stop-07").unwrap().display_name(), "Rank 6");
+        assert_eq!(organ.find("stop-07").unwrap().name(), "Stop 7");
+        assert_eq!(organ.descriptions()[6].name, "Rank 6");
+    }
+
+    /// A poller on another thread sees every rename made before it polls,
+    /// and reads the new names once it has seen the count change.
+    #[test]
+    fn a_poller_on_another_thread_sees_a_batch_once_it_is_done() {
+        let organ = Arc::new(stops(16));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let renamer = {
+            let (organ, done) = (Arc::clone(&organ), Arc::clone(&done));
+            std::thread::spawn(move || {
+                for stop in &organ.0 {
+                    stop.info().set_display_name("Swapped");
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+        while !done.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = organ.labels_version();
+            std::hint::spin_loop();
+        }
+        renamer.join().unwrap();
+        assert_eq!(organ.labels_version(), 16);
+        organ.visit(&mut |stop| assert_eq!(&*stop.display_name(), "Swapped"));
+    }
 
     struct Envelope {
         attack: FloatParam,

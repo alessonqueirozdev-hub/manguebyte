@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 use manguebyte_core::{AtomicF32, ParamId};
 
@@ -38,14 +39,65 @@ impl Default for ParamFlags {
     }
 }
 
-/// The fixed facts about a parameter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The names and unit a parameter shows now.
+#[derive(Clone, PartialEq, Eq)]
+struct Labels {
+    name: Arc<str>,
+    /// Empty when none was given: the name stands in for it.
+    short_name: Arc<str>,
+    unit: Arc<str>,
+}
+
+/// The facts about a parameter: its identity and flags, which never
+/// change, and the names and unit it shows, which may.
+///
+/// # Names that change while the plugin runs
+///
+/// A plugin whose parameters stand for different things at different
+/// times, such as an organ whose stop parameters drive whichever organ is
+/// loaded, can give a parameter a new [`display_name`](Self::display_name),
+/// [`short_name`](Self::short_name) and [`display_unit`](Self::display_unit)
+/// at any time. The [`id`](Self::id) and [`param_id`](Self::param_id) never
+/// change, so saved state and automation keep pointing at the same
+/// parameter. [`name`](Self::name) and [`unit`](Self::unit) stay what the
+/// parameter was made with.
+///
+/// The shown labels sit behind a lock, which the setters take to write and
+/// the getters take to read. That is acceptable only because names are
+/// text, and text belongs off the audio thread, as for every method that
+/// returns or takes text: call none of the label methods on the audio
+/// thread. What the audio thread may read is
+/// [`labels_version`](Self::labels_version), an atomic that counts the
+/// changes, which a wrapper polls to tell a host to read the names again
+/// (ADR 0020).
+///
+/// ```
+/// use manguebyte_params::{BoolParam, Param};
+///
+/// let stop = BoolParam::new("stop-01", "Stop 1", false);
+/// let before = stop.info().labels_version();
+///
+/// // Another organ is loaded.
+/// stop.info().set_display_name("Principal 8'");
+/// stop.info().set_short_name("Prin 8");
+/// assert_eq!(&*stop.display_name(), "Principal 8'");
+/// assert_eq!(&*stop.info().short_name(), "Prin 8");
+/// assert!(stop.info().labels_version() != before);
+///
+/// // What it was made with, and what it is known by, stay as they were.
+/// assert_eq!(stop.name(), "Stop 1");
+/// assert_eq!(stop.id(), "stop-01");
+/// ```
 pub struct ParamInfo {
     id: String,
     param_id: ParamId,
     name: String,
     unit: String,
     flags: ParamFlags,
+    /// What is shown now. Taken off the audio thread only.
+    shown: RwLock<Labels>,
+    /// How many times `shown` has changed.
+    version: AtomicU64,
 }
 
 impl ParamInfo {
@@ -60,6 +112,46 @@ impl ParamInfo {
             name: name.to_owned(),
             unit: String::new(),
             flags: ParamFlags::default(),
+            shown: RwLock::new(Labels {
+                name: Arc::from(name),
+                short_name: Arc::from(""),
+                unit: Arc::from(""),
+            }),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// Sets the unit the parameter is made with, which it also shows.
+    fn set_unit(&mut self, unit: &str) {
+        self.unit = unit.to_owned();
+        self.shown
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unit = Arc::from(unit);
+    }
+
+    /// Sets the short name the parameter is made with.
+    fn set_initial_short_name(&mut self, short_name: &str) {
+        self.shown
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .short_name = Arc::from(short_name);
+    }
+
+    fn labels(&self) -> RwLockReadGuard<'_, Labels> {
+        // A writer cannot panic while it holds the lock (it only swaps
+        // `Arc`s), but if one did, the labels are still whole.
+        self.shown.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Changes the shown labels with `change`, which says whether it
+    /// changed anything, and counts the change if it did.
+    fn relabel(&self, change: impl FnOnce(&mut Labels) -> bool) {
+        let mut shown = self.shown.write().unwrap_or_else(PoisonError::into_inner);
+        if change(&mut shown) {
+            // Counted while the lock is held, so that whoever sees the new
+            // count and then reads the labels reads the new ones.
+            self.version.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -76,12 +168,17 @@ impl ParamInfo {
         self.param_id
     }
 
-    /// The name shown to people. Free to change between versions.
+    /// The name the parameter was made with. Free to change between
+    /// versions. What people see is [`display_name`](Self::display_name),
+    /// which is this name until it is changed.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The unit shown after the value, such as `"dB"`. Empty if there is none.
+    /// The unit the parameter was made with, such as `"dB"`, or empty if
+    /// there is none. What is shown after the value is
+    /// [`display_unit`](Self::display_unit), which is this unit until it is
+    /// changed.
     pub fn unit(&self) -> &str {
         &self.unit
     }
@@ -89,6 +186,124 @@ impl ParamInfo {
     /// What a host may do with the parameter.
     pub fn flags(&self) -> ParamFlags {
         self.flags
+    }
+
+    /// The name to show people now: the one the parameter was made with,
+    /// or the last one given to [`set_display_name`](Self::set_display_name).
+    /// Takes a read lock: not for the audio thread.
+    pub fn display_name(&self) -> Arc<str> {
+        Arc::clone(&self.labels().name)
+    }
+
+    /// The name for places with little room, as VST 3 hosts have: the last
+    /// one given to [`set_short_name`](Self::set_short_name) or
+    /// [`with_short_name`](FloatParam::with_short_name), or the
+    /// [`display_name`](Self::display_name) if there is none. Takes a read
+    /// lock: not for the audio thread.
+    pub fn short_name(&self) -> Arc<str> {
+        let labels = self.labels();
+        let short = if labels.short_name.is_empty() {
+            &labels.name
+        } else {
+            &labels.short_name
+        };
+        Arc::clone(short)
+    }
+
+    /// The unit shown after the value now: the one the parameter was made
+    /// with, or the last one given to
+    /// [`set_display_unit`](Self::set_display_unit). Takes a read lock: not
+    /// for the audio thread.
+    pub fn display_unit(&self) -> Arc<str> {
+        Arc::clone(&self.labels().unit)
+    }
+
+    /// Shows the parameter as `name` from now on. Wrappers tell the host
+    /// (ADR 0020). Any thread but the audio thread: it takes the lock, and
+    /// allocates.
+    pub fn set_display_name(&self, name: &str) {
+        self.relabel(|labels| replace(&mut labels.name, name));
+    }
+
+    /// Gives the parameter `short_name` for places with little room, or,
+    /// if it is empty, none, so that the display name is used. Any thread
+    /// but the audio thread.
+    pub fn set_short_name(&self, short_name: &str) {
+        self.relabel(|labels| replace(&mut labels.short_name, short_name));
+    }
+
+    /// Shows `unit` after the parameter's value from now on, and reads it
+    /// after typed values. Any thread but the audio thread.
+    pub fn set_display_unit(&self, unit: &str) {
+        self.relabel(|labels| replace(&mut labels.unit, unit));
+    }
+
+    /// How many times the shown name, short name or unit has changed: a
+    /// number that grows by one with each change, and only then. Setting a
+    /// label to what it already is is no change.
+    ///
+    /// Real-time safe: one atomic load, no lock. It is what a wrapper polls,
+    /// usually through [`ParamSet::labels_version`](crate::ParamSet::labels_version).
+    pub fn labels_version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+}
+
+/// Puts `text` in `slot` unless it is there already, and says whether it
+/// was not.
+fn replace(slot: &mut Arc<str>, text: &str) -> bool {
+    if **slot == *text {
+        return false;
+    }
+    *slot = Arc::from(text);
+    true
+}
+
+impl Clone for ParamInfo {
+    /// A parameter of its own with the same facts, showing what this one
+    /// shows now.
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            param_id: self.param_id,
+            name: self.name.clone(),
+            unit: self.unit.clone(),
+            flags: self.flags,
+            shown: RwLock::new(self.labels().clone()),
+            version: AtomicU64::new(self.labels_version()),
+        }
+    }
+}
+
+impl PartialEq for ParamInfo {
+    /// The same facts, showing the same labels. How many times the labels
+    /// changed to get there does not count.
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.param_id == other.param_id
+            && self.name == other.name
+            && self.unit == other.unit
+            && self.flags == other.flags
+            && (std::ptr::eq(self, other) || *self.labels() == *other.labels())
+    }
+}
+
+impl Eq for ParamInfo {}
+
+impl fmt::Debug for ParamInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let labels = self.labels();
+        formatter
+            .debug_struct("ParamInfo")
+            .field("id", &self.id)
+            .field("param_id", &self.param_id)
+            .field("name", &self.name)
+            .field("unit", &self.unit)
+            .field("flags", &self.flags)
+            .field("display_name", &labels.name)
+            .field("short_name", &labels.short_name)
+            .field("display_unit", &labels.unit)
+            .finish()
     }
 }
 
@@ -188,9 +403,16 @@ pub trait Param: Send + Sync {
         self.info().param_id()
     }
 
-    /// The name shown to people.
+    /// The name the parameter was made with. To show people, use
+    /// [`display_name`](Self::display_name), which may have changed since.
     fn name(&self) -> &str {
         self.info().name()
+    }
+
+    /// The name to show people now; see [`ParamInfo::display_name`]. Takes
+    /// a read lock: not for the audio thread.
+    fn display_name(&self) -> Arc<str> {
+        self.info().display_name()
     }
 
     /// The current position in `0..=1`.
@@ -240,7 +462,7 @@ pub trait Param: Send + Sync {
     /// ```
     fn display_plain(&self, plain: f64) -> String {
         let text = self.plain_to_text(plain);
-        match self.info().unit() {
+        match &*self.info().display_unit() {
             "" => text,
             unit => format!("{text} {unit}"),
         }
@@ -264,7 +486,8 @@ pub trait Param: Send + Sync {
     /// The result is clamped and snapped like the value
     /// [`text_to_plain`](Self::text_to_plain) returns.
     fn parse_display(&self, text: &str) -> Option<f64> {
-        let unit = self.info().unit();
+        let unit = self.info().display_unit();
+        let unit = &*unit;
         if !unit.is_empty() {
             let exact = text
                 .strip_suffix(unit)
@@ -323,7 +546,16 @@ macro_rules! common_builders {
         /// Sets the unit shown after the value, such as `"dB"`.
         #[must_use]
         pub fn with_unit(mut self, unit: &str) -> Self {
-            self.info.unit = unit.to_owned();
+            self.info.set_unit(unit);
+            self
+        }
+
+        /// Gives the parameter a short name, for hosts that show one where
+        /// there is little room. Without one they are given the name. See
+        /// [`ParamInfo::short_name`].
+        #[must_use]
+        pub fn with_short_name(mut self, short_name: &str) -> Self {
+            self.info.set_initial_short_name(short_name);
             self
         }
 
@@ -557,7 +789,7 @@ impl Param for FloatParam {
     fn text_to_plain(&self, text: &str) -> Option<f64> {
         let value = match &self.parser {
             Some(parser) => parser(text)?,
-            None => parse_number(text, self.info.unit())? as f32,
+            None => parse_number(text, &self.info.display_unit())? as f32,
         };
         (!value.is_nan()).then(|| f64::from(self.snap(value)))
     }
@@ -743,7 +975,7 @@ impl Param for IntParam {
         format!("{}", self.snap(plain) as i64)
     }
     fn text_to_plain(&self, text: &str) -> Option<f64> {
-        parse_number(text, self.info.unit()).map(|value| self.snap(value))
+        parse_number(text, &self.info.display_unit()).map(|value| self.snap(value))
     }
     fn stored_plain(&self, value: f64) -> Option<f64> {
         (!value.is_nan()).then(|| f64::from((self.snap(value) as i32).clamp(self.min, self.max)))
@@ -1445,6 +1677,107 @@ mod tests {
     #[should_panic(expected = "parameter id")]
     fn refuses_an_id_that_could_corrupt_saved_state() {
         let _ = BoolParam::new("a=b", "Broken", false);
+    }
+
+    #[test]
+    fn a_new_name_and_unit_are_shown_and_read_while_the_old_ones_are_kept() {
+        let gain = gain().with_short_name("Gn");
+        assert_eq!(&*gain.info().short_name(), "Gn");
+        assert_eq!(gain.info().labels_version(), 0);
+
+        gain.info().set_display_name("Level");
+        gain.info().set_display_unit("dBFS");
+        gain.info().set_short_name("");
+        assert_eq!(gain.info().labels_version(), 3);
+        assert_eq!(&*gain.display_name(), "Level");
+        // With no short name of its own, the display name stands in.
+        assert_eq!(&*gain.info().short_name(), "Level");
+        assert_eq!(gain.display_plain(-6.0), "-6.0 dBFS");
+        assert_eq!(gain.parse_display("-6.0 dBFS"), Some(-6.0));
+        assert_eq!(gain.text_to_plain("-3 dbfs"), Some(-3.0));
+        let description = gain.describe();
+        assert_eq!((&*description.name, &*description.unit), ("Level", "dBFS"));
+
+        // What it was made with stays.
+        assert_eq!((gain.name(), gain.info().unit()), ("Gain", "dB"));
+
+        // The same label again is no change, and counts as none.
+        gain.info().set_display_name("Level");
+        gain.info().set_display_unit("dBFS");
+        assert_eq!(gain.info().labels_version(), 3);
+    }
+
+    #[test]
+    fn a_copy_shows_what_the_original_shows_and_then_goes_its_own_way() {
+        let gain = gain();
+        gain.info().set_display_name("Level");
+        let copy = gain.info().clone();
+        assert_eq!(copy, *gain.info());
+        assert_eq!(&*copy.display_name(), "Level");
+        copy.set_display_name("Volume");
+        assert_ne!(copy, *gain.info());
+        assert_eq!(&*gain.display_name(), "Level");
+        assert!(format!("{copy:?}").contains("Volume"));
+    }
+
+    /// Names change on one thread while others read them: every read is a
+    /// whole name that was set, never a torn one, and the count ends at
+    /// the number of changes.
+    #[test]
+    fn renaming_from_another_thread_while_others_read() {
+        let names = ["Principal 8'", "Bourdon 16'", "Octave 4'"];
+        let stop = Arc::new(BoolParam::new("stop-01", "Stop 1", false));
+        let renames = if cfg!(miri) { 20 } else { 2_000 };
+        let writer = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                for turn in 0..renames {
+                    stop.info().set_display_name(names[turn % names.len()]);
+                }
+            })
+        };
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut last = 0;
+                    for _ in 0..renames {
+                        let version = stop.info().labels_version();
+                        assert!(version >= last, "the count went back");
+                        last = version;
+                        let name = stop.display_name();
+                        assert!(
+                            &*name == "Stop 1" || names.contains(&&*name),
+                            "read {name:?}"
+                        );
+                    }
+                })
+            })
+            .collect();
+        writer.join().unwrap();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        // Each turn names something other than the turn before.
+        assert_eq!(stop.info().labels_version(), renames as u64);
+        assert_eq!(&*stop.display_name(), names[(renames - 1) % names.len()]);
+    }
+
+    /// The count is what the audio thread polls, so it must never wait for
+    /// the lock: read while a writer holds the lock, it still answers.
+    #[test]
+    fn the_count_does_not_wait_for_a_writer() {
+        let stop = Arc::new(BoolParam::new("stop-01", "Stop 1", false));
+        let held = stop.info.shown.write().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || sender.send(stop.info().labels_version()).unwrap())
+        };
+        let answer = receiver.recv_timeout(std::time::Duration::from_secs(10));
+        drop(held);
+        reader.join().unwrap();
+        assert_eq!(answer, Ok(0), "reading the count waited for the lock");
     }
 
     #[test]
