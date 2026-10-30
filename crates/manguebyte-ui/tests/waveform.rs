@@ -481,3 +481,145 @@ fn an_empty_view_says_so_and_takes_no_wheel() {
     assert!(!ui.wheel(Point::new(100.0, 40.0), 1.0));
     ui.assert_accessible();
 }
+
+/// The view of a pure tone: `hz` at 48 kHz, amplitude 0.8, `seconds`
+/// long, showing `frames` of it from the start across a view `width`
+/// logical pixels wide.
+fn tone(hz: f32, seconds: f32, frames: f64, width: f32, scale: f32) -> Harness {
+    let len = (48_000.0 * seconds) as usize;
+    let samples = (0..len)
+        .map(|i| (i as f32 * std::f32::consts::TAU * hz / 48_000.0).sin() * 0.8)
+        .collect();
+    let state = WaveformState::new();
+    state.set_waveform(Some(Arc::new(Waveform::new(vec![samples], 48_000.0))));
+    state.show(0.0..frames);
+    let mut ui = Harness::new(waveform_view("Tone", state), Size::new(width, 160.0), scale);
+    ui.frame();
+    ui
+}
+
+/// How far each pixel of each device column of the view's lane is from
+/// the background, as `ink[column][row]`. The columns at the view's ends
+/// are left out.
+fn ink(ui: &Harness) -> Vec<Vec<u32>> {
+    let device = ui.get(Role::Group, "Tone").device;
+    let pixels = ui.pixels();
+    // The strip along the top holds no markers here: background.
+    let background = pixels
+        .pixel(device.x as u32 + 4, device.y as u32 + 2)
+        .expect("a pixel")
+        .to_array();
+    let distance = |x: u32, y: u32| {
+        let p = pixels.pixel(x, y).expect("a pixel").to_array();
+        (0..3)
+            .map(|c| u32::from(p[c].abs_diff(background[c])))
+            .sum::<u32>()
+    };
+    let (left, right) = (device.x as u32 + 3, device.right() as u32 - 3);
+    let (top, bottom) = (device.y as u32, device.bottom() as u32);
+    (left..right)
+        .map(|x| (top..bottom).map(|y| distance(x, y)).collect())
+        .collect()
+}
+
+/// The first and last row of `column` lit more than `threshold`.
+fn lit_rows(column: &[u32], threshold: u32) -> Option<(usize, usize)> {
+    let first = column.iter().position(|&v| v > threshold)?;
+    let last = column.iter().rposition(|&v| v > threshold)?;
+    Some((first, last))
+}
+
+#[test]
+fn a_low_tone_zoomed_out_is_a_solid_band_without_moire() {
+    // The report: a 196 Hz sine, 1.5 s at 48 kHz, about 1340 pixels wide,
+    // so 54 frames a pixel and a cycle every 4.5 pixels. Each column alone
+    // sees a fifth of a cycle; drawn as it was, the columns stood apart as
+    // spikes that beat with the pixel grid.
+    for scale in [1.0, 1.25, 2.0] {
+        let ui = tone(196.0, 1.5, 72_000.0, 1340.0, scale);
+        let columns = ink(&ui);
+        // The envelope: the rows the columns reach, below the strip.
+        let reach: Vec<(usize, usize)> = columns
+            .iter()
+            .map(|column| lit_rows(column, 40).expect("ink in every column"))
+            .collect();
+        let top = reach.iter().map(|r| r.0).min().expect("columns");
+        let bottom = reach.iter().map(|r| r.1).max().expect("columns");
+        // Every column is lit all the way across the envelope but its
+        // anti-aliased edges.
+        let margin = 2 + scale as usize;
+        for (x, column) in columns.iter().enumerate() {
+            let gaps = (top + margin..=bottom - margin)
+                .filter(|&r| column[r] <= 40)
+                .count();
+            assert_eq!(gaps, 0, "{scale}x: column {x} has {gaps} rows unlit");
+        }
+        // And every column holds the same ink, the core's included, so no
+        // band shows: the spread of the columns' totals is a small part of
+        // their mean.
+        let totals: Vec<f64> = columns
+            .iter()
+            .map(|c| c.iter().map(|&v| f64::from(v)).sum())
+            .collect();
+        let mean = totals.iter().sum::<f64>() / totals.len() as f64;
+        let spread =
+            (totals.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / totals.len() as f64).sqrt();
+        assert!(
+            spread / mean < 0.02,
+            "{scale}x: the columns' ink varies by {}",
+            spread / mean
+        );
+    }
+}
+
+#[test]
+fn zoomed_in_a_tone_is_one_unbroken_line() {
+    // 600 frames across 1000 pixels: under a frame a pixel, a line through
+    // the samples, every column lit and each joining the next.
+    for scale in [1.0, 1.25, 2.0] {
+        let ui = tone(196.0, 0.1, 600.0, 1000.0, scale);
+        let lit: Vec<(usize, usize)> = ink(&ui)
+            .iter()
+            .map(|column| lit_rows(column, 120).expect("the line in every column"))
+            .collect();
+        for (x, pair) in lit.windows(2).enumerate() {
+            let ((a0, a1), (b0, b1)) = (pair[0], pair[1]);
+            assert!(
+                b0 <= a1 + 1 && a0 <= b1 + 1,
+                "{scale}x: the line breaks between columns {x} and {}",
+                x + 1
+            );
+            // A line, not a band: no column is lit over more than the
+            // sine's steepest step and the line's width.
+            assert!(a1 - a0 < (8.0 * scale) as usize, "{scale}x: column {x}");
+        }
+    }
+}
+
+#[test]
+fn zooming_from_columns_to_a_line_never_jumps() {
+    // From 2.6 frames a device pixel, drawn as columns, to 0.7, drawn as a
+    // line, 3 % a step: what is drawn changes as little at the switch as
+    // anywhere else.
+    for scale in [1.0, 1.25, 2.0] {
+        let width = 400.0;
+        let device = f64::from(width * scale);
+        let mut per_pixel = 2.6;
+        let mut last: Option<f64> = None;
+        let mut largest = 0.0f64;
+        while per_pixel > 0.7 {
+            let ui = tone(55.0, 0.2, per_pixel * device, width, scale);
+            let columns = ink(&ui);
+            let total = columns.iter().flatten().map(|&v| f64::from(v)).sum::<f64>();
+            if let Some(last) = last {
+                largest = largest.max((total / last - 1.0).abs());
+            }
+            last = Some(total);
+            per_pixel /= 1.03;
+        }
+        assert!(
+            largest < 0.04,
+            "{scale}x: one step changed the ink by {largest}"
+        );
+    }
+}

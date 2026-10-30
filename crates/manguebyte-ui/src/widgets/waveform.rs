@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use manguebyte_gfx::{
-    Align, Extend, LinearGradient, Path, Point, Rect, RoundedRect, Scene, Size, Stop, Stroke,
+    Align, Extend, Layer, LinearGradient, Path, Point, Rect, RoundedRect, Scene, Size, Stop, Stroke,
 };
 
 use super::wave_data::{MAX_ZERO_SEARCH, Waveform};
@@ -503,48 +503,270 @@ impl Geometry {
     }
 }
 
-/// The lowest and highest sample of `channel` over the frames that `count`
-/// columns of a view of `start..end` show, as fractions of the height from
-/// the bottom, for [`Scene::columns`].
-fn columns(wave: &Waveform, channel: usize, start: f64, end: f64, count: usize) -> Columns {
+/// How thick the waveform is drawn, in logical pixels: the line through
+/// the samples, and what a column's span is grown by, so that the two look
+/// alike where one gives way to the other.
+const LINE_WIDTH: f32 = 1.5;
+
+/// Frames per device pixel column at or below which the samples are
+/// joined by a line only.
+const LINE_ONLY: f64 = 1.0;
+
+/// Frames per device pixel column at or above which the waveform is drawn
+/// as columns only. In between both are drawn, the line fading out as the
+/// columns fade in, so that zooming through the change never jumps.
+const COLUMNS_ONLY: f64 = 2.0;
+
+/// A cycle of the waveform this many logical pixels long or shorter is
+/// drawn as a solid band: each column's span is widened to a whole cycle.
+/// In logical pixels, so that a tone looks the same at every scale.
+const BAND_FULL: f32 = 6.0;
+
+/// A cycle this many logical pixels long or longer is drawn as it is, each
+/// column showing the line under it; in between, the spans are widened
+/// part of the way.
+const BAND_NONE: f32 = 12.0;
+
+/// How far, in device pixels, the waveform must swing back for a column to
+/// count as one where it turns, when its cycle is measured: smaller swings
+/// leave no gap between columns to see.
+const TURN_PIXELS: f32 = 2.0;
+
+/// The fewest and most logical pixels either way the core's root mean
+/// square is averaged over: about a cycle, so that the core does not
+/// ripple with the waveform.
+const CORE_REACH: (f32, f32) = (6.0, 16.0);
+
+/// The value of the line through `samples` at `frame`, each sample at the
+/// middle of its frame, as [`sample_line`] draws it; the first and last
+/// samples held beyond the ends. A NaN sample counts as silence.
+fn line_at(samples: &[f32], frame: f64) -> f32 {
+    let clean = |sample: f32| if sample.is_nan() { 0.0 } else { sample };
+    let (Some(&first), Some(&last)) = (samples.first(), samples.last()) else {
+        return 0.0;
+    };
+    let at = frame - 0.5;
+    if at.is_nan() || at <= 0.0 {
+        return clean(first);
+    }
+    let index = at.floor() as usize;
+    if index + 1 >= samples.len() {
+        return clean(last);
+    }
+    let t = (at - index as f64) as f32;
+    let (a, b) = (clean(samples[index]), clean(samples[index + 1]));
+    a + (b - a) * t
+}
+
+/// What `count` device pixel columns of a view of `start..end` show of
+/// `channel`, in `lane` at `scale`: for each, as fractions of the lane's
+/// height from its bottom, its span and its core.
+///
+/// A column's span is the lowest and highest point of the line through the
+/// samples across the column, from its left edge to its right: the samples
+/// under it, read from the summary, and where the line crosses its edges,
+/// so that neighbouring columns join. Where the waveform's cycle is only a
+/// few columns long, each column alone sees a fraction of a cycle, and
+/// the columns would stand apart as spikes that beat with the pixel grid;
+/// there the span is widened to the whole cycle around the column, which
+/// gives the solid band a person expects (see [`BAND_FULL`]). Each span is
+/// grown by half the line's width either way, so that a quiet passage
+/// still shows. The core is the root mean square, averaged over about a
+/// cycle with weights that fall off linearly, so that it does not ripple,
+/// and kept within the span.
+fn columns(
+    wave: &Waveform,
+    channel: usize,
+    (start, end): (f64, f64),
+    count: usize,
+    (lane, scale): (Rect, f32),
+) -> Columns {
+    let samples = wave.channel(channel);
     let span = end - start;
+    let edge = |column: usize| start + span * column as f64 / count.max(1) as f64;
+    let mut low = Vec::with_capacity(count);
+    let mut high = Vec::with_capacity(count);
+    let mut energy = Vec::with_capacity(count);
+    let height = (lane.height * scale).max(1.0);
+    let mut turns = Vec::new();
+    let mut zigzag = Turns::new(TURN_PIXELS * 2.0 / height, &mut turns);
+    for column in 0..count {
+        let (from, to) = (edge(column), edge(column + 1));
+        let (a, b) = (line_at(samples, from), line_at(samples, to));
+        let (mut l, mut h) = (a.min(b), a.max(b));
+        let middle = line_at(samples, 0.5 * (from + to));
+        let mut square = middle * middle;
+        // The samples whose middles lie in the column.
+        let first = (from - 0.5).ceil().max(0.0);
+        let last = (to - 0.5).floor();
+        if last >= first {
+            if let Some((sl, sh, rms)) = wave.summary(channel, first as usize..last as usize + 1) {
+                l = l.min(sl);
+                h = h.max(sh);
+                square = rms * rms;
+            }
+        }
+        zigzag.column(column, a, (l, h), b);
+        low.push(l);
+        high.push(h);
+        energy.push(square);
+    }
+    let grow = LINE_WIDTH * 0.5 / lane.height.max(1.0);
     let mut columns = Columns {
         low: Vec::with_capacity(count),
         high: Vec::with_capacity(count),
         core_low: Vec::with_capacity(count),
         core_high: Vec::with_capacity(count),
     };
-    let mut spans = Vec::with_capacity(count);
-    let mut energy = Vec::with_capacity(count);
+    let scale = if scale > 0.0 && scale.is_finite() {
+        scale
+    } else {
+        1.0
+    };
+    // The most columns either way a span is widened over: enough for a
+    // cycle just shorter than `BAND_NONE`.
+    let widest = ((BAND_NONE * scale - 1.0) * 0.5).ceil() as usize;
     for column in 0..count {
-        let from = (start + span * column as f64 / count as f64).floor() as usize;
-        let to = (start + span * (column + 1) as f64 / count as f64).floor() as usize;
-        // Each column takes in the last frame of the one before, so that
-        // neighbouring columns join.
-        let frames = from.saturating_sub(1)..to.max(from + 1);
-        let (l, h, rms) = wave.summary(channel, frames).unwrap_or((0.0, 0.0, 0.0));
-        columns.low.push((l + 1.0) * 0.5);
-        columns.high.push((h + 1.0) * 0.5);
-        spans.push((l, h));
-        energy.push(rms * rms);
-    }
-    // The core: the root mean square either side of the middle, over a
-    // few columns either way so that it reads as a smooth body rather
-    // than as each column's share of a cycle, and within each span.
-    for (column, &(l, h)) in spans.iter().enumerate() {
-        let near = &energy[column.saturating_sub(CORE_REACH)..(column + CORE_REACH + 1).min(count)];
-        let rms = (near.iter().sum::<f32>() / near.len() as f32).sqrt();
-        columns.core_low.push((l.max(-rms) + 1.0) * 0.5);
-        columns.core_high.push((h.min(rms) + 1.0) * 0.5);
+        // In device columns.
+        let cycle = cycle_at(&turns, column);
+        let (mut l, mut h) = (low[column], high[column]);
+        let band = ((BAND_NONE - cycle / scale) / (BAND_NONE - BAND_FULL)).clamp(0.0, 1.0);
+        if band > 0.0 {
+            // The fewest columns either way that hold a whole cycle.
+            let reach = (((cycle - 1.0) * 0.5).ceil().max(0.0) as usize).min(widest);
+            let near = column.saturating_sub(reach)..(column + reach + 1).min(count);
+            let wide_low = low[near.clone()].iter().copied().fold(l, f32::min);
+            let wide_high = high[near].iter().copied().fold(h, f32::max);
+            l += (wide_low - l) * band;
+            h += (wide_high - h) * band;
+        }
+        // The root mean square, averaged over about a cycle.
+        let reach = cycle.clamp(CORE_REACH.0 * scale, CORE_REACH.1 * scale);
+        let whole = reach.ceil() as usize;
+        let (mut sum, mut weights) = (0.0f32, 0.0f32);
+        let from = column.saturating_sub(whole);
+        let to = (column + whole + 1).min(count);
+        for (near, &square) in energy[from..to].iter().enumerate() {
+            let weight = 1.0 - (from + near).abs_diff(column) as f32 / reach;
+            if weight > 0.0 {
+                sum += weight * square;
+                weights += weight;
+            }
+        }
+        let rms = (sum / weights.max(f32::MIN_POSITIVE)).sqrt();
+        let (core_low, core_high) = (l.max(-rms), h.min(rms));
+        let fraction = |value: f32| (value + 1.0) * 0.5;
+        columns.low.push(fraction(l) - grow);
+        columns.high.push(fraction(h) + grow);
+        if core_low < core_high {
+            columns.core_low.push(fraction(core_low));
+            columns.core_high.push(fraction(core_high));
+        } else {
+            // The span lies wholly outside the core.
+            columns.core_low.push(0.0);
+            columns.core_high.push(0.0);
+        }
     }
     columns
 }
 
-/// How many columns either way a column's core is averaged over.
-const CORE_REACH: usize = 4;
+/// The columns where the waveform turns, from rising to falling or back,
+/// having swung by more than a threshold since it last turned.
+///
+/// It follows the line through the samples column by column, as the
+/// values where it crosses the columns' edges and, between them, the
+/// highest or lowest point of a column where that lies beyond both edges
+/// (a peak or a trough inside the column).
+struct Turns<'a> {
+    threshold: f32,
+    turns: &'a mut Vec<usize>,
+    /// Which way the line goes, once it has swung far enough to tell.
+    rising: Option<bool>,
+    top: (f32, usize),
+    bottom: (f32, usize),
+}
+
+impl<'a> Turns<'a> {
+    fn new(threshold: f32, turns: &'a mut Vec<usize>) -> Self {
+        turns.clear();
+        Turns {
+            threshold,
+            turns,
+            rising: None,
+            top: (f32::NEG_INFINITY, 0),
+            bottom: (f32::INFINITY, 0),
+        }
+    }
+
+    /// The line reaches `value` in `column`.
+    fn push(&mut self, value: f32, column: usize) {
+        if value > self.top.0 {
+            self.top = (value, column);
+        }
+        if value < self.bottom.0 {
+            self.bottom = (value, column);
+        }
+        match self.rising {
+            None => {
+                if self.top.0 - self.bottom.0 > self.threshold {
+                    self.rising = Some(self.top.1 >= self.bottom.1);
+                }
+            }
+            Some(true) if self.top.0 - value > self.threshold => {
+                self.turns.push(self.top.1);
+                self.rising = Some(false);
+                self.bottom = (value, column);
+            }
+            Some(false) if value - self.bottom.0 > self.threshold => {
+                self.turns.push(self.bottom.1);
+                self.rising = Some(true);
+                self.top = (value, column);
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// The line across `column`: from `from` at its left edge, through
+    /// `low` and `high`, to its right edge.
+    fn column(&mut self, column: usize, from: f32, (low, high): (f32, f32), to: f32) {
+        self.push(from, column);
+        let peak = high > from.max(to);
+        let trough = low < from.min(to);
+        // With both inside, the one nearer the left edge's value comes
+        // first: the cycle is then shorter than two columns, and the order
+        // matters little.
+        let peak_first = (high - from).abs() <= (from - low).abs();
+        match (peak, trough) {
+            (true, true) if peak_first => {
+                self.push(high, column);
+                self.push(low, column);
+            }
+            (true, true) => {
+                self.push(low, column);
+                self.push(high, column);
+            }
+            (true, false) => self.push(high, column),
+            (false, true) => self.push(low, column),
+            (false, false) => {}
+        }
+    }
+}
+
+/// How many columns long the waveform's cycle is around `column`, from the
+/// `turns` nearest it: the three half cycles around it, fewer near the
+/// first and last turns, and infinity with fewer than two turns.
+fn cycle_at(turns: &[usize], column: usize) -> f32 {
+    let Some(last) = turns.len().checked_sub(1).filter(|&last| last > 0) else {
+        return f32::INFINITY;
+    };
+    let next = turns.partition_point(|&turn| turn <= column);
+    let from = next.saturating_sub(2).min(last - 1);
+    let to = (next + 1).min(last).max(from + 1);
+    (turns[to] - turns[from]) as f32 * 2.0 / (to - from) as f32
+}
 
 /// A channel's columns: the span of each, from its lowest to highest
-/// sample, and its core, the root mean square either side of the middle,
+/// point, and its core, the root mean square either side of the middle,
 /// as fractions of the lane from its bottom.
 #[derive(Debug, Clone)]
 struct Columns {
@@ -554,16 +776,34 @@ struct Columns {
     core_high: Vec<f32>,
 }
 
-/// How one channel is drawn.
+/// How one channel is drawn: as columns, as a line through the samples,
+/// or, around the zoom where one gives way to the other, as both, each
+/// with how opaque it is (and for the columns, how far they have their
+/// own look, see [`blend`]).
 #[derive(Debug, Clone)]
-enum Shape {
-    /// A span per device pixel column, from its lowest to highest sample,
-    /// with a brighter core.
-    Columns(Columns),
-    /// A line through the samples, zoomed in further than a frame per
-    /// device pixel.
-    Line(Path),
+struct Shape {
+    columns: Option<(Columns, f32, f32)>,
+    line: Option<(Path, f32)>,
 }
+
+/// How opaque the columns and the line are drawn at `per_column` frames
+/// per device pixel column, and how far the columns have taken on their
+/// own look: the line alone up to [`LINE_ONLY`], the columns alone from
+/// [`COLUMNS_ONLY`], and in between the one fading in as the other fades
+/// out, both whole at the middle, so that what is drawn never thins.
+/// Until [`COLUMNS_LOOK`] the columns are drawn in the line's colour,
+/// which they leave gradually for the gradient and the core, so that
+/// where both are drawn they look alike and nothing is drawn twice over.
+fn blend(per_column: f64) -> (f32, f32, f32) {
+    let t = ((per_column - LINE_ONLY) / (COLUMNS_ONLY - LINE_ONLY)).clamp(0.0, 1.0) as f32;
+    let look = ((per_column - COLUMNS_ONLY) / (COLUMNS_LOOK - COLUMNS_ONLY)).clamp(0.0, 1.0) as f32;
+    ((2.0 * t).min(1.0), (2.0 * (1.0 - t)).min(1.0), look)
+}
+
+/// Frames per device pixel column from which the columns are drawn with
+/// their own look, a gradient and a brighter core; below it they take on
+/// the line's colour, the whole of it at [`COLUMNS_ONLY`].
+const COLUMNS_LOOK: f64 = 6.0;
 
 /// What the channels were last drawn from.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -617,11 +857,17 @@ fn frame_text(wave: Option<&Waveform>, frame: u64) -> String {
 /// application through a [`WaveformState`].
 ///
 /// - Each channel has a lane of its own. Each device pixel column shows
-///   the lowest and highest sample of the frames under it, read from the
-///   summary, so a ten-minute file draws as fast as a short one; zoomed in
-///   past a frame per device pixel the samples are joined by a line. The
-///   columns are kept until the frames shown, the size or the scale
-///   change, so a playhead moving every frame reads nothing.
+///   the lowest and highest point of the line through the samples across
+///   it, read from the summary, so a ten-minute file draws as fast as a
+///   short one, with the root mean square as a brighter core. Where the
+///   waveform's cycle is only a few logical pixels long the columns are
+///   widened to a whole cycle, so a low tone zoomed out is a solid band
+///   rather than spikes that beat with the pixel grid. Zoomed in to two
+///   frames per device pixel and further, the samples are joined by an
+///   anti-aliased line, which takes over from the columns gradually
+///   between two frames and one. The shapes are kept until the frames
+///   shown, the size or the scale change, so a playhead moving every
+///   frame reads nothing.
 /// - Ctrl (Command on macOS) and the wheel zoom in and out around the
 ///   pointer, by [`ZOOM_STEP`] a notch; a precision touchpad's pinch
 ///   arrives as Ctrl and fractions of a notch, and zooms smoothly. The
@@ -989,15 +1235,18 @@ impl WaveformView {
             } else {
                 0.0
             };
+            let (columns_opacity, line_opacity, look) = blend(per_column);
             let shapes = lanes
                 .iter()
                 .enumerate()
-                .map(|(channel, lane)| {
-                    if per_column >= 1.0 {
-                        Shape::Columns(columns(wave, channel, geometry.start, geometry.end, count))
-                    } else {
-                        Shape::Line(sample_line(wave, channel, geometry, *lane))
-                    }
+                .map(|(channel, lane)| Shape {
+                    columns: (columns_opacity > 0.0).then(|| {
+                        let span = (geometry.start, geometry.end);
+                        let shape = columns(wave, channel, span, count, (*lane, scale));
+                        (shape, columns_opacity, look)
+                    }),
+                    line: (line_opacity > 0.0)
+                        .then(|| (sample_line(wave, channel, geometry, *lane), line_opacity)),
                 })
                 .collect();
             self.cache = Some((key, shapes));
@@ -1022,11 +1271,12 @@ fn lanes(area: Rect, count: usize, scale: f32) -> Vec<Rect> {
 }
 
 /// A line through the samples of `channel` that `geometry` shows, in
-/// `lane`: each sample at the middle of its frame.
+/// `lane`: each sample at the middle of its frame, from the last sample
+/// before the left edge to the first after the right one.
 fn sample_line(wave: &Waveform, channel: usize, geometry: &Geometry, lane: Rect) -> Path {
     let samples = wave.channel(channel);
-    let first = geometry.start.floor().max(0.0) as usize;
-    let last = (geometry.end.ceil() as usize + 1).min(samples.len());
+    let first = (geometry.start - 0.5).floor().max(0.0) as usize;
+    let last = (((geometry.end - 0.5).ceil().max(0.0) as usize) + 1).min(samples.len());
     let mid = lane.y + lane.height * 0.5;
     let half = lane.height * 0.5;
     let mut path = Path::with_capacity(last.saturating_sub(first) + 1);
@@ -1206,20 +1456,26 @@ impl Widget for WaveformView {
                     scale,
                     palette.hairline_strong,
                 );
-                match shape {
-                    Shape::Columns(columns) => {
-                        // The span, deepest at the edges and brightest in
-                        // the middle, and its core, brighter still.
-                        let edge = palette.accent.with_alpha(0x8C);
-                        let middle = palette
+                if let Some((columns, opacity, look)) = &shape.columns {
+                    // The span, deepest at the edges and brightest in the
+                    // middle, and its core, brighter still; in the line's
+                    // colour, and faded as a whole, while the line takes
+                    // over.
+                    let line = palette.accent_bright;
+                    let edge = line.lerp(palette.accent.with_alpha(0x8C), *look);
+                    let middle = line.lerp(
+                        palette
                             .accent
                             .lerp(palette.accent_bright, 0.6)
-                            .with_alpha(0xE6);
-                        let stops = [
-                            Stop::new(0.0, edge),
-                            Stop::new(0.5, middle),
-                            Stop::new(1.0, edge),
-                        ];
+                            .with_alpha(0xE6),
+                        *look,
+                    );
+                    let stops = [
+                        Stop::new(0.0, edge),
+                        Stop::new(0.5, middle),
+                        Stop::new(1.0, edge),
+                    ];
+                    let draw = |scene: &mut Scene| {
                         let span = LinearGradient {
                             start: Point::new(lane.x, lane.y),
                             end: Point::new(lane.x, lane.bottom()),
@@ -1231,12 +1487,21 @@ impl Widget for WaveformView {
                             *lane,
                             &columns.core_low,
                             &columns.core_high,
-                            palette.accent_bright.with_alpha(0xF2),
+                            line.lerp(palette.accent_bright.with_alpha(0xF2), *look),
                         );
+                    };
+                    if *opacity < 1.0 {
+                        scene.layer(Layer::with_opacity(*opacity), draw);
+                    } else {
+                        draw(scene);
                     }
-                    Shape::Line(path) => {
-                        scene.stroke(path, Stroke::round(1.5), palette.accent_bright);
-                    }
+                }
+                if let Some((path, opacity)) = &shape.line {
+                    scene.stroke(
+                        path,
+                        Stroke::round(LINE_WIDTH),
+                        palette.accent_bright.with_opacity(*opacity),
+                    );
                 }
             }
             for lane in lanes.iter().skip(1) {
