@@ -12,6 +12,7 @@ use manguebyte_formats::FormatError;
 use crate::controllers::{Controls, MAX_CONTROLLERS};
 use crate::envelope::Stages;
 use crate::interpolate::SincTable;
+use crate::packed::{BLOCK, PackedChannel};
 use crate::region::{
     EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, ModulationTarget, OffMode,
     Region, Trigger,
@@ -172,17 +173,111 @@ pub(crate) struct SampleData {
     pub(crate) root_key: Option<u8>,
 }
 
-/// A stretch of a sample held in memory.
+/// A stretch of a sample held in memory: its frames as they are, or
+/// packed (see [`PackedChannel`]), when `packed` is set and `left` and
+/// `right` are empty.
 pub(crate) struct Part {
     pub(crate) start: u64,
+    pub(crate) frames: usize,
     pub(crate) left: Vec<f32>,
     pub(crate) right: Option<Vec<f32>>,
+    pub(crate) packed: Option<Packed>,
+}
+
+/// A part's channels, packed.
+pub(crate) struct Packed {
+    pub(crate) left: PackedChannel,
+    pub(crate) right: Option<PackedChannel>,
 }
 
 impl Part {
+    /// A part of the frames as they are.
+    pub(crate) fn plain(start: u64, left: Vec<f32>, right: Option<Vec<f32>>) -> Self {
+        Self {
+            start,
+            frames: left.len(),
+            left,
+            right,
+            packed: None,
+        }
+    }
+
     /// The frame after its last.
     pub(crate) fn end(&self) -> u64 {
-        self.start + self.left.len() as u64
+        self.start + self.frames as u64
+    }
+
+    /// Packs its frames, if they are not packed yet.
+    pub(crate) fn pack(&mut self) {
+        if self.packed.is_some() {
+            return;
+        }
+        let left = PackedChannel::pack(&self.left);
+        let right = self.right.as_deref().map(PackedChannel::pack);
+        self.left = Vec::new();
+        self.right = None;
+        self.packed = Some(Packed { left, right });
+    }
+
+    /// Frame `index` of `channel` (0 or 1; the left for the right of a mono
+    /// part). Unpacks a whole block of a packed part, so it is for loading,
+    /// not for playing.
+    fn frame(&self, channel: usize, index: usize) -> Option<f32> {
+        match &self.packed {
+            None => match (channel, &self.right) {
+                (1, Some(right)) => right.get(index).copied(),
+                _ => self.left.get(index).copied(),
+            },
+            Some(packed) => {
+                let source = match (channel, &packed.right) {
+                    (1, Some(right)) => right,
+                    _ => &packed.left,
+                };
+                let mut block = [0.0; BLOCK];
+                let frames = source.unpack(index / BLOCK, &mut block);
+                block[..frames].get(index % BLOCK).copied()
+            }
+        }
+    }
+
+    /// The sum of the squares of frames `low..high` of `channel`, counted
+    /// from the part's start.
+    fn squares(&self, channel: usize, low: usize, high: usize) -> f64 {
+        let square = |&sample: &f32| f64::from(sample) * f64::from(sample);
+        match &self.packed {
+            None => {
+                let data = match (channel, &self.right) {
+                    (1, Some(right)) => right,
+                    _ => &self.left,
+                };
+                data[low..high].iter().map(square).sum::<f64>()
+            }
+            Some(packed) => {
+                let source = match (channel, &packed.right) {
+                    (1, Some(right)) => right,
+                    _ => &packed.left,
+                };
+                let mut block = [0.0; BLOCK];
+                let mut total = 0.0;
+                for index in low / BLOCK..high.div_ceil(BLOCK) {
+                    let frames = source.unpack(index, &mut block);
+                    let from = low.saturating_sub(index * BLOCK).min(frames);
+                    let to = (high - index * BLOCK).min(frames);
+                    total += block[from..to].iter().map(square).sum::<f64>();
+                }
+                total
+            }
+        }
+    }
+
+    /// Bytes it takes.
+    fn bytes(&self) -> usize {
+        match &self.packed {
+            None => (self.left.len() + self.right.as_ref().map_or(0, Vec::len)) * 4,
+            Some(packed) => {
+                packed.left.bytes() + packed.right.as_ref().map_or(0, PackedChannel::bytes)
+            }
+        }
     }
 }
 
@@ -198,11 +293,7 @@ impl SampleData {
         Self {
             frames: left.len(),
             stereo: right.is_some(),
-            parts: vec![Part {
-                start: 0,
-                left,
-                right,
-            }],
+            parts: vec![Part::plain(0, left, right)],
             rate,
             file_loop,
             root_key,
@@ -215,7 +306,19 @@ impl SampleData {
 
     /// Whether every frame is in memory.
     pub(crate) fn is_resident(&self) -> bool {
-        matches!(&self.parts[..], [part] if part.start == 0 && part.left.len() == self.frames)
+        matches!(&self.parts[..], [part] if part.start == 0 && part.frames == self.frames)
+    }
+
+    /// Whether any part is packed.
+    pub(crate) fn is_packed(&self) -> bool {
+        self.parts.iter().any(|part| part.packed.is_some())
+    }
+
+    /// Packs every part.
+    pub(crate) fn pack(&mut self) {
+        for part in &mut self.parts {
+            part.pack();
+        }
     }
 
     /// The stretch in memory that holds frame `at`.
@@ -227,7 +330,8 @@ impl SampleData {
     }
 
     /// `count` frames from `start`, if one stretch in memory holds them
-    /// all: the left channel and, for a stereo sample, the right.
+    /// all, as they are: the left channel and, for a stereo sample, the
+    /// right.
     #[inline]
     pub(crate) fn slice(&self, start: u64, count: usize) -> Option<(&[f32], Option<&[f32]>)> {
         let part = self.part_at(start)?;
@@ -241,22 +345,15 @@ impl SampleData {
     }
 
     /// Frame `at` of `channel` (0 or 1), if it is in memory; the left for
-    /// the right of a mono sample.
+    /// the right of a mono sample. For loading, not for playing.
     pub(crate) fn ram(&self, channel: usize, at: u64) -> Option<f32> {
         let part = self.part_at(at)?;
-        let index = (at - part.start) as usize;
-        match (channel, &part.right) {
-            (1, Some(right)) => right.get(index).copied(),
-            _ => part.left.get(index).copied(),
-        }
+        part.frame(channel, (at - part.start) as usize)
     }
 
     /// Bytes of audio in memory.
     pub(crate) fn bytes(&self) -> usize {
-        self.parts
-            .iter()
-            .map(|part| (part.left.len() + part.right.as_ref().map_or(0, Vec::len)) * 4)
-            .sum()
+        self.parts.iter().map(Part::bytes).sum()
     }
 }
 
@@ -475,10 +572,6 @@ impl Zone {
                 let end = from.saturating_add(count);
                 let mut total = 0.0;
                 for part in &sample.parts {
-                    let data = match (channel, &part.right) {
-                        (1, Some(right)) => right,
-                        _ => &part.left,
-                    };
                     let (low, high) = (from.max(part.start), end.min(part.end()));
                     let (Ok(low), Ok(high), Ok(base)) = (
                         usize::try_from(low),
@@ -488,10 +581,7 @@ impl Zone {
                         continue;
                     };
                     if low < high {
-                        total += data[low - base..high - base]
-                            .iter()
-                            .map(|&sample| f64::from(sample) * f64::from(sample))
-                            .sum::<f64>();
+                        total += part.squares(channel, low - base, high - base);
                     }
                 }
                 total
@@ -825,10 +915,16 @@ impl Instrument {
         let mut by_path: HashMap<Arc<str>, Option<usize>> = HashMap::new();
         for (region, entry) in entries {
             let loaded = match entry {
-                Entry::Whole(data) => data.map(|data| (data, None)),
+                Entry::Whole(data) => data.map(|mut data| {
+                    // Generators stay as they are.
+                    if options.compress && !region.sample.starts_with('*') {
+                        data.pack();
+                    }
+                    (data, None)
+                }),
                 Entry::Planned(at) => {
                     let (data, file) = planned[at]
-                        .read(preload)
+                        .read(preload, options.compress)
                         .map_err(|error| format_error(&region.sample, &region.location, error))?;
                     Some((data, file))
                 }
@@ -848,7 +944,7 @@ impl Instrument {
 
     /// Whether any of its samples is streamed from disk.
     pub fn is_streaming(&self) -> bool {
-        self.pool.is_some()
+        self.pool.as_ref().is_some_and(|pool| pool.streams())
     }
 
     /// How many times a voice found that the frames it needed had not

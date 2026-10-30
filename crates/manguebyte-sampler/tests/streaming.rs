@@ -196,26 +196,45 @@ fn streamed_samples_play_as_they_do_from_memory() {
     let reference = play(memory, 512, false, &events());
     assert!(reference.iter().any(|&s| s.abs() > 0.1));
 
-    for (block, threads) in [(512, 1), (77, 2), (1_024, 3)] {
-        let streamed =
-            Instrument::load_streaming(&sfz, scratch.path(), &small().reader_threads(threads))
-                .unwrap();
-        assert!(streamed.is_streaming());
+    // Streamed, streamed and packed, and whole in memory but packed.
+    let modes = [
+        (512, 1, false, false),
+        (77, 2, false, false),
+        (1_024, 3, false, false),
+        (512, 1, true, false),
+        (77, 2, true, false),
+        (256, 1, true, true),
+    ];
+    for (block, threads, compress, whole) in modes {
+        let mut options = small().reader_threads(threads).compress(compress);
+        if whole {
+            options = options.preload_frames(usize::MAX);
+        }
+        let instrument = Instrument::load_streaming(&sfz, scratch.path(), &options).unwrap();
+        let what = format!("block {block}, {threads} threads, packed {compress}, whole {whole}");
+        assert_eq!(instrument.is_streaming(), !whole, "{what}");
         // Heads of 4096 frames and the loop: far less than the files.
-        assert!(
-            streamed.sample_bytes() * 3 < memory_bytes,
-            "{} of {memory_bytes}",
-            streamed.sample_bytes()
-        );
-        let probe = streamed.clone();
-        let output = play(streamed, block, true, &events());
-        assert_eq!(probe.stream_underruns(), 0, "block {block}");
+        let bytes = instrument.sample_bytes();
+        if whole {
+            assert!(
+                bytes * 2 < memory_bytes,
+                "{what}: {bytes} of {memory_bytes}"
+            );
+        } else {
+            assert!(
+                bytes * 3 < memory_bytes,
+                "{what}: {bytes} of {memory_bytes}"
+            );
+        }
+        let probe = instrument.clone();
+        let output = play(instrument, block, true, &events());
+        assert_eq!(probe.stream_underruns(), 0, "{what}");
         assert_eq!(probe.stream_read_errors(), 0);
         let same = output
             .iter()
             .zip(&reference)
             .all(|(a, b)| a.to_bits() == b.to_bits());
-        assert!(same, "block {block}, {threads} threads");
+        assert!(same, "{what}");
     }
 }
 
@@ -590,4 +609,35 @@ fn memory_per_mode() {
     let kept = 16_384 + (96_000 + 2 * 256);
     assert_eq!(heads, 24 * kept * 4);
     assert_eq!(rings, 32 * 32_768 * 4);
+
+    // The same, packed: the heads and loops of 16-bit pipes take about a
+    // quarter of their floats; each voice keeps four blocks unpacked.
+    let packed =
+        Instrument::load_streaming(&sfz, scratch.path(), &options.clone().compress(true)).unwrap();
+    let packed_heads = packed.sample_bytes();
+    let packed_rings = packed.stream_buffer_bytes();
+    println!(
+        "streamed and packed: {packed_heads} bytes of heads and loops, {packed_rings} of rings and caches"
+    );
+    assert!(
+        packed_heads * 7 < heads * 2,
+        "{packed_heads} against {heads}"
+    );
+    assert_eq!(packed_rings, rings + 32 * 4 * 1_024 * 4);
+
+    // Whole and packed, with no streaming.
+    let options = StreamOptions::new()
+        .preload_frames(usize::MAX)
+        .voices(32)
+        .compress(true);
+    let resident = Instrument::load_streaming(&sfz, scratch.path(), &options).unwrap();
+    assert!(!resident.is_streaming());
+    let resident_bytes = resident.sample_bytes();
+    let caches = resident.stream_buffer_bytes();
+    println!("whole and packed: {resident_bytes} bytes, {caches} of caches");
+    assert!(
+        resident_bytes * 7 < whole * 2,
+        "{resident_bytes} against {whole}"
+    );
+    assert!(caches <= 32 * (4 * 1_024 + 2) * 4);
 }

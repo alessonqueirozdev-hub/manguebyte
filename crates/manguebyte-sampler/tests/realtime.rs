@@ -247,53 +247,57 @@ fn streaming_voices_and_cursors_never_allocate() {
     );
     std::fs::write(dir.join("a.wav"), long).unwrap();
     std::fs::write(dir.join("b.wav"), stereo).unwrap();
-    let options = StreamOptions::new()
-        .preload_frames(4_096)
-        .ring_frames(16_384)
-        .voices(12);
-    let sfz = Sfz::parse(TEXT).unwrap();
-    let instrument = Instrument::load_streaming(&sfz, &dir, &options).unwrap();
-    assert!(instrument.is_streaming());
-    let probe = instrument.clone();
-    let (mut sampler, _loader) = Sampler::<f32>::with_instrument(instrument, 8);
-    sampler.prepare(&ProcessSpec {
-        sample_rate: 48_000.0,
-        max_block_size: 256,
-        num_channels: 2,
-    });
-    let blocks: Vec<EventBuffer> = (200..400).map(busy_events).collect();
-    let mut buffer = AudioBuffer::<f32>::new(2, 256);
-    let transport = Transport::STOPPED;
-    // Starting, streaming, retargeting round loops, starving and stopping.
-    assert_no_heap_use("streaming voices", || {
-        for (index, events) in blocks.iter().enumerate() {
-            buffer.set_num_frames([256, 1, 77, 256][index % 4]);
-            sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
-        }
-        sampler.reset();
-        sampler.process(&mut buffer);
-    });
-    assert!(probe.streaming_voices() == 0);
+    // Streamed, and streamed with what stays in memory packed.
+    for compress in [false, true] {
+        let options = StreamOptions::new()
+            .preload_frames(4_096)
+            .ring_frames(16_384)
+            .voices(12)
+            .compress(compress);
+        let sfz = Sfz::parse(TEXT).unwrap();
+        let instrument = Instrument::load_streaming(&sfz, &dir, &options).unwrap();
+        assert!(instrument.is_streaming());
+        let probe = instrument.clone();
+        let (mut sampler, _loader) = Sampler::<f32>::with_instrument(instrument, 8);
+        sampler.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 256,
+            num_channels: 2,
+        });
+        let blocks: Vec<EventBuffer> = (200..400).map(busy_events).collect();
+        let mut buffer = AudioBuffer::<f32>::new(2, 256);
+        let transport = Transport::STOPPED;
+        // Starting, streaming, retargeting round loops, starving and stopping.
+        assert_no_heap_use("streaming voices", || {
+            for (index, events) in blocks.iter().enumerate() {
+                buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
+            }
+            sampler.reset();
+            sampler.process(&mut buffer);
+        });
+        assert!(probe.streaming_voices() == 0);
 
-    let store = SampleStore::open([dir.join("a.wav"), dir.join("b.wav")], &options).unwrap();
-    let a = store.handle(0).unwrap();
-    let b = store.handle(1).unwrap();
-    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
-    assert_no_heap_use("cursors", || {
-        let mut cursors = [store.cursor(a, 0), store.cursor(b, 100)];
-        for turn in 0..200 {
-            for cursor in &mut cursors {
-                if let CursorRead::Frames(0) = cursor.read(&mut left, &mut right) {
-                    cursor.seek(0);
-                }
-                if turn % 17 == 0 {
-                    cursor.seek(cursor.position() / 2);
+        let store = SampleStore::open([dir.join("a.wav"), dir.join("b.wav")], &options).unwrap();
+        let a = store.handle(0).unwrap();
+        let b = store.handle(1).unwrap();
+        let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        assert_no_heap_use("cursors", || {
+            let mut cursors = [store.cursor(a, 0), store.cursor(b, 100)];
+            for turn in 0..200 {
+                for cursor in &mut cursors {
+                    if let CursorRead::Frames(0) = cursor.read(&mut left, &mut right) {
+                        cursor.seek(0);
+                    }
+                    if turn % 17 == 0 {
+                        cursor.seek(cursor.position() / 2);
+                    }
                 }
             }
-        }
-        drop(cursors);
-    });
-    drop(store);
-    drop(probe);
+            drop(cursors);
+        });
+        drop(store);
+        drop(probe);
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -288,11 +288,13 @@ impl Player {
         }
         self.position = zone.offset << 32;
         self.wrap(zone);
-        if let (false, Some(pool), Some(index)) =
-            (sample.is_resident(), &instrument.pool, zone.sample)
-        {
+        if let (true, Some(pool), Some(index)) = (
+            !sample.is_resident() || sample.is_packed(),
+            &instrument.pool,
+            zone.sample,
+        ) {
             // The frames after the stretch in memory it starts in are asked
-            // for at once.
+            // for at once (and a packed sample unpacks into the slot).
             let at = self.position >> 32;
             let from = sample
                 .part_at(at)
@@ -745,6 +747,9 @@ impl Player {
         }
         let index = self.position >> 32;
         self.lease.release_before(index.saturating_sub(MARGIN));
+        if let Some(part) = sample.part_at(index).filter(|part| part.packed.is_some()) {
+            self.lease.unpack_ahead(part, (index - part.start) as usize);
+        }
     }
 
     /// The weighted sum of the frames from `first` on, through the loop

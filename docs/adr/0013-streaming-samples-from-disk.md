@@ -96,6 +96,21 @@ the rest of its file: a bounce faster than real time calls it between
 blocks and gets what real time with a disk that keeps up would give. The
 tests use it to prove the output the same bits as from memory.
 
+**8. Packed parts, unpacked per voice.** With `StreamOptions::compress`,
+each part is cut into blocks of 1024 frames packed on their own, so that
+a voice can start anywhere and jump round a loop: a block whose values are
+all integers over 2^15 or 2^23 (what 16- and 24-bit files decode to) is
+held as the residual of the best of five fixed predictors in Rice codes,
+any other block, and any whose values would not come back bit for bit,
+as its `f32` bits. FLAC's encoder in `manguebyte-formats` was not used:
+it writes a stream, whose frames are found by search, and its frame
+decoder is internal to that crate; a block format of our own is a few
+hundred lines with the random access this needs. A voice that plays a
+packed sample claims a slot as a streaming one does, and unpacks into the
+slot's four cached blocks the block it reaches, on the audio thread
+(bounded work, no allocation), and the next one at the end of each
+render. The budget is checked against the sizes unpacked.
+
 ## Consequences
 
 - With the disk keeping up, streamed instruments play the same bits as

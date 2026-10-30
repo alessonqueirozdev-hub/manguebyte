@@ -176,6 +176,7 @@ mod envelope;
 mod filter;
 mod instrument;
 mod interpolate;
+mod packed;
 mod player;
 mod region;
 mod sampler;

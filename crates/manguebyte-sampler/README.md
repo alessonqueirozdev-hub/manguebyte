@@ -27,8 +27,11 @@ Large instruments stream from disk (`Instrument::open_streaming`,
 the rest is read on reader threads into a lock-free ring per voice, within
 a memory budget if one is given. The audio thread never waits for the
 disk; a voice whose frames are late fades out without a click and is
-counted. Players with voices of their own use the same layer through
-`SampleStore` and `StreamCursor`.
+counted. What stays in memory can be held packed without loss
+(`StreamOptions::compress`), about a quarter of its size for 16-bit
+material, and unpacked block by block as voices play it. Players with
+voices of their own use the same layer through `SampleStore` and
+`StreamCursor`.
 
 ## Licence
 

@@ -113,6 +113,7 @@ impl Planned {
     pub(crate) fn read(
         &self,
         preload: u64,
+        compress: bool,
     ) -> Result<(SampleData, Option<StreamFile>), FormatError> {
         let layout = self.layout(preload);
         let channels = self.info.channels;
@@ -137,7 +138,12 @@ impl Planned {
                     right.extend_from_slice(&buffer.channel(1)[..read]);
                 }
             }
-            parts.push(Part { start, left, right });
+            parts.push(Part::plain(start, left, right));
+        }
+        if compress {
+            for part in &mut parts {
+                part.pack();
+            }
         }
         let resident = layout == [(0, self.info.frames)];
         let data = SampleData {
@@ -375,13 +381,16 @@ impl SampleStore {
                     let left = file.buffer.channel(0).to_vec();
                     let right =
                         (file.buffer.num_channels() > 1).then(|| file.buffer.channel(1).to_vec());
-                    let data = SampleData::whole(
+                    let mut data = SampleData::whole(
                         left,
                         right,
                         f64::from(file.sample_rate.max(1)),
                         None,
                         None,
                     );
+                    if options.compress {
+                        data.pack();
+                    }
                     fixed += data.bytes();
                     entries.push(Entry::Whole(data));
                 }
@@ -398,10 +407,12 @@ impl SampleStore {
             match entry {
                 Entry::Planned(at) => {
                     let file = &planned[at];
-                    let (data, stream) = file.read(preload).map_err(|error| StoreError::File {
-                        path: file.path.clone(),
-                        error,
-                    })?;
+                    let (data, stream) =
+                        file.read(preload, options.compress)
+                            .map_err(|error| StoreError::File {
+                                path: file.path.clone(),
+                                error,
+                            })?;
                     samples.push(data);
                     streamed.push(stream);
                 }
@@ -514,7 +525,7 @@ impl SampleStore {
             lease: Lease::NONE,
         };
         if let (Some(pool), Some(data)) = (&cursor.pool, self.data(sample)) {
-            if !data.is_resident() {
+            if !data.is_resident() || data.is_packed() {
                 let start = stream_start(data, from);
                 if let Some(lease) = Lease::claim(pool, sample.0, start) {
                     cursor.lease = lease;
@@ -536,14 +547,24 @@ pub(crate) fn make_pool(
     streamed: Vec<Option<StreamFile>>,
     options: &StreamOptions,
 ) -> io::Result<Option<Arc<Pool>>> {
-    if streamed.iter().all(Option::is_none) {
+    let packed = samples.iter().filter(|data| data.is_packed());
+    let cache_channels = packed
+        .map(|data| 1 + usize::from(data.stereo))
+        .max()
+        .unwrap_or(0);
+    if streamed.iter().all(Option::is_none) && cache_channels == 0 {
         return Ok(None);
     }
     let stereo = samples
         .iter()
         .zip(&streamed)
         .any(|(data, file)| data.stereo && file.is_some());
-    Ok(Some(Arc::new(Pool::new(streamed, stereo, options)?)))
+    Ok(Some(Arc::new(Pool::new(
+        streamed,
+        stereo,
+        cache_channels,
+        options,
+    )?)))
 }
 
 /// Where a voice reading from `at` asks the stream to start: after the
@@ -559,6 +580,10 @@ pub(crate) fn stream_start(sample: &SampleData, at: u64) -> u64 {
 pub(crate) fn frame(sample: &SampleData, lease: &Lease, at: u64) -> Option<(f32, f32)> {
     if let Some(part) = sample.part_at(at) {
         let index = (at - part.start) as usize;
+        if part.packed.is_some() {
+            let (left, right) = lease.packed_frame(part, index)?;
+            return Some((left, if sample.stereo { right } else { left }));
+        }
         let left = part.left.get(index).copied().unwrap_or(0.0);
         let right = match &part.right {
             Some(right) => right.get(index).copied().unwrap_or(0.0),
@@ -655,7 +680,10 @@ impl StreamCursor {
         let mut done = 0;
         while done < wanted && self.position < total {
             // A run from one stretch in memory, copied whole.
-            if let Some(part) = data.part_at(self.position) {
+            if let Some(part) = data
+                .part_at(self.position)
+                .filter(|part| part.packed.is_none())
+            {
                 let from = (self.position - part.start) as usize;
                 let run = (wanted - done).min(part.left.len() - from);
                 left[done..done + run].copy_from_slice(&part.left[from..from + run]);
@@ -682,6 +710,13 @@ impl StreamCursor {
             }
         }
         self.lease.release_before(self.position);
+        if let Some(part) = data
+            .part_at(self.position)
+            .filter(|part| part.packed.is_some())
+        {
+            self.lease
+                .unpack_ahead(part, (self.position - part.start) as usize);
+        }
         CursorRead::Frames(done)
     }
 }

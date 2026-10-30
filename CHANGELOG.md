@@ -387,6 +387,21 @@ break the API.
   checks a store's cursors, its budget and the readers stopping on drop;
   and reports memory per mode. `tests/realtime.rs` runs streaming voices
   and cursors under the counting allocator. Limits: TECH_DEBT 102.
+- Lossless compression in memory: `StreamOptions::compress` packs what
+  stays in memory (heads, loops, samples kept whole; with
+  `preload_frames(usize::MAX)`, whole samples and no streaming) in
+  independent blocks of 1024 frames: a block of 16- or 24-bit values is
+  the residual of the best of five fixed predictors in Rice codes, any
+  other block its `f32` bits. A voice unpacks the blocks it reaches, and
+  the next one ahead, into its slot (four blocks each), on the audio
+  thread, without allocating. Measured on ten seconds of a decaying
+  six-harmonic tone with noise: 7.6 bits a sample at 16 bits (4.2 times
+  smaller than `f32`, 2.1 times smaller than the file) and 15.6 at 24
+  bits (2.1 and 1.5 times), unpacked in 128 and 158 ns a frame in an
+  unoptimised build. The output is the same bits as from memory unpacked
+  (`tests/streaming.rs`, streamed and packed at two block sizes, and
+  whole and packed); 24 four-second 16-bit pipes with two-second loops
+  take 18.4 MB whole, 10.8 MB streamed and 2.7 MB streamed and packed.
 
 ### Fixed
 

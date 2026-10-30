@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 use manguebyte_core::AudioBuffer;
 use manguebyte_formats::AudioReader;
 
+use crate::instrument::Part;
+use crate::packed::BLOCK;
+
 /// Frames of each streamed sample kept in memory from its start, unless
 /// [`StreamOptions::preload_frames`] says otherwise: about 1.4 s at
 /// 48 kHz, far more than a disk takes to answer.
@@ -97,6 +100,7 @@ pub struct StreamOptions {
     pub(crate) read_delay: Duration,
     pub(crate) on_reader_start: Option<ReaderStart>,
     pub(crate) ram_budget: Option<usize>,
+    pub(crate) compress: bool,
 }
 
 impl fmt::Debug for StreamOptions {
@@ -111,6 +115,7 @@ impl fmt::Debug for StreamOptions {
             .field("read_delay", &self.read_delay)
             .field("on_reader_start", &self.on_reader_start.is_some())
             .field("ram_budget", &self.ram_budget)
+            .field("compress", &self.compress)
             .finish()
     }
 }
@@ -136,6 +141,7 @@ impl StreamOptions {
             read_delay: Duration::ZERO,
             on_reader_start: None,
             ram_budget: None,
+            compress: false,
         }
     }
 
@@ -209,6 +215,19 @@ impl StreamOptions {
         self
     }
 
+    /// Holds what stays in memory (heads, loops, samples kept whole)
+    /// packed without loss, block by block, and unpacks each block into the
+    /// voice's slot as the voice reaches it: the same bits come back, in
+    /// about half the memory of 16-bit material. Every voice that plays a
+    /// packed sample then needs a slot, as a streaming one does. To hold
+    /// whole samples packed in memory, with no streaming, ask for a preload
+    /// of `usize::MAX` as well. The budget is checked against the sizes
+    /// unpacked, so a packed set stays well within it.
+    pub fn compress(mut self, compress: bool) -> Self {
+        self.compress = compress;
+        self
+    }
+
     /// Makes each reader sleep this long after every read of 4096 frames:
     /// a slow disk on demand, for testing how a sampler copes with one.
     pub fn read_delay(mut self, delay: Duration) -> Self {
@@ -246,12 +265,34 @@ pub(crate) struct Slot {
     left: Box<[AtomicU32]>,
     right: Box<[AtomicU32]>,
     mask: u64,
+    /// Blocks of packed parts, unpacked: [`CACHE_BLOCKS`] of
+    /// [`BLOCK`] frames of each of `cache_channels` channels. Only the
+    /// voice that holds the slot touches them.
+    cache: Box<[AtomicU32]>,
+    cache_channels: usize,
+    /// For each cached block, the address of its part (0 for none), its
+    /// number in the part, and when it was last used.
+    cache_part: [AtomicUsize; CACHE_BLOCKS],
+    cache_block: [AtomicUsize; CACHE_BLOCKS],
+    cache_used: [AtomicU64; CACHE_BLOCKS],
+    cache_clock: AtomicU64,
 }
 
+/// Blocks of packed parts each voice keeps unpacked: enough for a window
+/// of the interpolator across two blocks, and the two at the ends of a
+/// loop.
+const CACHE_BLOCKS: usize = 4;
+
 impl Slot {
-    fn new(capacity: usize, stereo: bool) -> Self {
+    fn new(capacity: usize, stereo: bool, cache_channels: usize) -> Self {
         let ring = |frames: usize| (0..frames).map(|_| AtomicU32::new(0)).collect();
         Self {
+            cache: ring(CACHE_BLOCKS * BLOCK * cache_channels),
+            cache_channels,
+            cache_part: [const { AtomicUsize::new(0) }; CACHE_BLOCKS],
+            cache_block: [const { AtomicUsize::new(0) }; CACHE_BLOCKS],
+            cache_used: [const { AtomicU64::new(0) }; CACHE_BLOCKS],
+            cache_clock: AtomicU64::new(0),
             claimed: AtomicBool::new(false),
             request: AtomicU64::new(0),
             sample: AtomicU32::new(0),
@@ -268,7 +309,50 @@ impl Slot {
     }
 
     fn bytes(&self) -> usize {
-        (self.left.len() + self.right.len()) * 4
+        (self.left.len() + self.right.len() + self.cache.len()) * 4
+    }
+
+    /// The cache entry holding block `block` of `part`, unpacking it into
+    /// the entry used longest ago if no entry does. `None` if the slot has
+    /// no cache or the part is not packed. Never allocates.
+    fn cached(&self, part: &Part, block: usize) -> Option<usize> {
+        let packed = part.packed.as_ref()?;
+        if self.cache_channels == 0 {
+            return None;
+        }
+        let address = part as *const Part as usize;
+        let now = self.cache_clock.load(Ordering::Relaxed) + 1;
+        self.cache_clock.store(now, Ordering::Relaxed);
+        let mut oldest = 0;
+        for entry in 0..CACHE_BLOCKS {
+            if self.cache_part[entry].load(Ordering::Relaxed) == address
+                && self.cache_block[entry].load(Ordering::Relaxed) == block
+            {
+                self.cache_used[entry].store(now, Ordering::Relaxed);
+                return Some(entry);
+            }
+            if self.cache_used[entry].load(Ordering::Relaxed)
+                < self.cache_used[oldest].load(Ordering::Relaxed)
+            {
+                oldest = entry;
+            }
+        }
+        let mut frames = [0.0f32; BLOCK];
+        let base = oldest * BLOCK * self.cache_channels;
+        let count = packed.left.unpack(block, &mut frames);
+        for (offset, value) in frames[..count].iter().enumerate() {
+            self.cache[base + offset].store(value.to_bits(), Ordering::Relaxed);
+        }
+        if let (Some(right), 2) = (&packed.right, self.cache_channels) {
+            let count = right.unpack(block, &mut frames);
+            for (offset, value) in frames[..count].iter().enumerate() {
+                self.cache[base + BLOCK + offset].store(value.to_bits(), Ordering::Relaxed);
+            }
+        }
+        self.cache_part[oldest].store(address, Ordering::Relaxed);
+        self.cache_block[oldest].store(block, Ordering::Relaxed);
+        self.cache_used[oldest].store(now, Ordering::Relaxed);
+        Some(oldest)
     }
 }
 
@@ -304,14 +388,20 @@ impl fmt::Debug for Pool {
 
 impl Pool {
     /// Makes the slots and starts the readers.
+    /// `stereo` says whether a streamed sample has two channels, and
+    /// `cache_channels` the most channels of a packed one (0 when none is
+    /// packed). Without files to stream, no thread is started and the rings
+    /// are left empty.
     pub(crate) fn new(
         files: Vec<Option<StreamFile>>,
         stereo: bool,
+        cache_channels: usize,
         options: &StreamOptions,
     ) -> io::Result<Self> {
-        let capacity = options.ring_capacity();
+        let streams = files.iter().any(Option::is_some);
+        let capacity = if streams { options.ring_capacity() } else { 1 };
         let slots = (0..options.voices)
-            .map(|_| Arc::new(Slot::new(capacity, stereo)))
+            .map(|_| Arc::new(Slot::new(capacity, stereo && streams, cache_channels)))
             .collect();
         let shared = Arc::new(Shared {
             slots,
@@ -326,7 +416,11 @@ impl Pool {
             shared,
             threads: Vec::new(),
         };
-        let count = options.reader_threads.min(options.voices).max(1);
+        let count = if streams {
+            options.reader_threads.min(options.voices).max(1)
+        } else {
+            0
+        };
         for index in 0..count {
             let shared = Arc::clone(&pool.shared);
             // On failure the threads already started are stopped by the
@@ -337,6 +431,11 @@ impl Pool {
             pool.threads.push(handle);
         }
         Ok(pool)
+    }
+
+    /// Whether any sample is read from a file.
+    pub(crate) fn streams(&self) -> bool {
+        self.shared.files.iter().any(Option::is_some)
     }
 
     /// Underruns counted by every voice so far.
@@ -489,6 +588,11 @@ impl Lease {
                 .is_ok()
             {
                 let generation = slot.request.load(Ordering::Relaxed) >> GENERATION_SHIFT;
+                // What the slot's last holder unpacked may be of parts that
+                // are gone.
+                for part in &slot.cache_part {
+                    part.store(0, Ordering::Relaxed);
+                }
                 let mut lease = Self {
                     slot: Some(Arc::clone(slot)),
                     generation,
@@ -553,6 +657,35 @@ impl Lease {
         let progress = slot.progress.load(Ordering::Acquire);
         if progress >> GENERATION_SHIFT == self.generation {
             self.available = (progress & FRAME_MASK).max(self.start);
+        }
+    }
+
+    /// Frame `index` of the packed `part`, left and right (0 for a mono
+    /// part), unpacking its block into the slot's cache if it is not there.
+    /// `None` without a slot. Real-time safe: unpacking a block is
+    /// bounded work, and allocates nothing.
+    #[inline]
+    pub(crate) fn packed_frame(&self, part: &Part, index: usize) -> Option<(f32, f32)> {
+        let slot = self.slot.as_ref()?;
+        let entry = slot.cached(part, index / BLOCK)?;
+        let base = entry * BLOCK * slot.cache_channels + index % BLOCK;
+        let left = f32::from_bits(slot.cache.get(base)?.load(Ordering::Relaxed));
+        let right = if slot.cache_channels == 2 {
+            f32::from_bits(slot.cache.get(base + BLOCK)?.load(Ordering::Relaxed))
+        } else {
+            0.0
+        };
+        Some((left, right))
+    }
+
+    /// Unpacks, ahead of need, the block of `part` after the one that holds
+    /// frame `index`, if there is one.
+    pub(crate) fn unpack_ahead(&self, part: &Part, index: usize) {
+        let next = index / BLOCK + 1;
+        if let Some(slot) = &self.slot {
+            if next * BLOCK < part.frames {
+                slot.cached(part, next);
+            }
         }
     }
 
