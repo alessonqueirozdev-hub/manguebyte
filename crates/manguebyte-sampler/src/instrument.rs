@@ -18,6 +18,8 @@ use crate::region::{
 };
 use crate::sfz::{Location, Sfz, SfzError, Warning};
 use crate::source::{FileSource, SampleSource};
+use crate::store::{Planned, fit_preload, make_pool, probe};
+use crate::stream::{MARGIN, Pool, StreamFile, StreamOptions};
 
 /// Longest sample, in frames. Positions are kept with 32 bits of fraction
 /// in 64 bits, which leaves room for this many frames and a pitch far up.
@@ -63,6 +65,16 @@ pub enum LoadError {
         /// The region that asked for it.
         location: Location,
     },
+    /// A thread to read streamed samples could not be started.
+    Thread(io::Error),
+    /// The samples would need more memory than
+    /// [`StreamOptions::ram_budget`] allows, even with the shortest head.
+    Budget {
+        /// Bytes they would need.
+        needed: usize,
+        /// The budget.
+        budget: usize,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -85,6 +97,11 @@ impl fmt::Display for LoadError {
                 f,
                 "{location}: sample \"{path}\" is longer than {MAX_SAMPLE_FRAMES} frames"
             ),
+            Self::Thread(error) => write!(f, "could not start a reader thread: {error}"),
+            Self::Budget { needed, budget } => write!(
+                f,
+                "the samples need {needed} bytes in memory, more than the budget of {budget}"
+            ),
         }
     }
 }
@@ -94,6 +111,7 @@ impl std::error::Error for LoadError {
         match self {
             Self::Read { error, .. } => Some(error),
             Self::Decode { error, .. } => Some(error),
+            Self::Thread(error) => Some(error),
             _ => None,
         }
     }
@@ -138,20 +156,107 @@ impl From<LoadError> for InstrumentError {
     }
 }
 
-/// A decoded sample: one or two channels.
+/// A decoded sample: one or two channels, whole in memory or, when it is
+/// streamed, the stretches of it kept there.
 pub(crate) struct SampleData {
-    pub(crate) left: Vec<f32>,
-    pub(crate) right: Option<Vec<f32>>,
+    /// The stretches in memory, in order, apart from one another. One that
+    /// starts at 0 and holds every frame when the sample is not streamed.
+    pub(crate) parts: Vec<Part>,
+    /// Frames in the whole sample.
+    pub(crate) frames: usize,
+    pub(crate) stereo: bool,
     pub(crate) rate: f64,
     /// The first loop a WAV file's `smpl` chunk gives, both ends included.
-    file_loop: Option<(u64, u64)>,
+    pub(crate) file_loop: Option<(u64, u64)>,
     /// The key a WAV file's `smpl` chunk says the sample sounds at.
-    root_key: Option<u8>,
+    pub(crate) root_key: Option<u8>,
+}
+
+/// A stretch of a sample held in memory.
+pub(crate) struct Part {
+    pub(crate) start: u64,
+    pub(crate) left: Vec<f32>,
+    pub(crate) right: Option<Vec<f32>>,
+}
+
+impl Part {
+    /// The frame after its last.
+    pub(crate) fn end(&self) -> u64 {
+        self.start + self.left.len() as u64
+    }
 }
 
 impl SampleData {
+    /// A sample held whole.
+    pub(crate) fn whole(
+        left: Vec<f32>,
+        right: Option<Vec<f32>>,
+        rate: f64,
+        file_loop: Option<(u64, u64)>,
+        root_key: Option<u8>,
+    ) -> Self {
+        Self {
+            frames: left.len(),
+            stereo: right.is_some(),
+            parts: vec![Part {
+                start: 0,
+                left,
+                right,
+            }],
+            rate,
+            file_loop,
+            root_key,
+        }
+    }
+
     pub(crate) fn frames(&self) -> usize {
-        self.left.len()
+        self.frames
+    }
+
+    /// Whether every frame is in memory.
+    pub(crate) fn is_resident(&self) -> bool {
+        matches!(&self.parts[..], [part] if part.start == 0 && part.left.len() == self.frames)
+    }
+
+    /// The stretch in memory that holds frame `at`.
+    #[inline]
+    pub(crate) fn part_at(&self, at: u64) -> Option<&Part> {
+        self.parts
+            .iter()
+            .find(|part| at >= part.start && at < part.end())
+    }
+
+    /// `count` frames from `start`, if one stretch in memory holds them
+    /// all: the left channel and, for a stereo sample, the right.
+    #[inline]
+    pub(crate) fn slice(&self, start: u64, count: usize) -> Option<(&[f32], Option<&[f32]>)> {
+        let part = self.part_at(start)?;
+        let from = (start - part.start) as usize;
+        let left = part.left.get(from..from + count)?;
+        let right = match &part.right {
+            Some(right) => Some(right.get(from..from + count)?),
+            None => None,
+        };
+        Some((left, right))
+    }
+
+    /// Frame `at` of `channel` (0 or 1), if it is in memory; the left for
+    /// the right of a mono sample.
+    pub(crate) fn ram(&self, channel: usize, at: u64) -> Option<f32> {
+        let part = self.part_at(at)?;
+        let index = (at - part.start) as usize;
+        match (channel, &part.right) {
+            (1, Some(right)) => right.get(index).copied(),
+            _ => part.left.get(index).copied(),
+        }
+    }
+
+    /// Bytes of audio in memory.
+    pub(crate) fn bytes(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|part| (part.left.len() + part.right.as_ref().map_or(0, Vec::len)) * 4)
+            .sum()
     }
 }
 
@@ -365,20 +470,34 @@ impl Zone {
     /// goes round.
     fn squares(&self, sample: &SampleData, frames: u64) -> (f64, f64) {
         let sums = |from: u64, count: u64| -> (f64, f64) {
-            let range = |channel: &[f32]| -> f64 {
-                let (Ok(start), Ok(count)) = (usize::try_from(from), usize::try_from(count)) else {
-                    return 0.0;
-                };
-                channel
-                    .get(start..)
-                    .unwrap_or_default()
-                    .iter()
-                    .take(count)
-                    .map(|&sample| f64::from(sample) * f64::from(sample))
-                    .sum()
+            // Only what is in memory counts, for a streamed sample.
+            let range = |channel: usize| -> f64 {
+                let end = from.saturating_add(count);
+                let mut total = 0.0;
+                for part in &sample.parts {
+                    let data = match (channel, &part.right) {
+                        (1, Some(right)) => right,
+                        _ => &part.left,
+                    };
+                    let (low, high) = (from.max(part.start), end.min(part.end()));
+                    let (Ok(low), Ok(high), Ok(base)) = (
+                        usize::try_from(low),
+                        usize::try_from(high),
+                        usize::try_from(part.start),
+                    ) else {
+                        continue;
+                    };
+                    if low < high {
+                        total += data[low - base..high - base]
+                            .iter()
+                            .map(|&sample| f64::from(sample) * f64::from(sample))
+                            .sum::<f64>();
+                    }
+                }
+                total
             };
-            let left = range(&sample.left);
-            let right = sample.right.as_deref().map_or(left, range);
+            let left = range(0);
+            let right = if sample.stereo { range(1) } else { left };
             (left, right)
         };
         let Some(lp) = &self.lp else {
@@ -460,6 +579,8 @@ pub struct Instrument {
     /// Shared by every instrument: see [`prepare_tables`](crate::prepare_tables).
     pub(crate) sinc: Arc<SincTable>,
     warnings: Arc<[Warning]>,
+    /// The voice slots and reader threads, when samples are streamed.
+    pub(crate) pool: Option<Arc<Pool>>,
 }
 
 impl Clone for Instrument {
@@ -483,6 +604,7 @@ impl Clone for Instrument {
             controller_defaults: Arc::clone(&self.controller_defaults),
             sinc: Arc::clone(&self.sinc),
             warnings: Arc::clone(&self.warnings),
+            pool: self.pool.clone(),
         }
     }
 }
@@ -494,6 +616,7 @@ impl fmt::Debug for Instrument {
             .field("samples", &self.samples.len())
             .field("seed", &self.seed)
             .field("warnings", &self.warnings.len())
+            .field("streaming", &self.pool.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -550,6 +673,219 @@ impl Instrument {
         Ok(Self::assemble(sfz, &by_path, samples))
     }
 
+    /// Reads the `.sfz` file at `path` and loads it as
+    /// [`load_streaming`](Self::load_streaming) does, with samples and
+    /// includes relative to the file's directory.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), and [`LoadError::Thread`] if a reader
+    /// thread cannot be started.
+    pub fn open_streaming(
+        path: impl AsRef<Path>,
+        options: &StreamOptions,
+    ) -> Result<Self, InstrumentError> {
+        let path = path.as_ref();
+        let text = std::fs::read(path).map_err(|error| {
+            InstrumentError::Load(LoadError::Read {
+                path: path.display().to_string(),
+                location: Location {
+                    file: None,
+                    line: 0,
+                },
+                error,
+            })
+        })?;
+        let directory = path.parent().unwrap_or(Path::new(""));
+        let mut source = FileSource::new(directory);
+        let sfz = Sfz::parse_with(&String::from_utf8_lossy(&text), &mut source)?;
+        Ok(Self::load_streaming(&sfz, directory, options)?)
+    }
+
+    /// Loads the samples of a parsed instrument from the files under
+    /// `root`, keeping in memory only part of each, and starts the threads
+    /// that read the rest while notes play: see [`StreamOptions`].
+    ///
+    /// Each WAV, AIFF or FLAC file keeps in memory its first
+    /// [`preload_frames`](StreamOptions::preload_frames) from the earliest
+    /// `offset` of the regions that play it, and every loop they play
+    /// (with the frames its crossfade and the interpolator read round it).
+    /// A sample whose stretches cover it whole, a sample with a loop longer
+    /// than [`loop_cache_frames`](StreamOptions::loop_cache_frames), a file
+    /// in another format and a FLAC file that does not state its length are
+    /// loaded whole, as [`load`](Self::load) loads them. What plays is the
+    /// same, bit for bit, as from [`load`](Self::load), as long as the disk
+    /// keeps up.
+    ///
+    /// A voice that plays a streamed sample asks for the frames after the
+    /// stretch it starts in as it starts. If they have not arrived when it
+    /// needs them (the disk is too slow, the ring too small, or every one
+    /// of the [`voices`](StreamOptions::voices) is streaming already), the
+    /// voice holds its last value and fades out over 6 ms, and
+    /// [`stream_underruns`](Self::stream_underruns) counts it. A region
+    /// whose `offset` lies past the stretches of its sample in memory
+    /// starts that way, silent.
+    ///
+    /// The threads stop, and the files close, when the last clone of the
+    /// instrument is dropped.
+    ///
+    /// # Errors
+    ///
+    /// As [`load`](Self::load), and [`LoadError::Thread`] if a reader
+    /// thread cannot be started.
+    pub fn load_streaming(
+        sfz: &Sfz,
+        root: impl AsRef<Path>,
+        options: &StreamOptions,
+    ) -> Result<Self, LoadError> {
+        enum Entry {
+            Planned(usize),
+            Whole(Option<SampleData>),
+        }
+        let root = root.as_ref();
+        let mut uses: HashMap<&str, Vec<&Region>> = HashMap::new();
+        for region in &sfz.regions {
+            uses.entry(&*region.sample).or_default().push(region);
+        }
+        let mut source = FileSource::new(root);
+        let mut entries: Vec<(&Region, Entry)> = Vec::new();
+        let mut planned: Vec<Planned> = Vec::new();
+        let mut seen: HashMap<&str, ()> = HashMap::new();
+        for region in &sfz.regions {
+            if seen.insert(&*region.sample, ()).is_some() {
+                continue;
+            }
+            let path = &*region.sample;
+            let location = &region.location;
+            if path.starts_with('*') {
+                let data = load_sample(path, location, &mut source)?;
+                entries.push((region, Entry::Whole(data)));
+                continue;
+            }
+            let full = root.join(path);
+            let info = probe(&full).map_err(|error| format_error(path, location, error))?;
+            let Some(info) = info else {
+                let data = load_sample(path, location, &mut source)?;
+                entries.push((region, Entry::Whole(data)));
+                continue;
+            };
+            if info.frames == 0 || info.channels == 0 {
+                entries.push((region, Entry::Whole(None)));
+                continue;
+            }
+            if info.frames > MAX_SAMPLE_FRAMES as u64 {
+                return Err(LoadError::TooLong {
+                    path: path.to_owned(),
+                    location: location.clone(),
+                });
+            }
+            // The head starts at the earliest offset; each loop is kept
+            // with the frames its crossfade and the interpolator read.
+            let regions = uses.get(path).map_or(&[][..], Vec::as_slice);
+            let head = regions
+                .iter()
+                .map(|region| region.offset)
+                .min()
+                .unwrap_or(0);
+            let mut keep = Vec::new();
+            let mut whole = false;
+            for region in regions {
+                let span = span(region, info.frames, info.rate, info.file_loop);
+                let Some((start, end, crossfade)) = span.and_then(|span| span.lp) else {
+                    continue;
+                };
+                if end - start + 1 > options.loop_cache_frames as u64 {
+                    whole = true;
+                }
+                keep.push((start.saturating_sub(crossfade + MARGIN), end + 1 + MARGIN));
+            }
+            entries.push((region, Entry::Planned(planned.len())));
+            planned.push(Planned {
+                path: full,
+                info,
+                head,
+                keep,
+                whole,
+            });
+        }
+        let fixed = entries
+            .iter()
+            .map(|(_, entry)| match entry {
+                Entry::Whole(Some(data)) => data.bytes(),
+                _ => 0,
+            })
+            .sum();
+        let preload =
+            fit_preload(&planned, fixed, options).map_err(|needed| LoadError::Budget {
+                needed,
+                budget: options.ram_budget.unwrap_or(usize::MAX),
+            })?;
+        let mut samples: Vec<SampleData> = Vec::new();
+        let mut files: Vec<Option<StreamFile>> = Vec::new();
+        let mut by_path: HashMap<Arc<str>, Option<usize>> = HashMap::new();
+        for (region, entry) in entries {
+            let loaded = match entry {
+                Entry::Whole(data) => data.map(|data| (data, None)),
+                Entry::Planned(at) => {
+                    let (data, file) = planned[at]
+                        .read(preload)
+                        .map_err(|error| format_error(&region.sample, &region.location, error))?;
+                    Some((data, file))
+                }
+            };
+            let index = loaded.map(|(data, file)| {
+                samples.push(data);
+                files.push(file);
+                samples.len() - 1
+            });
+            by_path.insert(Arc::clone(&region.sample), index);
+        }
+        let pool = make_pool(&samples, files, options).map_err(LoadError::Thread)?;
+        let mut instrument = Self::assemble(sfz, &by_path, samples);
+        instrument.pool = pool;
+        Ok(instrument)
+    }
+
+    /// Whether any of its samples is streamed from disk.
+    pub fn is_streaming(&self) -> bool {
+        self.pool.is_some()
+    }
+
+    /// How many times a voice found that the frames it needed had not
+    /// arrived from disk, and faded out, since the instrument was loaded
+    /// (shared with its clones). Real-time safe; poll it.
+    pub fn stream_underruns(&self) -> u64 {
+        self.pool.as_ref().map_or(0, |pool| pool.underruns())
+    }
+
+    /// How many reads of a streamed file have failed (shared with its
+    /// clones). A voice whose read fails runs out of frames and counts an
+    /// underrun.
+    pub fn stream_read_errors(&self) -> u64 {
+        self.pool.as_ref().map_or(0, |pool| pool.read_errors())
+    }
+
+    /// How many voices are streaming now.
+    pub fn streaming_voices(&self) -> usize {
+        self.pool.as_ref().map_or(0, |pool| pool.streaming())
+    }
+
+    /// Bytes of the voices' rings, which a streamed instrument holds in
+    /// memory beside [`sample_bytes`](Self::sample_bytes).
+    pub fn stream_buffer_bytes(&self) -> usize {
+        self.pool.as_ref().map_or(0, |pool| pool.ring_bytes())
+    }
+
+    /// Waits until every streaming voice has as much read ahead as its ring
+    /// holds (or the rest of its file), or `timeout` has passed, and says
+    /// whether it got there. For rendering faster than real time, between
+    /// blocks, so that the output is what real time would give with a disk
+    /// that keeps up. It sleeps: never call it on the audio thread. True at
+    /// once for an instrument that does not stream.
+    pub fn wait_for_streams(&self, timeout: std::time::Duration) -> bool {
+        self.pool.as_ref().is_none_or(|pool| pool.wait(timeout))
+    }
+
     /// Resolves every region of `sfz` against its sample, whose place in
     /// `samples` `by_path` gives (`None` for one with no frames).
     fn assemble(
@@ -593,6 +929,7 @@ impl Instrument {
             controller_defaults,
             sinc: SincTable::shared(),
             warnings: sfz.warnings.as_slice().into(),
+            pool: None,
         }
     }
 
@@ -700,7 +1037,7 @@ impl Instrument {
             let sums = zone.sums(&*self.controller_defaults, 0);
             let gain = zone.gain_with(&sums) * velocity_gain;
             let pan = zone.pan_with(&sums).clamp(-1.0, 1.0);
-            let (left_gain, right_gain) = if sample.right.is_some() {
+            let (left_gain, right_gain) = if sample.stereo {
                 ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
             } else {
                 let angle = (pan + 1.0) * core::f64::consts::FRAC_PI_4;
@@ -749,10 +1086,7 @@ impl Instrument {
 
     /// Bytes of decoded audio it holds.
     pub fn sample_bytes(&self) -> usize {
-        self.samples
-            .iter()
-            .map(|s| (s.left.len() + s.right.as_ref().map_or(0, Vec::len)) * 4)
-            .sum()
+        self.samples.iter().map(SampleData::bytes).sum()
     }
 
     /// What the parser had to say about the text.
@@ -994,13 +1328,29 @@ fn load_sample(
     let (file_loop, root_key) = wav_sample_info(&bytes);
     let left = file.buffer.channel(0).to_vec();
     let right = (file.buffer.num_channels() > 1).then(|| file.buffer.channel(1).to_vec());
-    Ok(Some(SampleData {
+    Ok(Some(SampleData::whole(
         left,
         right,
-        rate: f64::from(file.sample_rate.max(1)),
-        file_loop: file_loop.filter(|&(start, end)| start <= end && end < frames as u64),
+        f64::from(file.sample_rate.max(1)),
+        file_loop.filter(|&(start, end)| start <= end && end < frames as u64),
         root_key,
-    }))
+    )))
+}
+
+/// A decoder's error about the sample at `path`, as a [`LoadError`].
+fn format_error(path: &str, location: &Location, error: FormatError) -> LoadError {
+    match error {
+        FormatError::Io(error) => LoadError::Read {
+            path: path.to_owned(),
+            location: location.clone(),
+            error,
+        },
+        error => LoadError::Decode {
+            path: path.to_owned(),
+            location: location.clone(),
+            error,
+        },
+    }
 }
 
 /// Frames in the cycle `*sine` plays.
@@ -1013,13 +1363,13 @@ fn sine_cycle() -> SampleData {
         .map(|n| (core::f64::consts::TAU * n as f64 / SINE_FRAMES as f64).sin() as f32)
         .collect();
     let middle_c = 440.0 * 2f64.powf(-9.0 / 12.0);
-    SampleData {
+    SampleData::whole(
         left,
-        right: None,
-        rate: middle_c * SINE_FRAMES as f64,
-        file_loop: Some((0, SINE_FRAMES as u64 - 1)),
-        root_key: Some(60),
-    }
+        None,
+        middle_c * SINE_FRAMES as f64,
+        Some((0, SINE_FRAMES as u64 - 1)),
+        Some(60),
+    )
 }
 
 /// The first loop and the root key in a WAV file's `smpl` chunk, if it has
@@ -1028,26 +1378,52 @@ fn wav_sample_info(bytes: &[u8]) -> (Option<(u64, u64)>, Option<u8>) {
     // Offsets are worked out in 64 bits, where a chunk walk of a file that
     // fits in memory cannot overflow, and only then turned into indices, so
     // that a hostile chunk size cannot overflow a 32-bit `usize`.
-    let word = |at: u64| -> Option<u32> {
-        let start = usize::try_from(at).ok()?;
-        let slice = bytes.get(start..start.checked_add(4)?)?;
-        Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    wav_sample_info_with(|at, out| {
+        let slice = usize::try_from(at)
+            .ok()
+            .and_then(|start| bytes.get(start..start.checked_add(4)?));
+        match slice {
+            Some(slice) => {
+                out.copy_from_slice(slice);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// [`wav_sample_info`] of a file, read four bytes at a time where the walk
+/// over its chunks leads.
+pub(crate) fn wav_file_sample_info(file: &mut std::fs::File) -> (Option<(u64, u64)>, Option<u8>) {
+    use std::io::{Read, Seek, SeekFrom};
+    wav_sample_info_with(|at, out| {
+        file.seek(SeekFrom::Start(at)).is_ok() && file.read_exact(out).is_ok()
+    })
+}
+
+/// The walk of [`wav_sample_info`], over a file that `read` reads four
+/// bytes of at a time, returning `false` past its end.
+fn wav_sample_info_with(
+    mut read: impl FnMut(u64, &mut [u8; 4]) -> bool,
+) -> (Option<(u64, u64)>, Option<u8>) {
+    let mut quad = |at: u64| -> Option<[u8; 4]> {
+        let mut bytes = [0; 4];
+        read(at, &mut bytes).then_some(bytes)
     };
-    let is_wave =
-        matches!(bytes.get(..4), Some(b"RIFF" | b"RF64")) && bytes.get(8..12) == Some(b"WAVE");
+    let is_wave = matches!(quad(0), Some(ref id) if id == b"RIFF" || id == b"RF64")
+        && quad(8) == Some(*b"WAVE");
     if !is_wave {
         return (None, None);
     }
+    let mut word = |at: u64| quad(at).map(u32::from_le_bytes);
     let mut position = 12u64;
-    while let Some(size) = position.checked_add(4).and_then(word) {
-        let id = usize::try_from(position)
-            .ok()
-            .and_then(|start| bytes.get(start..start.checked_add(4)?));
+    while let Some(size) = position.checked_add(4).and_then(&mut word) {
+        let id = word(position).map(u32::to_le_bytes);
         let Some(body) = position.checked_add(8) else {
             break;
         };
-        let at = |offset: u64| body.checked_add(offset).and_then(word);
-        if id == Some(b"smpl") {
+        let mut at = |offset: u64| body.checked_add(offset).and_then(&mut word);
+        if id == Some(*b"smpl") {
             let size = u64::from(size);
             let unity = at(12).filter(|_| size >= 36);
             let loops = at(28).filter(|_| size >= 36).unwrap_or(0);
@@ -1171,64 +1547,90 @@ fn zone(region: &Region, sample: Option<(usize, &SampleData)>, generated: bool) 
     let Some((index, data)) = sample else {
         return zone;
     };
-    let last = data.frames() as u64 - 1;
+    let Some(span) = span(region, data.frames() as u64, data.rate, data.file_loop) else {
+        return zone;
+    };
+    zone.sample = Some(index);
+    zone.end = span.end;
+    zone.one_shot = span.mode == LoopMode::OneShot;
+    if let Some((start, loop_end, crossfade)) = span.lp {
+        let len = loop_end - start + 1;
+        let tail = |channel: usize| -> Vec<f32> {
+            (0..crossfade)
+                .map(|n| {
+                    let at = loop_end + 1 - crossfade + n;
+                    let before = at - len;
+                    let fade = (n + 1) as f64 / (crossfade + 1) as f64;
+                    // A streamed sample keeps its loops, and the frames
+                    // their crossfades read, in memory.
+                    let frame = |at: u64| f64::from(data.ram(channel, at).unwrap_or(0.0));
+                    let mixed = frame(at) * (1.0 - fade) + frame(before) * fade;
+                    mixed as f32
+                })
+                .collect()
+        };
+        zone.lp = Some(Loop {
+            start,
+            end: loop_end,
+            sustain_only: span.mode == LoopMode::Sustain,
+            tail_left: tail(0),
+            tail_right: if data.stereo { tail(1) } else { Vec::new() },
+        });
+    }
+    zone
+}
+
+/// What a region plays of its sample.
+struct Span {
+    /// Its last frame, included.
+    end: u64,
+    mode: LoopMode,
+    /// Its loop's first and last frames, included, and the frames of its
+    /// crossfade.
+    lp: Option<(u64, u64, u64)>,
+}
+
+/// What `region` plays of a sample of `frames` frames at `rate` whose file
+/// gives `file_loop`; `None` when it plays nothing.
+fn span(region: &Region, frames: u64, rate: f64, file_loop: Option<(u64, u64)>) -> Option<Span> {
+    let last = frames.checked_sub(1)?;
     let end = match region.end {
-        Some(end) if end < 0 => return zone,
+        Some(end) if end < 0 => return None,
         Some(0) | None => last,
         Some(end) => (end as u64).min(last),
     };
     if region.offset > end {
-        return zone;
+        return None;
     }
-    zone.sample = Some(index);
-    zone.end = end;
-    let mode = region.loop_mode.unwrap_or(if data.file_loop.is_some() {
+    let mode = region.loop_mode.unwrap_or(if file_loop.is_some() {
         LoopMode::Continuous
     } else {
         LoopMode::NoLoop
     });
-    zone.one_shot = mode == LoopMode::OneShot;
+    let mut lp = None;
     if matches!(mode, LoopMode::Continuous | LoopMode::Sustain) {
         let start = region
             .loop_start
-            .or(data.file_loop.map(|(start, _)| start))
+            .or(file_loop.map(|(start, _)| start))
             .unwrap_or(0);
         let loop_end = region
             .loop_end
             .filter(|&loop_end| loop_end > 0)
-            .or(data.file_loop.map(|(_, loop_end)| loop_end))
+            .or(file_loop.map(|(_, loop_end)| loop_end))
             .unwrap_or(end)
             .min(end);
         if start <= loop_end {
             let len = loop_end - start + 1;
-            let wanted = (region.loop_crossfade * data.rate).round();
+            let wanted = (region.loop_crossfade * rate).round();
             let crossfade = if wanted.is_finite() && wanted >= 1.0 {
                 (wanted as u64).min(len).min(start)
             } else {
                 0
             };
-            let tail = |channel: &[f32]| -> Vec<f32> {
-                (0..crossfade)
-                    .map(|n| {
-                        let at = (loop_end + 1 - crossfade + n) as usize;
-                        let before = at - len as usize;
-                        let fade = (n + 1) as f64 / (crossfade + 1) as f64;
-                        let mixed = f64::from(channel[at]) * (1.0 - fade)
-                            + f64::from(channel[before]) * fade;
-                        mixed as f32
-                    })
-                    .collect()
-            };
-            zone.lp = Some(Loop {
-                start,
-                end: loop_end,
-                sustain_only: mode == LoopMode::Sustain,
-                tail_left: tail(&data.left),
-                tail_right: data.right.as_deref().map(tail).unwrap_or_default(),
-            });
+            lp = Some((start, loop_end, crossfade));
         }
     }
-    zone
+    Some(Span { end, mode, lp })
 }
 
 #[cfg(test)]

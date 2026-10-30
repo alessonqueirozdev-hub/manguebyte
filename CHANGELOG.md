@@ -363,6 +363,30 @@ break the API.
   MIDI messages and the independence from block sizes; `tests/realtime.rs`
   runs filters, modulations and `set_controller` under the counting
   allocator. Limits: TECH_DEBT 101.
+- Streaming from disk (ADR 0013): `Instrument::open_streaming` and
+  `load_streaming` keep in memory only the head of each WAV, AIFF or FLAC
+  sample (`StreamOptions::preload_frames`, 65 536 frames by default, from
+  the earliest `offset` that plays it) and its loops, and read the rest
+  while a note plays, on reader threads (`reader_threads`, a start hook
+  for their priority), into a lock-free ring per voice (`voices`,
+  `ring_frames`). The audio thread never waits, locks or allocates: a
+  voice asks for its frames as it starts, and one whose frames have not
+  arrived holds its last value and fades out over 6 ms, counted by
+  `Instrument::stream_underruns`. `ram_budget` bounds the memory of
+  heads, loops and whole samples, shortening every head alike when it has
+  to. `wait_for_streams` lets an offline render wait for the disk. The
+  same layer serves other players: `SampleStore::open` and `open_keeping`
+  give a `StreamCursor` per voice, whose `read` returns
+  `CursorRead::Frames` or `CursorRead::Underrun` and whose `seek` back
+  into a loop kept in memory costs nothing. `tests/streaming.rs` plays a
+  set of 16- and 24-bit WAV and stereo FLAC files, with pitch, offsets, a
+  sustain loop past the head and a release trigger, bit for bit as from
+  memory at three block sizes and one to three readers; streams 256 voices
+  at once, bit for bit; shows a reader slowed on purpose counted as
+  underruns with no step between frames larger than the sine's own;
+  checks a store's cursors, its budget and the readers stopping on drop;
+  and reports memory per mode. `tests/realtime.rs` runs streaming voices
+  and cursors under the counting allocator. Limits: TECH_DEBT 102.
 
 ### Fixed
 

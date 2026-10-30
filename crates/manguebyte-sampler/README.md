@@ -22,6 +22,14 @@ reach 0 to 119, and a plugin sets any of them with
 with a musician's controllers. The crate documentation lists every opcode
 it plays and how; the others are reported as warnings.
 
+Large instruments stream from disk (`Instrument::open_streaming`,
+`StreamOptions`): each sample keeps its head and its loops in memory and
+the rest is read on reader threads into a lock-free ring per voice, within
+a memory budget if one is given. The audio thread never waits for the
+disk; a voice whose frames are late fades out without a click and is
+counted. Players with voices of their own use the same layer through
+`SampleStore` and `StreamCursor`.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

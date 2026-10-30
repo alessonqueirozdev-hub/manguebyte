@@ -136,8 +136,10 @@ Everything a standalone audio application needs, short of a user interface.
   instruments Parabolic exports. Filters per region (one to six poles,
   band-pass and band-reject) with their envelope, and modulation by
   controllers (`<opcode>_onccN`, `set_ccN`, controllers up to 511 that a
-  plugin sets without MIDI) are done and measured. Samples are loaded
-  whole, not streamed from disk; LFOs, controller curves and smoothing
+  plugin sets without MIDI) are done and measured. Samples stream from
+  disk with a preload in memory, and other players stream through the
+  same layer (`SampleStore`; ADR 0013, TECH_DEBT 102); LFOs, controller
+  curves and smoothing
   per opcode, a second filter, the other filter types and keyswitches are
   not started (TECH_DEBT 101)
 - ✅ Polyphonic voice allocation with per-note expression and modulation,

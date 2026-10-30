@@ -155,6 +155,19 @@
 //! frames with the [`Interpolation`] chosen: a windowed sinc by default,
 //! whose measured quality and cost are stated there. A sample played at its
 //! own pitch and rate is read as it is.
+//!
+//! # Streaming from disk
+//!
+//! [`Instrument::load_streaming`] keeps in memory only the head of each
+//! sample and its loops, and reads the rest while notes play, on reader
+//! threads, into a lock-free ring per voice; [`StreamOptions`] sets the
+//! preload, the rings, the voices, the threads and a memory budget. The
+//! audio thread never waits for the disk: a voice whose frames have not
+//! arrived fades out over 6 ms and is counted
+//! ([`Instrument::stream_underruns`]). With a disk that keeps up, what
+//! plays is the same, bit for bit, as from memory. A player with voices of
+//! its own streams through the same layer with a [`SampleStore`] and a
+//! [`StreamCursor`] per voice. See ADR 0013.
 
 #![forbid(unsafe_code)]
 
@@ -168,6 +181,8 @@ mod region;
 mod sampler;
 pub mod sfz;
 mod source;
+mod store;
+mod stream;
 mod voice;
 
 pub use controllers::{CONTROLLER_SMOOTHING_SECONDS, MAX_CONTROLLERS};
@@ -185,6 +200,11 @@ pub use sampler::{
 };
 pub use sfz::{Control, Location, Opcode, Sfz, SfzError, SfzErrorKind, Warning, WarningKind};
 pub use source::{FileSource, MemorySource, SampleSource, normalize_path};
+pub use store::{CursorRead, SampleHandle, SampleStore, StoreError, StreamCursor};
+pub use stream::{
+    DEFAULT_LOOP_CACHE_FRAMES, DEFAULT_PRELOAD_FRAMES, DEFAULT_RING_FRAMES, DEFAULT_STREAM_VOICES,
+    ReaderStart, StreamOptions,
+};
 pub use voice::{MAX_LAYERS, SamplerVoice};
 
 /// Makes the tables every instrument shares, if they are not made yet: the

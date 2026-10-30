@@ -8,10 +8,11 @@ use crate::envelope::Envelope;
 use crate::filter::VoiceFilter;
 use crate::instrument::{
     AMPEG, CUTOFF, FILEG, FILEG_DEPTH, Instrument, MODULATES_AMPEG, MODULATES_FILEG,
-    MODULATES_GAIN, MODULATES_PITCH, PITCH, RESONANCE, SampleData, Sums, Zone, stages,
+    MODULATES_GAIN, MODULATES_PITCH, PITCH, Part, RESONANCE, SampleData, Sums, Zone, stages,
 };
 use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
 use crate::region::OffMode;
+use crate::stream::{Lease, MARGIN};
 
 /// Seconds of the fade a voice gets when it is cut short: by a choke group
 /// in `off_mode=fast`, by a polyphony limit or by voice stealing. The SFZ
@@ -152,6 +153,13 @@ pub(crate) struct Player {
     filtered: bool,
     filter: VoiceFilter,
     filter_envelope: Envelope,
+    /// The ring a streamed sample's frames arrive in.
+    lease: Lease,
+    /// The frames it needed had not arrived: it holds the last values it
+    /// read and fades out.
+    starved: bool,
+    held_left: f64,
+    held_right: f64,
 }
 
 impl Player {
@@ -202,6 +210,10 @@ impl Player {
         filtered: false,
         filter: VoiceFilter::IDLE,
         filter_envelope: Envelope::IDLE,
+        lease: Lease::NONE,
+        starved: false,
+        held_left: 0.0,
+        held_right: 0.0,
     };
 
     /// Starts playing a region, with the controllers in `controls` as they
@@ -257,7 +269,7 @@ impl Player {
         self.base_cents = (f64::from(start.key) - zone.keycenter) * zone.keytrack + zone.detune;
         self.bend_cents = start.bend.cents(zone);
         self.rate_ratio = sample.rate / start.sample_rate.max(1.0);
-        self.stereo = sample.right.is_some();
+        self.stereo = sample.stereo;
         self.key = start.key;
         self.velocity = velocity;
         self.sample_rate = start.sample_rate;
@@ -276,6 +288,19 @@ impl Player {
         }
         self.position = zone.offset << 32;
         self.wrap(zone);
+        if let (false, Some(pool), Some(index)) =
+            (sample.is_resident(), &instrument.pool, zone.sample)
+        {
+            // The frames after the stretch in memory it starts in are asked
+            // for at once.
+            let at = self.position >> 32;
+            let from = sample
+                .part_at(at)
+                .map_or(at.saturating_sub(MARGIN), Part::end);
+            if let Some(lease) = Lease::claim(pool, index as u32, from) {
+                self.lease = lease;
+            }
+        }
         self.modulate(zone, &sums, 0.0, 0);
         self.update_pitch();
         self.update_gain();
@@ -609,6 +634,18 @@ impl Player {
             self.stop();
             return;
         };
+        if self.lease.is_held() {
+            self.lease.refresh();
+            // A looping voice that has gone into a loop kept in memory
+            // needs, next, the frames after that stretch: when its sustain
+            // ends it plays on from there.
+            let index = self.position >> 32;
+            if let Some(part) = sample.part_at(index).filter(|_| self.looping) {
+                if index >= part.start + MARGIN && part.end() > self.lease.start() {
+                    self.lease.restart(part.end());
+                }
+            }
+        }
         let mut weights = [0.0; MAX_TAPS];
         for frame in 0..frames {
             let index = self.position >> 32;
@@ -672,7 +709,29 @@ impl Player {
                 self.try_leave_loop(zone, sample, first, count);
             }
             self.just_wrapped = false;
-            let (mut left, mut right) = self.gather(zone, sample, first, &weights[..count]);
+            let gathered = if self.starved {
+                None
+            } else {
+                self.gather(zone, sample, first, &weights[..count])
+            };
+            let (mut left, mut right) = match gathered {
+                Some(read) => {
+                    (self.held_left, self.held_right) = read;
+                    read
+                }
+                None => {
+                    if !self.starved {
+                        // The disk has not kept up: hold the last values
+                        // and fade them out, rather than click.
+                        self.starved = true;
+                        if let Some(pool) = &instrument.pool {
+                            pool.count_underrun();
+                        }
+                        self.fade_out(FAST_FADE_SECONDS, self.sample_rate);
+                    }
+                    (self.held_left, self.held_right)
+                }
+            };
             if self.filtered {
                 (left, right) = self.filter.process(left, right, self.stereo);
             }
@@ -684,44 +743,55 @@ impl Player {
             self.position = self.position.wrapping_add(self.step);
             self.wrap(zone);
         }
+        let index = self.position >> 32;
+        self.lease.release_before(index.saturating_sub(MARGIN));
     }
 
     /// The weighted sum of the frames from `first` on, through the loop
-    /// when the voice is looping.
+    /// when the voice is looping. `None` when a frame it needs is streamed
+    /// and has not arrived.
     #[inline]
-    fn gather(&self, zone: &Zone, sample: &SampleData, first: i64, weights: &[f64]) -> (f64, f64) {
+    fn gather(
+        &self,
+        zone: &Zone,
+        sample: &SampleData,
+        first: i64,
+        weights: &[f64],
+    ) -> Option<(f64, f64)> {
         let count = weights.len();
         let (low, high) = self.plain_range(zone, sample);
         if first >= low && first + count as i64 - 1 <= high {
-            let start = first as usize;
-            if let Some(left) = sample.left.get(start..start + count) {
+            let start = first as u64;
+            if let Some((left, right)) = sample.slice(start, count) {
                 let left_sum = dot(left, weights);
-                let right_sum = match &sample.right {
-                    Some(right) => right
-                        .get(start..start + count)
-                        .map_or(left_sum, |right| dot(right, weights)),
-                    None => left_sum,
-                };
-                return (left_sum, right_sum);
+                let right_sum = right.map_or(left_sum, |right| dot(right, weights));
+                return Some((left_sum, right_sum));
             }
+            // Across two stretches, or from the ring: gathered first, so
+            // that the sums are made in the same order as above.
+            let mut left = [0.0f32; MAX_TAPS];
+            let mut right = [0.0f32; MAX_TAPS];
+            for offset in 0..count {
+                (left[offset], right[offset]) = self.frame(sample, start + offset as u64)?;
+            }
+            let left_sum = dot(&left[..count], weights);
+            let right_sum = if sample.stereo {
+                dot(&right[..count], weights)
+            } else {
+                left_sum
+            };
+            return Some((left_sum, right_sum));
         }
         let lp = zone.lp.as_ref();
         let mut left_sum = 0.0;
         let mut right_sum = 0.0;
         for (offset, &weight) in weights.iter().enumerate() {
             let (left, right) = match self.map(zone, first + offset as i64) {
-                Tap::Data(at) => {
-                    let left = sample.left.get(at).copied().unwrap_or(0.0);
-                    let right = match &sample.right {
-                        Some(right) => right.get(at).copied().unwrap_or(0.0),
-                        None => left,
-                    };
-                    (left, right)
-                }
+                Tap::Data(at) => self.frame(sample, at as u64)?,
                 Tap::Tail(at) => {
                     let Some(lp) = lp else { continue };
                     let left = lp.tail_left.get(at).copied().unwrap_or(0.0);
-                    let right = if sample.right.is_some() {
+                    let right = if sample.stereo {
                         lp.tail_right.get(at).copied().unwrap_or(0.0)
                     } else {
                         left
@@ -733,7 +803,15 @@ impl Player {
             left_sum += weight * f64::from(left);
             right_sum += weight * f64::from(right);
         }
-        (left_sum, right_sum)
+        Some((left_sum, right_sum))
+    }
+
+    /// Frame `at` of the sample, left and right (the left twice for a mono
+    /// sample), from memory or from the ring; silence past its end. `None`
+    /// when it is streamed and has not arrived.
+    #[inline]
+    fn frame(&self, sample: &SampleData, at: u64) -> Option<(f32, f32)> {
+        crate::store::frame(sample, &self.lease, at)
     }
 
     /// The frames that read straight from the sample data, needing neither
