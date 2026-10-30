@@ -12,6 +12,7 @@ use super::common::{
 };
 use super::modelling::{Dynamics, Glide, Vibrato, VibratoShape};
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{ProcessSpec, Voice};
 
 /// The most singers a [`ChoirVoice`] can be.
@@ -834,6 +835,8 @@ pub struct ChoirVoice {
     tones: Handover<ChoirTone>,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
     key: u8,
 }
 
@@ -845,6 +848,7 @@ impl ChoirVoice {
             tones: Handover::new(ChoirTone::new(), ChoirTone::new()),
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
             key: 60,
         };
         voice.configure();
@@ -897,6 +901,10 @@ impl<S: Sample> Voice<S> for ChoirVoice {
         self.configure();
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -909,7 +917,7 @@ impl<S: Sample> Voice<S> for ChoirVoice {
         self.tones.now.bend = self.bend + self.tuning;
         self.tones.now.start(
             &params,
-            f64::from(self.key),
+            self.key_tuning.key_pitch(self.key),
             level,
             effort,
             accent,
@@ -925,7 +933,9 @@ impl<S: Sample> Voice<S> for ChoirVoice {
         let params = self.params;
         self.key = note.key.min(127);
         let level = self.level(velocity, accent);
-        self.tones.now.slur(&params, f64::from(self.key), level);
+        self.tones
+            .now
+            .slur(&params, self.key_tuning.key_pitch(self.key), level);
     }
 
     fn note_off(&mut self, _velocity: f32) {

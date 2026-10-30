@@ -17,6 +17,7 @@ use super::params::{
 use super::tables::{Table, bank};
 use crate::event::{Expression, NoteRef};
 use crate::numeric::{limit, step_towards};
+use crate::tuning::Tuning;
 use crate::{NoiseColor, ProcessSpec, Synth, Voice, fir};
 
 /// How many times the sample rate the voice runs at.
@@ -298,6 +299,8 @@ struct Context<'a> {
     tempo: f64,
     bend: f64,
     controls: &'a Controls,
+    /// The tuning of the keys.
+    tuning: &'a Tuning,
 }
 
 /// The player's controllers on the voice's channel.
@@ -489,7 +492,9 @@ impl Tone {
             self.noise.random = Noise::for_note(key, velocity, 200);
             self.random = Noise::for_note(key, velocity, 400).next();
         }
-        self.key = f64::from(key);
+        // The key's pitch in the tuning; the glide, the bend and the
+        // oscillators' own pitches are intervals on top of it.
+        self.key = cx.tuning.key_pitch(key);
         self.glide = match glide {
             Some(seconds) if seconds > 0.0 && !fresh => {
                 let distance = old_pitch - self.key;
@@ -533,7 +538,7 @@ impl Tone {
     /// for none) and nothing is struck again.
     fn slur(&mut self, cx: &Context<'_>, key: u8, velocity: f64, accent: bool, seconds: f64) {
         let old_pitch = self.pitch();
-        self.key = f64::from(key);
+        self.key = cx.tuning.key_pitch(key);
         if seconds > 0.0 {
             self.glide = old_pitch - self.key;
             self.glide_step = self.glide.abs() / (seconds * cx.rate).max(1.0);
@@ -1139,6 +1144,8 @@ struct Shared {
     controls: Controls,
     /// The key of the note, for polyphonic pressure.
     key: u8,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    tuning: Tuning,
 }
 
 impl Shared {
@@ -1162,6 +1169,7 @@ impl Shared {
             tempo: self.tempo,
             bend: self.bend,
             controls: &self.controls,
+            tuning: &self.tuning,
         }
     }
 }
@@ -1185,6 +1193,7 @@ impl PolySynthVoice {
                 bend: 0.0,
                 controls: Controls::default(),
                 key: 60,
+                tuning: Tuning::default(),
             },
             now: Tone::new(),
             old: Tone::new(),
@@ -1307,6 +1316,10 @@ impl<S: Sample> Voice<S> for PolySynthVoice {
         self.old.prepare(inner);
         self.fade_step = 1.0 / (HANDOVER_SECONDS * rate).max(1.0);
         self.reset();
+    }
+
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.shared.tuning.clone_from(tuning);
     }
 
     fn note_on(&mut self, note: NoteRef, velocity: f32) {

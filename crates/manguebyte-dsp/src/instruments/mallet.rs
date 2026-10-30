@@ -12,6 +12,7 @@ use super::common::{
 use super::modal::Phasors;
 use super::string::BodyMode;
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
 /// How many modes a [`MalletParams`] describes.
@@ -1175,6 +1176,8 @@ pub struct MalletVoice {
     tones: Handover<MalletTone>,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
     /// [`Expression::Brightness`], 0 to 1, and [`Expression::Volume`].
     brightness: f64,
     volume: f64,
@@ -1190,6 +1193,7 @@ impl MalletVoice {
             tones: Handover::new(MalletTone::new(), MalletTone::new()),
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
             brightness: 0.5,
             volume: 1.0,
             vibrato: 1.0,
@@ -1234,6 +1238,10 @@ impl<S: Sample> Voice<S> for MalletVoice {
         self.configure();
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -1251,7 +1259,7 @@ impl<S: Sample> Voice<S> for MalletVoice {
             contact /= params.accent_hardness;
         }
         let seed = Noise::for_note(self.key, velocity, 21);
-        let f0 = key_hz(f64::from(self.key));
+        let f0 = self.key_tuning.key_frequency(self.key);
         let ratio = self.ratio();
         // A bar throws the mallet off within about half a period of the
         // mode it sounds most, so a contact much longer than that is

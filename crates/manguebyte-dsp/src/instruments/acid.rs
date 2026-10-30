@@ -10,6 +10,7 @@ use super::common::{
 use crate::event::{Expression, NoteRef};
 use crate::fir;
 use crate::ladder::saturated;
+use crate::tuning::Tuning;
 use crate::{Oscillator, ProcessSpec, Voice, Waveform};
 
 /// Where the diode ladder's feedback turns the phase by half a turn, as a
@@ -360,6 +361,8 @@ pub struct AcidVoice {
     carried: bool,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
 }
 
 impl AcidVoice {
@@ -398,6 +401,7 @@ impl AcidVoice {
             carried: false,
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
         };
         voice.configure();
         voice
@@ -579,12 +583,16 @@ impl<S: Sample> Voice<S> for AcidVoice {
         self.reset();
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
 
     fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
-        let key = f64::from(note.key.min(127));
+        let key = self.key_tuning.key_pitch(note.key.min(127));
         self.carried = false;
         self.pitch = key;
         self.target = key;
@@ -602,7 +610,7 @@ impl<S: Sample> Voice<S> for AcidVoice {
             Voice::<S>::note_on_accented(self, note, velocity, accent);
             return;
         }
-        self.target = f64::from(note.key.min(127));
+        self.target = self.key_tuning.key_pitch(note.key.min(127));
         // The gate stays open: the envelopes carry on, and only the level
         // and the accent change.
         self.take(velocity, accent);

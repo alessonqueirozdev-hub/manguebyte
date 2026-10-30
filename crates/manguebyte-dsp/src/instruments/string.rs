@@ -9,6 +9,7 @@ use super::common::{
     velocity_gain,
 };
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning as KeyTuning;
 use crate::{DelayLine, ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
 /// The lowest note a string plays, in hertz. Lower keys sound here.
@@ -911,6 +912,8 @@ pub struct PluckedString {
     /// Pitch bend and per-note tuning, in semitones.
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: KeyTuning,
     key: u8,
 }
 
@@ -923,6 +926,7 @@ impl PluckedString {
             tones: Handover::new(StringTone::new(), StringTone::new()),
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: KeyTuning::default(),
             key: 60,
         };
         let params = voice.params;
@@ -965,6 +969,10 @@ impl<S: Sample> Voice<S> for PluckedString {
         }
     }
 
+    fn set_tuning(&mut self, tuning: &KeyTuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -973,7 +981,7 @@ impl<S: Sample> Voice<S> for PluckedString {
         let params = self.params;
         self.key = note.key.min(127);
         let velocity = f64::from(velocity).clamp(0.0, 1.0);
-        let f0 = key_hz(f64::from(self.key) + self.bend + self.tuning);
+        let f0 = key_hz(self.key_tuning.key_pitch(self.key) + self.bend + self.tuning);
         // Seeded by the key alone: every pluck of a key has the same grain,
         // so that its level and brightness are what the velocity and the
         // accent make them and not a matter of chance.
@@ -981,7 +989,7 @@ impl<S: Sample> Voice<S> for PluckedString {
         self.tones.now.pluck(&params, f0, velocity, accent, seed);
         // The loop's tuning includes the bend; the key's own frequency is
         // what later bends start from.
-        self.tones.now.f0 = key_hz(f64::from(self.key));
+        self.tones.now.f0 = self.key_tuning.key_frequency(self.key);
     }
 
     fn note_off(&mut self, _velocity: f32) {

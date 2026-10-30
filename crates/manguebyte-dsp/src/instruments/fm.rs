@@ -8,6 +8,7 @@ use super::common::{
     Handover, SILENCE, Tone, add_to_every_channel, db, key_hz, setting, t60_factor,
 };
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{ProcessSpec, Voice};
 
 /// How many operators an [`FmVoice`] has.
@@ -740,6 +741,8 @@ pub struct FmVoice {
     key: u8,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
 }
 
 impl FmVoice {
@@ -751,6 +754,7 @@ impl FmVoice {
             key: 60,
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
         }
     }
 
@@ -769,7 +773,7 @@ impl FmVoice {
     }
 
     fn pitch(&self) -> f64 {
-        f64::from(self.key) + self.bend + self.tuning
+        self.key_tuning.key_pitch(self.key) + self.bend + self.tuning
     }
 }
 
@@ -780,6 +784,10 @@ impl<S: Sample> Voice<S> for FmVoice {
             tone.sample_rate = spec.sample_rate;
             tone.silence();
         }
+    }
+
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
     }
 
     fn note_on(&mut self, note: NoteRef, velocity: f32) {

@@ -4,6 +4,7 @@ use manguebyte_core::{AudioBuffer, ParamId, Sample};
 use manguebyte_midi::MidiMessage;
 
 use crate::event::{Event, EventKind, Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{ProcessContext, ProcessSpec, Processor, split_at_events};
 
 /// One note's worth of sound in a [`Synth`].
@@ -124,6 +125,26 @@ pub trait Voice<S: Sample = f32> {
     fn midi(&mut self, message: MidiMessage) {
         let _ = message;
     }
+
+    /// The tuning the voice plays in from now on, given by
+    /// [`Synth::set_tuning`] to every voice, sounding or not.
+    ///
+    /// A voice keeps its own copy (with [`Clone::clone_from`], which does
+    /// not allocate: a [`Tuning`] owns no heap memory) and takes its key's
+    /// pitch from it, [`Tuning::key_pitch`], where it would otherwise take
+    /// the key number itself. The instruments of this crate do that and
+    /// add pitch bend, glides, vibrato and their own transpositions on top
+    /// as intervals in semitones, as synthesizers that follow the MIDI
+    /// Tuning Standard do; a voice that would rather bend through the
+    /// tuning's keys can use [`Tuning::frequency`] of the bent key. The
+    /// instruments apply a new tuning from their next note at the latest.
+    ///
+    /// The default ignores the tuning, so a voice that does not override
+    /// this always plays in 12-tone equal temperament with A4 at 440 Hz,
+    /// which is also the tuning every voice starts with.
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        let _ = tuning;
+    }
 }
 
 /// A controller nobody has moved yet. MIDI values stop at 127.
@@ -184,6 +205,8 @@ struct Slot<V> {
 ///   whichever voice it lands on and whether or not that voice was sounding
 ///   when the wheel moved. Controller 121 puts them back.
 /// - Controllers 120 and 123 silence or release a whole channel.
+/// - **The tuning** ([`set_tuning`](Self::set_tuning)) reaches every voice,
+///   and a note on a key it leaves unmapped does not start.
 ///
 /// When every voice is busy, a new note takes over the voice that will be
 /// missed least: one that is already fading out if there is one, then one
@@ -246,6 +269,8 @@ pub struct Synth<V, S: Sample = f32> {
     legato: bool,
     /// How many of the voices, from the first, new notes may take.
     voice_limit: usize,
+    /// What every voice was last given by `set_tuning`.
+    tuning: Tuning,
     marker: PhantomData<S>,
 }
 
@@ -270,6 +295,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             controllers: [[UNMOVED; 128]; 16],
             bend_range: 2.0,
             legato: false,
+            tuning: Tuning::default(),
             marker: PhantomData,
         }
     }
@@ -308,6 +334,29 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// Whether legato playing is on. See [`set_legato`](Self::set_legato).
     pub fn is_legato(&self) -> bool {
         self.legato
+    }
+
+    /// Gives every voice a new tuning, sounding or not, through
+    /// [`Voice::set_tuning`]. Real-time safe: the tuning is copied into the
+    /// synth and into each voice, which allocates nothing, so a tuning
+    /// built off the audio thread can be handed over through a queue and
+    /// applied at the start of a block (see [the tuning
+    /// module](crate::tuning)).
+    ///
+    /// From then on a note on a key the tuning leaves unmapped
+    /// ([`Tuning::is_mapped`]) does not start; notes already sounding on
+    /// such keys carry on until released. A new synth, and every voice in
+    /// it, plays 12-tone equal temperament with A4 at 440 Hz.
+    pub fn set_tuning(&mut self, tuning: &Tuning) {
+        self.tuning.clone_from(tuning);
+        for slot in &mut self.slots {
+            slot.voice.set_tuning(&self.tuning);
+        }
+    }
+
+    /// The tuning last given to [`set_tuning`](Self::set_tuning).
+    pub fn tuning(&self) -> &Tuning {
+        &self.tuning
     }
 
     /// How many notes can sound at once.
@@ -359,7 +408,12 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// voice through [`Voice::note_on_accented`] (or [`Voice::legato`]).
     /// The event stream has no accent: a note started by an event is never
     /// accented.
+    ///
+    /// A note on a key the tuning leaves unmapped is ignored.
     pub fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
+        if !self.tuning.is_mapped(note.key) {
+            return;
+        }
         let velocity = velocity_in_range(velocity);
         self.reclaim_finished();
         self.clock += 1;

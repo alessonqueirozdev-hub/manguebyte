@@ -14,6 +14,7 @@ use super::modelling::{
     Bump, DcBlock, Dynamics, Glide, Life, Loss, Switch, Vibrato, VibratoShape, cubic_delay_for,
 };
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{DelayLine, ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
 /// The lowest note a bore plays, in hertz. Lower keys sound here.
@@ -1551,6 +1552,8 @@ pub struct WindVoice {
     tones: Handover<WindTone>,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
     key: u8,
 }
 
@@ -1563,6 +1566,7 @@ impl WindVoice {
             tones: Handover::new(WindTone::new(), WindTone::new()),
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
             key: 60,
         };
         voice.configure();
@@ -1633,6 +1637,10 @@ impl<S: Sample> Voice<S> for WindVoice {
         self.configure();
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -1652,7 +1660,7 @@ impl<S: Sample> Voice<S> for WindVoice {
         tone.gain_target = gain;
         tone.start(
             &params,
-            f64::from(self.key),
+            self.key_tuning.key_pitch(self.key),
             Self::breath(velocity, accent),
             f64::from(velocity),
             accent,
@@ -1668,9 +1676,11 @@ impl<S: Sample> Voice<S> for WindVoice {
         let params = self.params;
         self.key = note.key.min(127);
         self.tones.now.gain_target = self.gain(velocity, accent);
-        self.tones
-            .now
-            .slur(&params, f64::from(self.key), Self::breath(velocity, accent));
+        self.tones.now.slur(
+            &params,
+            self.key_tuning.key_pitch(self.key),
+            Self::breath(velocity, accent),
+        );
     }
 
     fn note_off(&mut self, _velocity: f32) {

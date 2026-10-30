@@ -114,6 +114,8 @@ mod organ;
 pub mod poly;
 mod rotary;
 mod string;
+#[cfg(test)]
+mod tuned;
 mod wind;
 
 pub use acid::{AcidParams, AcidVoice, AcidWave};

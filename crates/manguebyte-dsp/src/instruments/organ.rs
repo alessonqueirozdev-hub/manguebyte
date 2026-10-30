@@ -10,6 +10,7 @@ use super::common::{
     Handover, Noise, Tone, add_to_every_channel, db, flush, key_hz, setting, t60_factor,
 };
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
 /// How many drawbars there are.
@@ -651,6 +652,8 @@ pub struct OrganVoice {
     sample_rate: f64,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
 }
 
 impl OrganVoice {
@@ -675,6 +678,7 @@ impl OrganVoice {
             sample_rate: 48_000.0,
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
         };
         let params = voice.params;
         voice.tones.now.configure(&params);
@@ -739,6 +743,10 @@ impl<S: Sample> Voice<S> for OrganVoice {
         }
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -774,7 +782,7 @@ impl<S: Sample> Voice<S> for OrganVoice {
             gain *= db(params.accent_db);
             click = (click + 0.3).min(1.0);
         }
-        let key = f64::from(note.key.min(127));
+        let key = self.key_tuning.key_pitch(note.key.min(127));
         let bend = self.bend + self.tuning;
         self.tones
             .now

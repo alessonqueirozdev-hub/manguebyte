@@ -16,6 +16,7 @@ use super::modelling::{
 };
 use super::string::BodyMode;
 use crate::event::{Expression, NoteRef};
+use crate::tuning::Tuning;
 use crate::{DelayLine, ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
 /// The most players a [`BowedString`] can be: a section of that many
@@ -1556,6 +1557,8 @@ pub struct BowedString {
     tones: Handover<BowedTone>,
     bend: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
     key: u8,
     /// The velocity of the note, 0 to 1.
     velocity: f64,
@@ -1570,6 +1573,7 @@ impl BowedString {
             tones: Handover::new(BowedTone::new(), BowedTone::new()),
             bend: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
             key: 60,
             velocity: 0.8,
         };
@@ -1636,6 +1640,10 @@ impl<S: Sample> Voice<S> for BowedString {
         self.configure();
     }
 
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
+    }
+
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
         Voice::<S>::note_on_accented(self, note, velocity, false);
     }
@@ -1649,7 +1657,7 @@ impl<S: Sample> Voice<S> for BowedString {
         self.tones.now.bend = self.bend + self.tuning;
         self.tones.now.start(
             &params,
-            f64::from(self.key),
+            self.key_tuning.key_pitch(self.key),
             level,
             self.velocity,
             accent,
@@ -1670,7 +1678,7 @@ impl<S: Sample> Voice<S> for BowedString {
         let scale = self.position_scale();
         self.tones
             .now
-            .slur(&params, f64::from(self.key), level, scale);
+            .slur(&params, self.key_tuning.key_pitch(self.key), level, scale);
     }
 
     fn note_off(&mut self, _velocity: f32) {
