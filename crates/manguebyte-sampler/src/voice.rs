@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::{Expression, NoteRef};
-use manguebyte_dsp::{ProcessSpec, Voice};
+use manguebyte_dsp::{ProcessSpec, Tuning, Voice};
 
 use crate::instrument::Instrument;
 use crate::interpolate::Interpolation;
@@ -77,6 +77,8 @@ pub struct SamplerVoice {
     volume: f64,
     pan: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
 }
 
 impl SamplerVoice {
@@ -99,6 +101,7 @@ impl SamplerVoice {
             volume: 1.0,
             pan: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
         }
     }
 
@@ -154,6 +157,8 @@ impl SamplerVoice {
         self.serial += 1;
         let random = instrument.next_random();
         let channel = self.note.channel & 0x0F;
+        let pitch =
+            self.key_tuning.key_pitch(self.note.key & 0x7F) + f64::from(instrument.note_shift);
         for &index in list {
             let index = index as usize;
             let Some(zone) = instrument.zones.get(index) else {
@@ -198,6 +203,7 @@ impl SamplerVoice {
                 zone: index,
                 note: self.note,
                 key,
+                pitch,
                 velocity: self.velocity,
                 serial: self.serial,
                 age: self.serial,
@@ -254,6 +260,13 @@ impl<S: Sample> Voice<S> for SamplerVoice {
             self.sample_rate = spec.sample_rate;
         }
         Voice::<S>::choke(self);
+    }
+
+    /// Keeps the tuning for the notes to come; see
+    /// [`Sampler::set_tuning`](crate::Sampler::set_tuning) for what it
+    /// changes.
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
     }
 
     fn note_on(&mut self, note: NoteRef, velocity: f32) {

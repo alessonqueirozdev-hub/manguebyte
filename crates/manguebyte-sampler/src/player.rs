@@ -67,6 +67,10 @@ pub(crate) struct Start {
     pub(crate) note: NoteRef,
     /// The key that chose the region, after the instrument's note offset.
     pub(crate) key: u8,
+    /// The pitch the key plays, as an equal-tempered note number: the
+    /// played key's pitch in the tuning, moved by the note offset. `key`
+    /// itself in 12-tone equal temperament.
+    pub(crate) pitch: f64,
     /// 1 to 127.
     pub(crate) velocity: u8,
     pub(crate) serial: u64,
@@ -337,7 +341,7 @@ impl Player {
         self.attenuation = 10f64.powf(-start.attenuation_db.max(0.0) / 20.0);
         self.region_gain = zone.gain;
         self.pan = zone.pan;
-        self.base_cents = (f64::from(start.key) - zone.keycenter) * zone.keytrack + zone.detune;
+        self.base_cents = (start.pitch - zone.keycenter) * zone.keytrack + zone.detune;
         self.bend_cents = start.bend.cents(zone);
         self.rate_ratio = sample.rate / start.sample_rate.max(1.0);
         self.stereo = sample.stereo;

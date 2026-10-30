@@ -65,7 +65,7 @@
 //! |---|---|
 //! | `sample` | The sample's path, or `*sine` (sounds the key's pitch) or `*silence`. |
 //! | `lokey`, `hikey`, `key`, `lovel`, `hivel`, `lochan`, `hichan` | The notes that play the region. Keys may be numbers or names, with `c4` = 60; `hikey=-1` or `key=-1` (SFZ 2) keeps the region off the keyboard. |
-//! | `pitch_keycenter`, `pitch_keytrack`, `transpose`, `tune` | Pitch: `(key - pitch_keycenter) * pitch_keytrack + 100 * transpose + tune` cents. `pitch_keycenter=sample` takes the WAV file's root key. |
+//! | `pitch_keycenter`, `pitch_keytrack`, `transpose`, `tune` | Pitch: `(key - pitch_keycenter) * pitch_keytrack + 100 * transpose + tune` cents, where `key` is the key's pitch in the [tuning](Sampler::set_tuning), its own number in equal temperament. `pitch_keycenter=sample` takes the WAV file's root key. |
 //! | `bend_up`, `bend_down` | Cents at the ends of the pitch wheel. |
 //! | `seq_length`, `seq_position` | Round robin. Each region counts the notes that match its keys, velocities, channels and trigger, and plays on its turn. |
 //! | `lorand`, `hirand` | Each note draws one number in `0..1` from the instrument's seeded generator; a region plays when it falls in `lorand..hirand`. |

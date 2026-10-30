@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::{Event, EventKind, Expression, NoteRef};
-use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor};
+use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Tuning};
 use manguebyte_midi::MidiMessage;
 
 use crate::controllers::{ControllerTable, MAX_CONTROLLERS};
@@ -221,6 +221,8 @@ pub struct Sampler<S: Sample = f32> {
     /// Frames of the block under way, and of it rendered.
     block_frames: u64,
     block_done: u64,
+    /// The tuning of the keys.
+    tuning: Tuning,
     marker: PhantomData<S>,
 }
 
@@ -320,6 +322,7 @@ impl<S: Sample> Sampler<S> {
                 all: LEVEL,
                 block_frames: 0,
                 block_done: 0,
+                tuning: Tuning::default(),
                 marker: PhantomData,
             },
             SamplerLoader {
@@ -481,6 +484,29 @@ impl<S: Sample> Sampler<S> {
         self.interpolation
     }
 
+    /// Plays from now on in `tuning` instead of 12-tone equal temperament
+    /// with A4 at 440 Hz. Real-time safe: the tuning is copied, which
+    /// allocates nothing (see [`manguebyte_dsp::tuning`]).
+    ///
+    /// A key's pitch in the tuning takes the place of the key number in the
+    /// region's pitch, `(pitch - pitch_keycenter) * pitch_keytrack / 100`
+    /// semitones, so a sample sounds at its own pitch on its keycenter only
+    /// where the tuning gives that key its equal-tempered pitch. The
+    /// instrument's `note_offset` and `octave_offset` move the pitch in
+    /// semitones on top, and the pitch wheel and `tune` and `transpose`
+    /// stay intervals in cents and semitones. Regions are still chosen by
+    /// key, and the filter still follows the key number. Notes already
+    /// sounding keep their pitch; a note on a key the tuning leaves
+    /// unmapped does not start.
+    pub fn set_tuning(&mut self, tuning: &Tuning) {
+        self.tuning.clone_from(tuning);
+    }
+
+    /// The tuning last given to [`set_tuning`](Self::set_tuning).
+    pub fn tuning(&self) -> &Tuning {
+        &self.tuning
+    }
+
     /// The instrument new notes play, if any has arrived.
     pub fn instrument(&self) -> Option<&Instrument> {
         self.instruments[self.current].as_deref()
@@ -502,10 +528,15 @@ impl<S: Sample> Sampler<S> {
     }
 
     /// Starts a note now. A velocity of 0 or less, or one that is not a
-    /// number, releases it instead. Real-time safe.
+    /// number, releases it instead. A note on a key the
+    /// [tuning](Self::set_tuning) leaves unmapped is ignored. Real-time
+    /// safe.
     pub fn note_on(&mut self, note: NoteRef, velocity: f32) {
         if velocity.is_nan() || velocity <= 0.0 {
             self.note_off(note, 0.0);
+            return;
+        }
+        if !self.tuning.is_mapped(note.key & 0x7F) {
             return;
         }
         let channel = usize::from(note.channel & 0x0F);
@@ -819,6 +850,7 @@ impl<S: Sample> Sampler<S> {
         let random = instrument.next_random();
         let channel = note.channel & 0x0F;
         let bend = self.channels[usize::from(channel)].bend;
+        let pitch = self.tuning.key_pitch(note.key & 0x7F) + f64::from(instrument.note_shift);
         for &index in list {
             let index = index as usize;
             let Some(zone) = instrument.zones.get(index) else {
@@ -863,6 +895,7 @@ impl<S: Sample> Sampler<S> {
                 zone: index,
                 note,
                 key,
+                pitch,
                 velocity,
                 serial,
                 age: serial,
