@@ -150,6 +150,13 @@ break the API.
   from 0 to -40 dB and gains from -12 to +12 dB; the tail from 150 to
   300 ms by the sustain gain to 0.05 dB; steady tones at 100 Hz and 1 kHz
   stay within 1 dB of their level with both gains at +12 dB.
+- `MultibandCompressor`: three bands from a fourth-order Linkwitz-Riley
+  `Crossover`, a `Compressor` of its own on each (`band_mut`), added back
+  up. Measured: while no band compresses, the output is flat to 1e-7 dB at
+  every frequency, for three pairs of crossover frequencies; a full-scale
+  60 Hz tone is turned down by the low band alone, by the 15 dB its
+  compressor settles at, while a 10 kHz tone 40 dB down beside it moves
+  by less than 0.05 dB.
 
 ### Formats
 

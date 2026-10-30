@@ -1586,8 +1586,8 @@ fn a_partial_bank_does_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingCarrier, RingModulator, StereoWidener,
-        TransientShaper, Tremolo,
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingCarrier,
+        RingModulator, StereoWidener, TransientShaper, Tremolo,
     };
 
     check(
@@ -1652,6 +1652,15 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_sustain_db(-12.0),
     );
 
+    check("MultibandCompressor", {
+        let mut compressor = MultibandCompressor::<f32>::new(150.0, 3_000.0);
+        for band in 0..3 {
+            compressor.band_mut(band).set_threshold_db(-30.0);
+            compressor.band_mut(band).set_knee_db(6.0);
+        }
+        compressor
+    });
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1694,8 +1703,8 @@ fn the_workstation_effects_do_not_use_the_heap() {
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
-        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, RingModulator, StereoWidener,
-        TransientShaper, Tremolo,
+        AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingModulator,
+        StereoWidener, TransientShaper, Tremolo,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1712,6 +1721,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     widener.prepare(&SPEC);
     let mut shaper = TransientShaper::<f32>::new();
     shaper.prepare(&SPEC);
+    let mut multiband = MultibandCompressor::<f32>::new(200.0, 2_000.0);
+    multiband.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1774,6 +1785,16 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             shaper.set_attack_ms(1.0 + 10.0 * turn);
             shaper.set_sustain_ms(50.0 + 200.0 * turn);
             shaper.process(&mut buffer);
+
+            multiband.set_crossover_hz(0, 50.0 + 40.0 * turn);
+            multiband.set_crossover_hz(1, 1_000.0 + 500.0 * turn);
+            for band in 0..3 {
+                let compressor = multiband.band_mut(band);
+                compressor.set_threshold_db(-3.0 * turn);
+                compressor.set_ratio(1.0 + turn);
+                compressor.set_attack_ms(turn);
+            }
+            multiband.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));
