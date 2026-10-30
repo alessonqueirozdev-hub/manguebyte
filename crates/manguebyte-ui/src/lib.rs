@@ -221,6 +221,9 @@ pub use widgets::{
     text_field, toggle, waveform_view, waveform_view_named,
 };
 pub use widgets::{
+    BEND_RETURN_AFTER, Wheel, WheelBinding, WheelKind, WheelState, mod_wheel, pitch_wheel,
+};
+pub use widgets::{
     EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,
     ZoneMap, ZoneMapState, envelope, is_black, note_name, note_name_portuguese, piano_keyboard,
     piano_keyboard_named, zone_map, zone_map_named,

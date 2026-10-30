@@ -27,7 +27,8 @@ use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
     Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme,
-    action_button, column, combo, confirm_dialog, knob, label, row, sidebar, tabs, text_field,
+    WheelState, action_button, column, combo, confirm_dialog, knob, label, mod_wheel, pitch_wheel,
+    row, sidebar, tabs, text_field,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -103,6 +104,49 @@ fn the_panel_shows_what_its_goldens_were_made_from() {
     // 30 pixels up from 1000 Hz is 0.15 of a logarithmic range, which
     // multiplies the frequency by 1000 to the power of 0.15.
     assert_eq!(ui.get(Role::Slider, "Cutoff").value_text(), Some("2818 Hz"));
+}
+
+/// A pitch bend wheel held half way up and a modulation wheel at 0.6 with
+/// the keyboard's focus ring.
+fn wheels(scale: f32, theme: Theme) -> Harness {
+    let (bend, modulation) = (WheelState::new(), WheelState::new());
+    let view = row((
+        pitch_wheel("Pitch", bend.clone()),
+        mod_wheel("Mod", modulation.clone()),
+    ))
+    .spacing(4.0)
+    .padding(8.0);
+    let mut ui = Harness::new(view, Size::new(112.0, 176.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    modulation.set(0.6);
+    // Held: pressed and dragged up, not let go.
+    let pitch = ui.get(Role::Slider, "Pitch");
+    ui.press(pitch.center());
+    ui.move_to(pitch.center() - manguebyte_gfx::Point::new(0.0, 30.0));
+    ui.advance_ms(16);
+    let wheel = ui.get(Role::Slider, "Mod");
+    ui.act(&wheel, Action::Focus);
+    ui.advance_ms(16);
+    assert!(bend.is_held() && bend.value() > 0.4);
+    ui
+}
+
+#[test]
+fn the_wheels_match_their_goldens() {
+    let snapshots = snapshots();
+    for (name, scale, theme) in [
+        ("wheels@1x", 1.0, Theme::dark()),
+        ("wheels@2x", 2.0, Theme::dark()),
+        ("wheels-light@1x", 1.0, Theme::light()),
+        ("wheels-light@2x", 2.0, Theme::light()),
+    ] {
+        let ui = wheels(scale, theme);
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
 }
 
 struct Choices {

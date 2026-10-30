@@ -400,3 +400,40 @@ fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
     });
     assert!(calls >= 10, "10 frames made only {calls} heap calls");
 }
+
+#[test]
+fn steady_frames_of_wheels_make_no_heap_call() {
+    use manguebyte_ui::{WheelState, mod_wheel, pitch_wheel, row};
+
+    let (bend, modulation) = (WheelState::new(), WheelState::new());
+    let view = row((
+        pitch_wheel("Pitch", bend.clone()),
+        mod_wheel("Mod", modulation.clone()),
+    ));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(120.0, 170.0), 2.0);
+    ui.set_motion(true);
+    ui.advance_ms(100);
+    let pitch = ui.get(Role::Slider, "Pitch");
+    // Held away from the middle, with nothing moving.
+    ui.press(pitch.center());
+    ui.move_to(pitch.center() - Point::new(0.0, 20.0));
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames held made {calls} heap calls");
+    // Let go, sprung back and settled; and the application polling the
+    // values every frame, as it would to send MIDI.
+    ui.release(pitch.center());
+    ui.advance_ms(1000);
+    assert_eq!(bend.value(), 0.0);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+            let _ = (bend.take(), modulation.take(), bend.midi_pitch_bend());
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after made {calls} heap calls");
+}
