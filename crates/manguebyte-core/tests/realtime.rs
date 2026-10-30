@@ -259,13 +259,18 @@ fn governing_never_allocates() {
             if block % 97 == 0 {
                 governor.note_missed(1);
             }
-            governor.end_block(128, allowance.spent());
+            governor.end_block(128, allowance.spent(), allowance.limited());
             // Some blocks are timed by the caller, as around a pool.
-            governor.record(Duration::from_micros(u64::from(block % 5) * 900), 64, 100.0);
+            governor.record(
+                Duration::from_micros(u64::from(block % 5) * 900),
+                64,
+                100.0,
+                true,
+            );
         }
         governor.set_offline(true);
         governor.begin_block();
-        governor.end_block(128, 1.0);
+        governor.end_block(128, 1.0, false);
         governor.set_offline(false);
         governor.set_max_budget(1_000.0);
         governor.reset();

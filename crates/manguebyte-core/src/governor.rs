@@ -33,29 +33,46 @@
 //!
 //! # How it moves
 //!
-//! - **Attack.** When a block's load per unit is above the estimate, the
+//! - **Spikes.** The estimate goes by the lowest load per unit of the last
+//!   [`spike_blocks`](GovernorConfig::spike_blocks) blocks learnt from
+//!   (three unless set), so a rise in cost moves it once it has lasted that
+//!   many: 8 ms in blocks of 128 frames at 48 kHz. A thread preempted for
+//!   tens of milliseconds, or a pool's worker that was, makes one block
+//!   late, and rendering less would not have helped; a machine that has
+//!   become slower (other programs, a lower clock) stays slower. Measured
+//!   on a loaded laptop, an estimate that believed every block followed
+//!   the preemptions down and left a synthetic organ rendering 3 % of its
+//!   pipes (ADR 0018).
+//! - **Attack.** When that load per unit is above the estimate, the
 //!   estimate moves towards it by [`attack`](GovernorConfig::attack) of the
-//!   way at once (half, unless set), and all the way when the block's load
-//!   is above the [ceiling](GovernorConfig::ceiling). The budget follows
-//!   down in the same block.
+//!   way at once (half, unless set), and all the way when the load it
+//!   gives the block is above the [ceiling](GovernorConfig::ceiling). The
+//!   budget follows down in the same block. One block raises the estimate
+//!   by at most [`max_rise`](GovernorConfig::max_rise) (a factor of two
+//!   unless set). The first block learnt from is taken as it is.
 //! - **Release.** When it is below, the estimate falls with the
 //!   [release](GovernorConfig::release) time constant, and the budget rises
 //!   by at most a factor of two every [`doubling`](GovernorConfig::doubling)
 //!   time. Recovery is slow and steady: the budget never rises by more than
-//!   that rate, and while the load stays low it never turns back down.
+//!   that rate, and while the load stays low it never turns back down. In
+//!   the defaults, a budget that was halved is back to 90 % of where it was
+//!   within three seconds.
 //! - **Hysteresis.** The budget aims a fraction
 //!   [`hysteresis`](GovernorConfig::hysteresis) below what the estimate
 //!   says reaches the target, falls only when the aim drops that fraction
-//!   below it or the load passes the target, and starts rising only when the
-//!   aim is that fraction above it. Noise smaller than the band moves
-//!   nothing.
+//!   below it or the load, read through the spike rule, passes the target,
+//!   and starts rising only when the aim is that fraction above it. Noise
+//!   smaller than the band moves nothing.
 //! - **Learning.** Only blocks that say something about the cost are
 //!   learnt from: ones whose load is at least half the target (unless set),
-//!   or in which the instrument spent its whole budget. A quiet block, in
-//!   which fixed work outweighs the units, leaves the estimate as it was;
-//!   so does a silent one. The estimate is kept while the instrument is
-//!   quiet, so the first chord after a rest gets the budget the last one
-//!   had, rather than everything at once.
+//!   or in which the instrument was *limited*, wanting more than its
+//!   budget. A quiet block, in which fixed work outweighs the units, leaves
+//!   the estimate as it was; so does a silent one. The estimate is kept
+//!   while the instrument is quiet, so the first chord after a rest gets
+//!   the budget the last one had, rather than everything at once. A
+//!   limited block in which nothing could be spent, the budget being below
+//!   the cheapest thing the instrument renders, lets the estimate fall at
+//!   the release rate, so the budget climbs back rather than stay stuck.
 //!
 //! Until the first block worth learning from, the budget is the
 //! [maximum](Governor::set_max_budget) (unlimited unless set).
@@ -78,7 +95,9 @@
 //!
 //! A block in which a render pool (ADR 0015) missed jobs, because its wait
 //! limit passed while a worker still held them, counts as at least a whole
-//! deadline's load, whatever the clock said: tell the governor through
+//! deadline's load, whatever the clock said, and like any other load it
+//! moves the estimate once it has lasted
+//! [`spike_blocks`](GovernorConfig::spike_blocks): tell the governor through
 //! [`note_missed`](Governor::note_missed) before
 //! [`end_block`](Governor::end_block). Time the pool's `run` and the mix
 //! after it between [`begin_block`](Governor::begin_block) and
@@ -120,7 +139,7 @@
 //!     governor.begin_block();
 //!     let voices = (0..64).filter(|_| allowance.try_take(4.0)).count();
 //!     governor.clock_mut().0 += unit * (4 * voices) as u32;
-//!     governor.end_block(128, allowance.spent());
+//!     governor.end_block(128, allowance.spent(), allowance.limited());
 //! }
 //! // It renders as many voices as keep the load under the target of 70 %.
 //! assert!(governor.last_load() <= 0.7);
@@ -178,14 +197,20 @@ pub struct GovernorConfig {
     release: Duration,
     doubling: Duration,
     learn_above: f64,
+    max_rise: f64,
+    spike_blocks: usize,
 }
+
+/// The most blocks [`GovernorConfig::spike_blocks`] can ask for.
+pub const MAX_SPIKE_BLOCKS: usize = 16;
 
 impl GovernorConfig {
     /// The defaults: a target load of 70 % of the deadline, a ceiling of
     /// 90 %, a hysteresis of 5 %, an attack of half the way a block, a
     /// release time constant of half a second, a budget that at most
-    /// doubles every half second, and learning from blocks loaded to at
-    /// least half the target.
+    /// doubles every half second, learning from blocks loaded to at least
+    /// half the target, an estimate that one block at most doubles, and a
+    /// rise in cost believed once it has lasted three blocks learnt from.
     pub const fn new() -> GovernorConfig {
         GovernorConfig {
             target: 0.7,
@@ -195,6 +220,8 @@ impl GovernorConfig {
             release: Duration::from_millis(500),
             doubling: Duration::from_millis(500),
             learn_above: 0.5,
+            max_rise: 2.0,
+            spike_blocks: 3,
         }
     }
 
@@ -241,9 +268,25 @@ impl GovernorConfig {
     }
 
     /// The fraction of the target load a block must reach to be learnt
-    /// from, unless the instrument spent its whole budget in it (0 to 1).
+    /// from, unless the instrument was limited in it (0 to 1).
     pub fn learn_above(mut self, fraction: f64) -> GovernorConfig {
         self.learn_above = fraction;
+        self
+    }
+
+    /// The most one block can multiply the cost estimate by, once it has
+    /// one (at least 1; unlimited with `f64::INFINITY`).
+    pub fn max_rise(mut self, factor: f64) -> GovernorConfig {
+        self.max_rise = factor;
+        self
+    }
+
+    /// How many blocks learnt from in a row a rise in the cost per unit
+    /// must last to move the estimate (1 to [`MAX_SPIKE_BLOCKS`]): the
+    /// estimate goes by the lowest of the last this many. One believes
+    /// every block.
+    pub fn spike_blocks(mut self, blocks: usize) -> GovernorConfig {
+        self.spike_blocks = blocks;
         self
     }
 
@@ -259,6 +302,12 @@ impl GovernorConfig {
             release: self.release,
             doubling: self.doubling,
             learn_above: finite(self.learn_above, defaults.learn_above).clamp(0.0, 1.0),
+            max_rise: if self.max_rise.is_nan() {
+                defaults.max_rise
+            } else {
+                self.max_rise.max(1.0)
+            },
+            spike_blocks: self.spike_blocks.clamp(1, MAX_SPIKE_BLOCKS),
         }
     }
 }
@@ -302,6 +351,11 @@ pub struct Governor<C: Clock = SystemClock> {
     unit_load: f64,
     /// Whether the budget is on its way up to the aim.
     rising: bool,
+    /// The load per unit of the last blocks learnt from, a ring of
+    /// `spike_blocks`.
+    recent: [f64; MAX_SPIKE_BLOCKS],
+    recent_next: usize,
+    recent_len: usize,
     /// When the block being measured began, if `begin_block` was called.
     started: Option<Duration>,
     /// Jobs a pool missed in the block being measured.
@@ -333,6 +387,9 @@ impl<C: Clock> Governor<C> {
             budget: f64::INFINITY,
             unit_load: 0.0,
             rising: false,
+            recent: [0.0; MAX_SPIKE_BLOCKS],
+            recent_next: 0,
+            recent_len: 0,
             started: None,
             missed: 0,
             last_load: 0.0,
@@ -344,6 +401,12 @@ impl<C: Clock> Governor<C> {
     /// The configuration, as checked.
     pub fn config(&self) -> GovernorConfig {
         self.config
+    }
+
+    /// The load the governor keeps the rendering at or under, as a
+    /// fraction of the deadline.
+    pub fn target(&self) -> f64 {
+        self.config.target
     }
 
     /// The clock.
@@ -459,6 +522,8 @@ impl<C: Clock> Governor<C> {
         self.budget = self.max;
         self.unit_load = 0.0;
         self.rising = false;
+        self.recent_next = 0;
+        self.recent_len = 0;
         self.started = None;
         self.missed = 0;
         self.last_load = 0.0;
@@ -483,10 +548,11 @@ impl<C: Clock> Governor<C> {
     }
 
     /// Marks the end of a block of `frames` frames in which the instrument
-    /// spent `spent` units: reads the clock once, and works out the next
-    /// budget. Does nothing offline, or if
+    /// spent `spent` units, and was `limited` if it wanted more than its
+    /// budget ([`Allowance::limited`]): reads the clock once, and works out
+    /// the next budget. Does nothing offline, or if
     /// [`begin_block`](Self::begin_block) was not called.
-    pub fn end_block(&mut self, frames: usize, spent: f64) {
+    pub fn end_block(&mut self, frames: usize, spent: f64, limited: bool) {
         if self.offline {
             return;
         }
@@ -494,13 +560,14 @@ impl<C: Clock> Governor<C> {
             return;
         };
         let elapsed = self.clock.now().saturating_sub(started);
-        self.record(elapsed, frames, spent);
+        self.record(elapsed, frames, spent, limited);
     }
 
     /// Works out the next budget from a block the caller timed itself:
-    /// `elapsed` to render `frames` frames, in which the instrument spent
-    /// `spent` units. Does nothing offline, or for a block of no frames.
-    pub fn record(&mut self, elapsed: Duration, frames: usize, spent: f64) {
+    /// `elapsed` to render `frames` frames, as for
+    /// [`end_block`](Self::end_block). Does nothing offline, or for a block
+    /// of no frames.
+    pub fn record(&mut self, elapsed: Duration, frames: usize, spent: f64, limited: bool) {
         let missed = core::mem::take(&mut self.missed);
         if self.offline || frames == 0 {
             return;
@@ -523,39 +590,56 @@ impl<C: Clock> Governor<C> {
         self.stats.over_deadline += u64::from(load > 1.0);
         self.last_load = load;
 
-        let attack = if load > config.ceiling {
-            1.0
-        } else {
-            config.attack
-        };
         let release = coefficient(deadline, config.release);
-        let towards = |from: f64, to: f64| {
+        let towards = |from: f64, to: f64, attack: f64| {
             let amount = if to > from { attack } else { release };
             from + (to - from) * amount
         };
-        self.smoothed_load = towards(self.smoothed_load, load);
+        let attack_for = |load: f64| {
+            if load > config.ceiling {
+                1.0
+            } else {
+                config.attack
+            }
+        };
+        self.smoothed_load = towards(self.smoothed_load, load, attack_for(load));
 
-        let hysteresis = config.hysteresis;
-        let constrained = spent >= self.budget * (1.0 - hysteresis);
-        if spent > 0.0 && (load >= config.learn_above * config.target || constrained) {
-            let per_unit = load / spent;
+        // What the decisions below go by: the block's load, or, for a block
+        // learnt from, the load its units would have had at the lowest cost
+        // per unit of the last few such blocks, so that one block's spike
+        // moves nothing.
+        let mut steady_load = load;
+        if spent > 0.0 && (limited || load >= config.learn_above * config.target) {
+            self.recent[self.recent_next] = load / spent;
+            self.recent_next = (self.recent_next + 1) % config.spike_blocks;
+            self.recent_len = (self.recent_len + 1).min(config.spike_blocks);
+            let per_unit = self.recent[..self.recent_len]
+                .iter()
+                .fold(f64::INFINITY, |low, &x| low.min(x));
+            steady_load = per_unit * spent;
             self.unit_load = if self.unit_load > 0.0 {
-                towards(self.unit_load, per_unit)
+                let bounded = per_unit.min(self.unit_load * config.max_rise);
+                towards(self.unit_load, bounded, attack_for(steady_load))
             } else {
                 per_unit
             };
+        } else if limited && load <= config.target {
+            // Nothing fitted: say the cost is lower, slowly.
+            self.unit_load *= 1.0 - release;
         }
 
+        let hysteresis = config.hysteresis;
+        let over = steady_load > config.target;
         let aim = if self.unit_load > 0.0 {
             self.clamp(config.target * (1.0 - hysteresis) / self.unit_load)
         } else {
             self.max
         };
-        if aim < self.budget && (load > config.target || aim < self.budget * (1.0 - hysteresis)) {
+        if aim < self.budget && (over || aim < self.budget * (1.0 - hysteresis)) {
             self.budget = aim;
             self.rising = false;
             self.stats.cuts += 1;
-        } else if load > config.target || aim <= self.budget {
+        } else if over || aim <= self.budget {
             self.rising = false;
         } else if self.rising || aim > self.budget * (1.0 + hysteresis) {
             let growth = if config.doubling.is_zero() {
@@ -597,11 +681,13 @@ fn coefficient(block: f64, time: Duration) -> f64 {
 /// assert!(allowance.try_take(3.0)); // a cheaper one does
 /// assert_eq!(allowance.take_up_to(4.0), 1.0); // one partial of four
 /// assert_eq!(allowance.spent(), 10.0);
+/// assert!(allowance.limited());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Allowance {
     budget: f64,
     spent: f64,
+    limited: bool,
 }
 
 impl Allowance {
@@ -610,24 +696,42 @@ impl Allowance {
         Allowance {
             budget: if budget.is_nan() { 0.0 } else { budget },
             spent: 0.0,
+            limited: false,
         }
     }
 
     /// Spends `cost` if it fits in what is left, and says whether it did.
+    /// A cost that does not fit marks the allowance [limited](Self::limited).
     pub fn try_take(&mut self, cost: f64) -> bool {
         let fits = cost <= self.remaining();
         if fits {
             self.spent += cost.max(0.0);
+        } else {
+            self.limited = true;
         }
         fits
     }
 
     /// Spends as much of `cost` as is left, in whole units, and returns
-    /// how much it spent.
+    /// how much it spent. Spending less than `cost` marks the allowance
+    /// [limited](Self::limited).
     pub fn take_up_to(&mut self, cost: f64) -> f64 {
         let taken = cost.min(self.remaining().floor()).max(0.0);
         self.spent += taken;
+        self.limited |= taken < cost;
         taken
+    }
+
+    /// Marks the allowance limited: something the instrument wanted was
+    /// left out for want of budget, in a way the allowance did not see.
+    pub fn mark_limited(&mut self) {
+        self.limited = true;
+    }
+
+    /// Whether something was refused or cut short: the instrument wanted
+    /// more than its budget. What to give [`Governor::end_block`].
+    pub fn limited(&self) -> bool {
+        self.limited
     }
 
     /// Spends `cost` whether or not it fits: work that must be done.

@@ -73,7 +73,8 @@ impl Rig {
         let load = (instrument.overhead + instrument.per_unit * spent) * self.factor;
         self.governor.begin_block();
         self.governor.clock_mut().now += Duration::from_secs_f64(load * deadline(frames));
-        self.governor.end_block(frames, spent);
+        self.governor
+            .end_block(frames, spent, instrument.demand > spent);
         (budget, spent, load)
     }
 
@@ -141,11 +142,12 @@ fn a_first_overload_with_nothing_learnt_is_answered_in_one_block() {
 }
 
 #[test]
-fn a_rise_between_the_target_and_the_ceiling_is_answered_within_four_blocks() {
+fn a_rise_between_the_target_and_the_ceiling_is_answered_within_six_blocks() {
     let mut rig = Rig::new(GovernorConfig::default());
     rig.run(OVERLOAD, blocks_in(1.0));
     let settled = rig.run(OVERLOAD, 1)[0].2;
-    // The machine gets 25 % slower: the load lands between target and ceiling.
+    // The machine gets 25 % slower: the load lands between target and
+    // ceiling. Three blocks to believe it, then half the way a block.
     rig.factor = 1.25;
     let blocks = rig.run(OVERLOAD, blocks_in(2.0));
     assert!(blocks[0].2 > TARGET && blocks[0].2 < 0.9, "{}", blocks[0].2);
@@ -153,8 +155,21 @@ fn a_rise_between_the_target_and_the_ceiling_is_answered_within_four_blocks() {
         .iter()
         .position(|&(.., load)| load <= TARGET)
         .unwrap();
-    assert!(under <= 4, "took {under} blocks, settled at {settled}");
+    assert!(under <= 6, "took {under} blocks, settled at {settled}");
     assert!(blocks[under..].iter().all(|&(.., load)| load <= TARGET));
+}
+
+#[test]
+fn believing_every_block_answers_within_four() {
+    let mut rig = Rig::new(GovernorConfig::default().spike_blocks(1));
+    rig.run(OVERLOAD, blocks_in(1.0));
+    rig.factor = 1.25;
+    let blocks = rig.run(OVERLOAD, blocks_in(2.0));
+    let under = blocks
+        .iter()
+        .position(|&(.., load)| load <= TARGET)
+        .unwrap();
+    assert!(under <= 4, "took {under} blocks");
 }
 
 #[test]
@@ -171,18 +186,28 @@ fn a_slow_ramp_of_cost_is_followed_without_passing_the_target() {
     assert!(worst <= TARGET * 1.01, "worst load {worst} on the ramp");
 }
 
-#[test]
-fn recovery_is_monotonic_and_rate_limited() {
-    let config = GovernorConfig::default();
-    let mut rig = Rig::new(config);
-    // A spike: one block takes three times as long.
+/// Settles, then makes `blocks` blocks cost `factor` times as much, and
+/// returns the budgets before and after.
+fn slow_down(rig: &mut Rig, factor: f64, blocks: usize) -> (f64, f64) {
     rig.run(OVERLOAD, blocks_in(1.0));
     let before = rig.governor.budget();
-    rig.factor = 3.0;
-    rig.block(OVERLOAD, FRAMES);
+    rig.factor = factor;
+    rig.run(OVERLOAD, blocks);
     rig.factor = 1.0;
-    let cut = rig.governor.budget();
-    assert!(cut < before / 2.5, "a spike above the ceiling cuts at once");
+    (before, rig.governor.budget())
+}
+
+#[test]
+fn recovery_is_monotonic_and_rate_limited() {
+    // The machine is three times slower for three blocks: long enough to be
+    // believed, answered at once since it is above the ceiling, as far as
+    // one block may raise the estimate (a factor of two).
+    let mut rig = Rig::new(GovernorConfig::default());
+    let (before, cut) = slow_down(&mut rig, 3.0, 3);
+    assert!(
+        cut < before * 0.52 && cut > before * 0.45,
+        "cut from {before} to {cut}"
+    );
 
     // At most doubling every half second, at 128 frames a block.
     let growth = (deadline(FRAMES) / 0.5).exp2();
@@ -207,13 +232,67 @@ fn recovery_is_monotonic_and_rate_limited() {
         );
     }
     // And it gets back to where it was, give or take the hysteresis: the
-    // budget before the spike sat at the top of the band.
+    // budget before sat at the top of the band.
     let end = *budgets.last().unwrap();
     assert!(end >= before * 0.9, "recovered to {end} of {before}");
     // The doubling time bounds it from below: it cannot be back in less.
-    let three_times = (3.0f64).log2() * 0.5;
+    let fastest = (before * 0.9 / cut).log2() * 0.5;
     let back = budgets.iter().position(|&b| b >= before * 0.9).unwrap();
-    assert!(back as f64 * deadline(FRAMES) >= three_times * 0.8);
+    let took = back as f64 * deadline(FRAMES);
+    assert!(took >= fastest, "back in {took} s, faster than {fastest} s");
+    assert!(took <= 3.0, "back in {took} s");
+}
+
+#[test]
+fn a_lone_long_preemption_moves_nothing() {
+    // One block, or two, during which the thread was off the processor
+    // for 20 deadlines: rendering less would not have helped.
+    let mut rig = Rig::new(GovernorConfig::default());
+    for blocks in [1, 2] {
+        let (before, after) = slow_down(&mut rig, 30.0, blocks);
+        assert_eq!(before, after, "{blocks} blocks");
+    }
+    assert!(rig.governor.stats().over_deadline >= 3);
+}
+
+#[test]
+fn a_sustained_slowdown_halves_the_budget_at_most_each_block() {
+    let mut rig = Rig::new(GovernorConfig::default());
+    let (before, after) = slow_down(&mut rig, 30.0, 3);
+    assert!(after >= before * 0.45, "{after} of {before}");
+    let (_, after) = slow_down(&mut rig, 30.0, 5);
+    assert!(after >= before * 0.45 / 8.0 && after < before * 0.2);
+}
+
+#[test]
+fn a_budget_below_the_cheapest_thing_still_recovers() {
+    // With no bound on how fast the estimate may rise, a long slowdown
+    // leaves a budget smaller than the instrument's cheapest voice, 16
+    // units, so it renders nothing; with nothing spent, only its being
+    // limited tells the governor the estimate is too high.
+    let mut rig = Rig::new(GovernorConfig::default().max_rise(f64::INFINITY));
+    rig.run(OVERLOAD, blocks_in(1.0));
+    let before = rig.governor.budget();
+    let lump = |budget: f64| (budget / 16.0).floor() * 16.0;
+    let block = |rig: &mut Rig, factor: f64| {
+        let spent = lump(rig.governor.budget()).min(OVERLOAD.demand);
+        let load = (OVERLOAD.overhead + OVERLOAD.per_unit * spent) * factor;
+        rig.governor.begin_block();
+        rig.governor.clock_mut().now += Duration::from_secs_f64(load * deadline(FRAMES));
+        rig.governor.end_block(FRAMES, spent, true);
+        spent
+    };
+    for _ in 0..3 {
+        block(&mut rig, 300.0);
+    }
+    assert!(rig.governor.budget() < 16.0, "{}", rig.governor.budget());
+    assert_eq!(block(&mut rig, 1.0), 0.0);
+    let mut seconds = 0.0;
+    while rig.governor.budget() < before * 0.9 {
+        block(&mut rig, 1.0);
+        seconds += deadline(FRAMES);
+        assert!(seconds < 10.0, "stuck at {}", rig.governor.budget());
+    }
 }
 
 #[test]
@@ -226,7 +305,9 @@ fn recovery_rate_does_not_depend_on_the_block_size() {
             rig.block(OVERLOAD, frames);
         }
         rig.factor = 3.0;
-        rig.block(OVERLOAD, frames);
+        for _ in 0..3 {
+            rig.block(OVERLOAD, frames);
+        }
         rig.factor = 1.0;
         let cut = rig.governor.budget();
         for _ in 0..(RATE as usize / 2 / frames) {
@@ -255,15 +336,21 @@ impl Noise {
 }
 
 /// Runs `seconds` with each block's cost moved by up to `noise` either way,
-/// after a second to settle, and returns the budgets given.
-fn noisy(noise: f64, seconds: f64) -> Vec<f64> {
-    let mut rig = Rig::new(GovernorConfig::default());
+/// after a second to settle, and returns the budget given and the load of
+/// each block.
+fn noisy(noise: f64, seconds: f64) -> Vec<(f64, f64)> {
+    noisy_with(GovernorConfig::default(), noise, seconds)
+}
+
+fn noisy_with(config: GovernorConfig, noise: f64, seconds: f64) -> Vec<(f64, f64)> {
+    let mut rig = Rig::new(config);
     let mut random = Noise(7);
     let mut run = |rig: &mut Rig, blocks| {
         (0..blocks)
             .map(|_| {
                 rig.factor = 1.0 + noise * random.next();
-                rig.block(OVERLOAD, FRAMES).0
+                let (budget, _, load) = rig.block(OVERLOAD, FRAMES);
+                (budget, load)
             })
             .collect::<Vec<_>>()
     };
@@ -286,44 +373,73 @@ fn reversals(budgets: &[f64]) -> usize {
     count
 }
 
-#[test]
-fn noise_inside_the_hysteresis_moves_nothing() {
-    // ±2 % on every block, inside the band of 5 %.
-    let budgets = noisy(0.02, 10.0);
-    let first = budgets[0];
-    assert!(
-        budgets.iter().all(|&b| b == first),
-        "the budget moved under small noise"
-    );
-}
-
-#[test]
-fn noise_wider_than_the_band_settles_below_its_peaks() {
-    // ±20 % on every block, four times the band, moves nothing either once
-    // settled: the estimate follows the noise's peaks, and the budget sits
-    // where the costliest blocks fit.
-    let budgets = noisy(0.20, 60.0);
-    assert!(budgets.iter().all(|&b| b == budgets[0]));
-    assert!(budgets[0] < noisy(0.02, 1.0)[0] * 0.95);
-}
-
-#[test]
-fn large_noise_moves_the_budget_within_a_stated_bound() {
-    // ±50 % on every block. Measured on this rig: the budget stays between
-    // 3.6 % under and 9.7 % over its mean, and turns round 191 times in a
-    // minute, about three a second, in small steps; the bounds below leave
-    // a little room.
-    let budgets = noisy(0.50, 60.0);
+/// How a noisy minute went: the budget's lowest and highest over its mean,
+/// its turns, and the blocks over the deadline.
+fn spread(run: &[(f64, f64)]) -> (f64, f64, usize, usize) {
+    let budgets: Vec<f64> = run.iter().map(|&(budget, _)| budget).collect();
     let mean = budgets.iter().sum::<f64>() / budgets.len() as f64;
     let (low, high) = budgets.iter().fold((f64::MAX, 0.0f64), |(low, high), &b| {
         (low.min(b), high.max(b))
     });
-    assert!(
-        low >= mean * 0.95 && high <= mean * 1.12,
-        "{low} to {high} around {mean}"
-    );
-    let turns = reversals(&budgets);
+    let late = run.iter().filter(|&&(_, load)| load > 1.0).count();
+    (low / mean, high / mean, reversals(&budgets), late)
+}
+
+#[test]
+fn noise_inside_the_hysteresis_moves_nothing() {
+    // ±2 % and ±5 % on every block, inside the band of 5 %.
+    for noise in [0.02, 0.05] {
+        let run = noisy(noise, 10.0);
+        assert!(
+            run.iter().all(|&(budget, _)| budget == run[0].0),
+            "the budget moved under ±{noise} noise"
+        );
+    }
+}
+
+// The figures below were measured on this rig, over a minute after a
+// second to settle; the bounds leave a little room. In none of them was a
+// block late.
+
+#[test]
+fn moderate_noise_moves_the_budget_within_a_stated_bound() {
+    // ±10 %: the budget stays within 2.5 % under and 4 % over its mean,
+    // and turns round 13 times a minute.
+    let (low, high, turns, late) = spread(&noisy(0.10, 60.0));
+    assert!(low >= 0.95 && high <= 1.05, "{low} to {high}");
+    assert!(turns <= 30, "turned round {turns} times in a minute");
+    assert_eq!(late, 0);
+}
+
+#[test]
+fn large_noise_moves_the_budget_within_a_stated_bound() {
+    // ±50 %, every block a new draw, which is more than a voice's cost
+    // moves on any real machine: the budget stays within 17 % under and
+    // 19 % over its mean, and turns round 516 times a minute, nine a
+    // second, mostly in steps of a fraction of a percent up.
+    let (low, high, turns, late) = spread(&noisy(0.50, 60.0));
+    assert!(low >= 0.8 && high <= 1.22, "{low} to {high}");
+    assert!(turns <= 600, "turned round {turns} times in a minute");
+    assert_eq!(late, 0);
+}
+
+#[test]
+fn believing_every_block_follows_the_noise_peaks() {
+    // With `spike_blocks(1)` the estimate follows the costliest blocks:
+    // ±20 % moves nothing once settled, and the budget sits lower, where
+    // those blocks fit (560 units, against 602 on average by default);
+    // ±50 % stays within 4 % under and 10 % over its mean, turning round
+    // 191 times a minute.
+    let every = GovernorConfig::default().spike_blocks(1);
+    let run = noisy_with(every, 0.20, 60.0);
+    assert!(run.iter().all(|&(budget, _)| budget == run[0].0));
+    let by_default = noisy(0.20, 60.0);
+    let mean = by_default.iter().map(|&(budget, _)| budget).sum::<f64>() / run.len() as f64;
+    assert!(run[0].0 < mean * 0.95, "{} against {mean}", run[0].0);
+    let (low, high, turns, late) = spread(&noisy_with(every, 0.50, 60.0));
+    assert!(low >= 0.95 && high <= 1.12, "{low} to {high}");
     assert!(turns <= 240, "turned round {turns} times in a minute");
+    assert_eq!(late, 0);
 }
 
 #[test]
@@ -343,7 +459,8 @@ fn offline_gives_the_full_budget_and_never_reads_the_clock() {
             assert_eq!(budget, 5_000.0);
         }
         rig.governor.note_missed(3);
-        rig.governor.record(Duration::from_secs(1), FRAMES, 1.0);
+        rig.governor
+            .record(Duration::from_secs(1), FRAMES, 1.0, true);
     }
     assert_eq!(rig.governor.clock().reads, reads, "offline read the clock");
     assert_eq!(rig.governor.stats(), stats, "offline learnt something");
@@ -386,24 +503,36 @@ fn the_budget_stays_within_its_maximum() {
 
 #[test]
 fn missed_jobs_count_as_an_overload() {
-    let mut rig = Rig::new(GovernorConfig::default());
+    // The clock says each block fitted, but the pool dropped jobs.
+    let missing = |rig: &mut Rig| {
+        let budget = rig.governor.budget();
+        rig.governor.begin_block();
+        rig.governor.clock_mut().now += Duration::from_secs_f64(0.5 * deadline(FRAMES));
+        rig.governor.note_missed(2);
+        rig.governor.end_block(FRAMES, budget.floor(), true);
+        assert_eq!(rig.governor.last_load(), 1.0);
+    };
+    // Believing every block, one such block cuts.
+    let mut rig = Rig::new(GovernorConfig::default().spike_blocks(1));
     rig.run(OVERLOAD, blocks_in(1.0));
     let before = rig.governor.budget();
-    // The clock says the block fitted, but the pool dropped jobs.
-    rig.governor.begin_block();
-    rig.governor.clock_mut().now += Duration::from_secs_f64(0.5 * deadline(FRAMES));
-    rig.governor.note_missed(2);
-    rig.governor.end_block(FRAMES, before.floor());
-    assert_eq!(rig.governor.last_load(), 1.0);
+    missing(&mut rig);
     assert_eq!(rig.governor.stats().missed_blocks, 1);
-    assert!(
-        rig.governor.budget() <= before * 0.75,
-        "{} of {before}",
-        rig.governor.budget()
-    );
+    assert!(rig.governor.budget() <= before * 0.75);
     // The count is for one block only.
     rig.block(OVERLOAD, FRAMES);
     assert!(rig.governor.last_load() < 1.0);
+
+    // By default it takes three in a row, like any other load.
+    let mut rig = Rig::new(GovernorConfig::default());
+    rig.run(OVERLOAD, blocks_in(1.0));
+    let before = rig.governor.budget();
+    missing(&mut rig);
+    missing(&mut rig);
+    assert_eq!(rig.governor.budget(), before);
+    missing(&mut rig);
+    assert_eq!(rig.governor.stats().missed_blocks, 3);
+    assert!(rig.governor.budget() <= before * 0.75);
 }
 
 #[test]
@@ -492,8 +621,8 @@ fn nonsense_settings_are_clamped() {
     governor.set_quality_floor(f64::NAN);
     assert_eq!(governor.quality_floor(), 0.0);
     // A block of no frames, and an end without a beginning, are ignored.
-    governor.record(Duration::from_secs(1), 0, 1.0);
-    governor.end_block(128, 1.0);
+    governor.record(Duration::from_secs(1), 0, 1.0, false);
+    governor.end_block(128, 1.0, false);
     assert_eq!(governor.stats().blocks, 0);
 }
 
@@ -506,7 +635,7 @@ fn the_real_clock_reads_forward() {
         sum += f64::from(index).sqrt();
     }
     std::hint::black_box(sum);
-    governor.end_block(FRAMES, 1.0);
+    governor.end_block(FRAMES, 1.0, false);
     assert_eq!(governor.stats().blocks, 1);
     assert!(governor.last_load() >= 0.0);
 }
