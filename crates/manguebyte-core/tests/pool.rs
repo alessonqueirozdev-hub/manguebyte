@@ -114,9 +114,9 @@ fn output_matches_one_thread_bit_for_bit() {
                 let changed = random.below(jobs);
                 let level = random.unit() as f32;
                 let count = random.below(jobs + 1);
-                for index in 0..jobs {
+                for (index, voice) in alone.iter_mut().enumerate() {
                     pool.job_mut(index).unwrap().frames = frames;
-                    alone[index].frames = frames;
+                    voice.frames = frames;
                 }
                 pool.job_mut(changed).unwrap().level = level;
                 alone[changed].level = level;

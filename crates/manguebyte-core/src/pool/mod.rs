@@ -289,9 +289,9 @@ impl<J: Job> RenderPool<J> {
     /// audio thread (in `prepare`): it allocates and starts threads, and
     /// waits until each worker has asked for its priority.
     ///
-    /// A worker the system cannot start is left out; [`workers`]
-    /// (Self::workers) says how many run. On WebAssembly without threads
-    /// there are none.
+    /// A worker the system cannot start is left out;
+    /// [`workers`](Self::workers) says how many run. On WebAssembly
+    /// without threads there are none.
     pub fn new(jobs: Vec<J>, config: PoolConfig) -> RenderPool<J> {
         let done = vec![false; jobs.len()].into_boxed_slice();
         let slots = jobs
@@ -431,8 +431,8 @@ impl<J: Job> RenderPool<J> {
     }
 
     /// A handle through which other threads, such as a host's thread pool,
-    /// can render jobs of the block being run. See [`run_with`]
-    /// (Self::run_with).
+    /// can render jobs of the block being run. See
+    /// [`run_with`](Self::run_with).
     pub fn helper(&self) -> Helper<J> {
         Helper {
             shared: Arc::clone(&self.shared),
