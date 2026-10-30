@@ -555,7 +555,7 @@
 //! |---|---|
 //! | Entry point | `init` once per loaded file, `deinit` once when the last user is gone; files and bundle folders |
 //! | Factory | Plugins listed with bounded text; created by identifier |
-//! | Audio ports | Main input, main output and the first other input as a sidechain; further ports get silence or are discarded. 32-bit float |
+//! | Audio ports | Main input, main output and the first other input as a sidechain; further inputs get silence. Output ports after the main one are read with [`ClapProcessor::process_with_aux`] and switched with `audio-ports-activation` ([`ClapPlugin::set_audio_port_active`]). 32-bit float |
 //! | Note ports | The first note input, in CLAP's own dialect or as MIDI; a port that reads MIDI as MPE is sent plain MIDI |
 //! | Events in | Notes with ids, note expression, parameter values, parameter modulation, MIDI, each on its frame |
 //! | Events out | Note end, parameter values and gestures, notes and MIDI, in a buffer allocated beforehand |

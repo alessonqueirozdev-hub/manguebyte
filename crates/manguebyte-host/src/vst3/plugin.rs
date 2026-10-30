@@ -303,6 +303,9 @@ pub struct Vst3Plugin {
     layout_problem: Option<&'static str>,
     /// Whether the buses are to be read again once the plugin is inactive.
     buses_stale: bool,
+    /// Audio output buses the caller switched on or off itself, by index,
+    /// for the next activation.
+    chosen_outputs: Vec<(usize, bool)>,
     link: Option<Link>,
     /// Parameter values for the plugin's processor that are waiting for it
     /// to be activated, latest last, one per parameter.
@@ -416,6 +419,7 @@ impl Vst3Plugin {
             event_outputs: Vec::new(),
             layout_problem: None,
             buses_stale: false,
+            chosen_outputs: Vec::new(),
             link: None,
             pending: Vec::new(),
             waiting: remarks.into_iter().map(HostEvent::Remark).collect(),
@@ -1192,7 +1196,16 @@ impl Vst3Plugin {
                 } else {
                     index == 0
                 };
-                let wanted = used || self.buses_mut(media, direction)[index].default_active;
+                let mut wanted = used || self.buses_mut(media, direction)[index].default_active;
+                let audio_outputs =
+                    media == MediaTypes_::kAudio && direction == BusDirections_::kOutput;
+                if let Some(&(_, chosen)) = self
+                    .chosen_outputs
+                    .iter()
+                    .find(|&&(at, _)| audio_outputs && at == index)
+                {
+                    wanted = chosen;
+                }
                 // SAFETY: the plugin's initialised, inactive component, on
                 // its main thread, with an index below the bus count it
                 // reported.
@@ -1215,6 +1228,32 @@ impl Vst3Plugin {
                 }
             }
         }
+    }
+
+    /// Has audio output bus `index` switched on or off from the next
+    /// [`activate`](Self::activate), in place of what `activate` would
+    /// choose: an auxiliary output the plugin wants off from the start can
+    /// be heard, and one it wants on can be spared. A bus that is off is
+    /// silent in
+    /// [`Vst3Processor::process_with_aux`](super::Vst3Processor::process_with_aux).
+    ///
+    /// # Errors
+    ///
+    /// - [`Vst3Error::AlreadyActive`] while the plugin is active.
+    /// - [`Vst3Error::InvalidArgument`] for a bus the plugin lacks, and for
+    ///   the main output, which this host always reads.
+    pub fn set_audio_output_active(&mut self, index: usize, active: bool) -> Result<(), Vst3Error> {
+        if self.shared.active() {
+            return Err(Vst3Error::AlreadyActive);
+        }
+        if index == 0 || index >= self.audio_outputs.len() {
+            return Err(Vst3Error::InvalidArgument(
+                "no such auxiliary audio output bus",
+            ));
+        }
+        self.chosen_outputs.retain(|&(at, _)| at != index);
+        self.chosen_outputs.push((index, active));
+        Ok(())
     }
 
     /// The list of buses of one kind and direction.

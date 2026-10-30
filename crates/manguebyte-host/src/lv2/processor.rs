@@ -154,7 +154,13 @@ impl Lv2Processor {
             inputs: (0..layout.main_inputs.len() + layout.sidechain_inputs.len())
                 .map(|_| buffer())
                 .collect(),
-            outputs: (0..layout.main_outputs.len() + layout.other_outputs.len())
+            outputs: (0..layout.main_outputs.len()
+                + layout.other_outputs.len()
+                + layout
+                    .aux_outputs
+                    .iter()
+                    .map(|bus| bus.ports.len())
+                    .sum::<usize>())
                 .map(|_| buffer())
                 .collect(),
             cv: (0..layout.cv.len()).map(|_| buffer()).collect(),
@@ -195,6 +201,25 @@ impl Lv2Processor {
             .processor_alive
             .store(true, Ordering::Release);
         processor
+    }
+
+    /// Processes one block as [`process_with`](Processor::process_with)
+    /// does, and copies what the plugin wrote on its auxiliary output buses,
+    /// those of [`Lv2Plugin::aux_outputs`](super::Lv2Plugin::aux_outputs),
+    /// into `aux`: one buffer per bus, in their order.
+    ///
+    /// Each buffer gets as many channels as both it and its bus have, on
+    /// the frames of `buffer`; anything else in it is left as it was. A bus
+    /// without a buffer is not copied, and one switched off is silent.
+    /// Real-time safe.
+    pub fn process_with_aux(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
+        let _quiet = NoDenormals::new();
+        self.run(buffer, context, aux);
     }
 
     /// The sample rate the plugin runs at.
@@ -241,9 +266,25 @@ impl Lv2Processor {
             for (&port, buffer) in audio_in.zip(&mut self.inputs) {
                 connect(handle, port, buffer.as_mut_ptr().cast());
             }
-            let audio_out = layout.main_outputs.iter().chain(&layout.other_outputs);
-            for (&port, buffer) in audio_out.zip(&mut self.outputs) {
-                connect(handle, port, buffer.as_mut_ptr().cast());
+            // An auxiliary bus switched off is left unconnected.
+            let audio_out = layout
+                .main_outputs
+                .iter()
+                .chain(&layout.other_outputs)
+                .map(|&port| (port, true))
+                .chain(
+                    layout
+                        .aux_outputs
+                        .iter()
+                        .flat_map(|bus| bus.ports.iter().map(|&port| (port, bus.connected))),
+                );
+            for ((port, connected), buffer) in audio_out.zip(&mut self.outputs) {
+                let data = if connected {
+                    buffer.as_mut_ptr().cast()
+                } else {
+                    std::ptr::null_mut()
+                };
+                connect(handle, port, data);
             }
             for (&port, buffer) in layout.cv.iter().zip(&mut self.cv) {
                 connect(handle, port, buffer.as_mut_ptr().cast());
@@ -362,12 +403,20 @@ impl Lv2Processor {
         }
     }
 
-    fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    fn run(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
         self.sent.clear();
         self.take_from_main();
         let events = context.events.as_slice();
         if self.wrong_rate {
             buffer.clear();
+            for bus in aux.iter_mut() {
+                bus.clear();
+            }
             self.keep(events);
             self.shared.failed_blocks.fetch_add(1, Ordering::Relaxed);
             self.shared.wrong_rate.store(true, Ordering::Relaxed);
@@ -434,6 +483,7 @@ impl Lv2Processor {
             }
             self.read_outputs(start, frames);
             self.store(buffer, start, frames);
+            self.store_aux(aux, start, frames);
 
             start = end;
             if start < total {
@@ -513,6 +563,27 @@ impl Lv2Processor {
         }
     }
 
+    /// Copies the plugin's auxiliary output buses, in their order, into
+    /// frames `start..start + frames` of `aux`, one buffer per bus; a bus
+    /// switched off is silent. Channels a buffer has and its bus lacks, and
+    /// frames past a buffer's end, are left as they were.
+    fn store_aux(&self, aux: &mut [AudioBuffer<f32>], start: usize, frames: usize) {
+        let mut first = self.layout.main_outputs.len() + self.layout.other_outputs.len();
+        for (bus, target) in self.layout.aux_outputs.iter().zip(aux.iter_mut()) {
+            let outputs = &self.outputs[first..first + bus.ports.len()];
+            first += bus.ports.len();
+            for (channel, target) in target.iter_channels_mut().enumerate() {
+                let Some(target) = target.get_mut(start..start + frames) else {
+                    continue;
+                };
+                match outputs.get(channel).filter(|_| bus.connected) {
+                    Some(output) => target.copy_from_slice(&output[..frames]),
+                    None => target.fill(0.0),
+                }
+            }
+        }
+    }
+
     /// Copies the plugin's main outputs into frames `start..start + frames`
     /// of the caller's block.
     fn store(&self, buffer: &mut AudioBuffer<f32>, start: usize, frames: usize) {
@@ -541,8 +612,7 @@ impl Processor<f32> for Lv2Processor {
     }
 
     fn process_with(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
-        let _quiet = NoDenormals::new();
-        self.run(buffer, context);
+        self.process_with_aux(buffer, context, &mut []);
     }
 
     /// Deactivates and activates the instance, which clears its voices and

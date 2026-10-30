@@ -248,6 +248,30 @@ impl Vst3Processor {
         &self.output
     }
 
+    /// Processes one block as [`process_with`](Processor::process_with)
+    /// does, and copies what the plugin wrote on its other audio output
+    /// buses, those after the main one in
+    /// [`Vst3Plugin::audio_outputs`](super::Vst3Plugin::audio_outputs),
+    /// into `aux`: one buffer per bus, in their order.
+    ///
+    /// Each buffer gets as many channels as both it and its bus have, on
+    /// the frames of `buffer`; anything else in it is left as it was. A
+    /// bus without a buffer is not copied, and one that is switched off
+    /// (see [`Vst3Plugin::set_audio_output_active`](super::Vst3Plugin::set_audio_output_active))
+    /// is silent. Every buffer is silent for a block the plugin failed or
+    /// was not called for. Real-time safe.
+    pub fn process_with_aux(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
+        // Numbers too small to hear are zero while the plugin runs, whether
+        // or not the plugin thought of it.
+        let _quiet = NoDenormals::new();
+        self.run(buffer, context, aux);
+    }
+
     /// How the last block went. Real-time safe.
     pub fn status(&self) -> ProcessStatus {
         self.status
@@ -432,22 +456,36 @@ impl Vst3Processor {
 
     /// Ends a block the plugin cannot be called for: silence at the output,
     /// the reason on record, and the block's events kept for later.
-    fn skip(&mut self, buffer: &mut AudioBuffer<f32>, events: &[Event], failure: ProcessFailure) {
+    fn skip(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        aux: &mut [AudioBuffer<f32>],
+        events: &[Event],
+        failure: ProcessFailure,
+    ) {
+        for bus in aux.iter_mut() {
+            bus.clear();
+        }
         buffer.clear();
         self.keep(events);
         self.fail(failure);
         self.note_lost();
     }
 
-    fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    fn run(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
         self.output.clear();
         let events = context.events.as_slice();
         if self.wrong_rate {
-            self.skip(buffer, events, ProcessFailure::SampleRateMismatch);
+            self.skip(buffer, aux, events, ProcessFailure::SampleRateMismatch);
             return;
         }
         if !self.start() {
-            self.skip(buffer, events, ProcessFailure::StartRefused);
+            self.skip(buffer, aux, events, ProcessFailure::StartRefused);
             return;
         }
 
@@ -486,6 +524,7 @@ impl Vst3Processor {
             let mut vst_context = process_context(&transport, self.sample_rate, self.continuous);
             let good = self.call(frames, &raw mut vst_context);
             self.io.store(buffer, start, frames, good);
+            self.io.store_aux(aux, start, frames, good);
             self.collect(start as u32, frames as u32);
             failed |= !good;
 
@@ -622,10 +661,7 @@ impl Processor<f32> for Vst3Processor {
     }
 
     fn process_with(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
-        // Numbers too small to hear are zero while the plugin runs, whether
-        // or not the plugin thought of it.
-        let _quiet = NoDenormals::new();
-        self.run(buffer, context);
+        self.process_with_aux(buffer, context, &mut []);
     }
 
     /// Asks the plugin to clear its tails and voices, and forgets the notes
@@ -792,6 +828,27 @@ impl Io {
             match source.filter(|source| channel < source.num_channels()) {
                 Some(source) => target.copy_from_slice(source.channel(channel)),
                 None => target.fill(0.0),
+            }
+        }
+    }
+
+    /// Copies the plugin's audio output buses after the main one, in their
+    /// order, into frames `start..start + frames` of `aux`, one buffer per
+    /// bus, or silence if `keep` is false. A bus with no buffer in `aux` is
+    /// not copied; channels a buffer has and its bus lacks, and frames past
+    /// a buffer's end, are left out the same way. A bus that is switched
+    /// off has silent memory here, which is what it gives.
+    fn store_aux(&mut self, aux: &mut [AudioBuffer<f32>], start: usize, frames: usize, keep: bool) {
+        let end = start + frames;
+        for (source, target) in self.outputs.iter().skip(1).zip(aux.iter_mut()) {
+            for (channel, target) in target.iter_channels_mut().enumerate() {
+                let Some(target) = target.get_mut(start..end) else {
+                    continue;
+                };
+                match (keep && channel < source.num_channels()).then(|| source.channel(channel)) {
+                    Some(samples) => target.copy_from_slice(samples),
+                    None => target.fill(0.0),
+                }
             }
         }
     }

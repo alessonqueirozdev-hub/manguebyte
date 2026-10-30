@@ -9,6 +9,9 @@ use std::sync::atomic::Ordering;
 
 use clap_sys::events::{clap_event_header, clap_output_events};
 use clap_sys::ext::audio_ports::*;
+use clap_sys::ext::audio_ports_activation::{
+    CLAP_EXT_AUDIO_PORTS_ACTIVATION, clap_plugin_audio_ports_activation,
+};
 use clap_sys::ext::gui::{CLAP_EXT_GUI, clap_plugin_gui};
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_latency};
 use clap_sys::ext::log::*;
@@ -344,6 +347,7 @@ struct Extensions {
     note_ports: Option<clap_plugin_note_ports>,
     latency: Option<clap_plugin_latency>,
     tail: Option<clap_plugin_tail>,
+    ports_activation: Option<clap_plugin_audio_ports_activation>,
     /// Only kept if it has every function an embedded editor needs.
     gui: Option<clap_plugin_gui>,
     timer: Option<clap_plugin_timer_support>,
@@ -508,6 +512,7 @@ impl ClapPlugin {
             note_ports: this.extension(CLAP_EXT_NOTE_PORTS),
             latency: this.extension(CLAP_EXT_LATENCY),
             tail: this.extension(CLAP_EXT_TAIL),
+            ports_activation: this.extension(CLAP_EXT_AUDIO_PORTS_ACTIVATION),
             gui: this.extension(CLAP_EXT_GUI).filter(editor::is_complete),
             timer: this.extension(CLAP_EXT_TIMER_SUPPORT),
             fd: this.extension(CLAP_EXT_POSIX_FD_SUPPORT),
@@ -1046,6 +1051,58 @@ impl ClapPlugin {
     /// whether a plugin copes. Zero means no limit, which is the default.
     pub fn set_stream_chunk(&mut self, bytes: usize) {
         self.stream_chunk = if bytes == 0 { usize::MAX } else { bytes };
+    }
+
+    // --- Switching ports ---------------------------------------------------
+
+    /// Switches audio port `index` of one direction on or off through the
+    /// plugin's `audio-ports-activation`, as a host does with a port
+    /// nothing is routed to or from. Every port starts on. A port that is
+    /// off is still given memory, which the plugin is expected to leave
+    /// or fill with silence; it may skip the work of filling it.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClapError::AlreadyActive`] while the plugin is active: this host
+    ///   switches ports only while it is not.
+    /// - [`ClapError::Unsupported`] if the plugin has no
+    ///   `audio-ports-activation`.
+    /// - [`ClapError::InvalidArgument`] for a port the plugin lacks, or one
+    ///   it refuses to switch.
+    pub fn set_audio_port_active(
+        &mut self,
+        is_input: bool,
+        index: usize,
+        active: bool,
+    ) -> Result<(), ClapError> {
+        if self.shared.active() {
+            return Err(ClapError::AlreadyActive);
+        }
+        let Some(set_active) = self
+            .extensions
+            .ports_activation
+            .and_then(|ext| ext.set_active)
+        else {
+            return Err(ClapError::Unsupported("audio-ports-activation"));
+        };
+        let ports = if is_input {
+            &self.audio_inputs
+        } else {
+            &self.audio_outputs
+        };
+        if index >= ports.len() {
+            return Err(ClapError::InvalidArgument("no such audio port"));
+        }
+        // SAFETY: the plugin is initialised and inactive, and this is its
+        // main thread, where the extension allows the call. The sample size
+        // is the one this host processes in.
+        if unsafe { set_active(self.plugin, is_input, index as u32, active, 32) } {
+            Ok(())
+        } else {
+            Err(ClapError::InvalidArgument(
+                "the plugin refused to switch the port",
+            ))
+        }
     }
 
     // --- Latency and tail ------------------------------------------------

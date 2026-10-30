@@ -29,6 +29,7 @@ const ATOM: &str = "http://lv2plug.in/ns/ext/atom#";
 const PPROPS: &str = "http://lv2plug.in/ns/ext/port-props#";
 const UNITS: &str = "http://lv2plug.in/ns/extensions/units#";
 const RSZ: &str = "http://lv2plug.in/ns/ext/resize-port#";
+const PG: &str = "http://lv2plug.in/ns/ext/port-groups#";
 const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
 const TIME_POSITION: &str = "http://lv2plug.in/ns/ext/time#Position";
 
@@ -63,6 +64,9 @@ pub struct Lv2PluginInfo {
     pub extension_data: Vec<String>,
     /// The ports, in index order: port `i` is `ports[i]`.
     pub ports: Vec<PortInfo>,
+    /// The port groups the ports name, each once, in the order of the
+    /// first port in each.
+    pub port_groups: Vec<PortGroup>,
 }
 
 impl Lv2PluginInfo {
@@ -160,6 +164,23 @@ pub struct PortInfo {
     pub scale_points: Vec<(f32, String)>,
     /// `pprops:rangeSteps`: how many values the port takes, if given.
     pub range_steps: Option<u32>,
+    /// `pg:group`: the IRI of the port group it belongs to, such as one
+    /// output bus of several, if it says. See
+    /// [`Lv2PluginInfo::port_groups`].
+    pub group: Option<String>,
+}
+
+/// A group of ports that belong together, such as the channels of one
+/// output bus (the port-groups extension, `pg:Group`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortGroup {
+    /// Its IRI, which [`PortInfo::group`] names.
+    pub iri: String,
+    /// Its `lv2:symbol`, or empty if it gives none.
+    pub symbol: String,
+    /// The name shown to people: its `rdfs:label`, or else its `lv2:name`,
+    /// or else its symbol.
+    pub name: String,
 }
 
 impl PortInfo {
@@ -437,6 +458,23 @@ fn describe(graph: &Graph, plugin: &Term, folder: &Path) -> Result<Lv2PluginInfo
         return Err(malformed(&uri, "two ports have the same symbol"));
     }
 
+    let mut port_groups: Vec<PortGroup> = Vec::new();
+    for iri in ports.iter().filter_map(|port| port.group.as_deref()) {
+        if port_groups.iter().any(|group| group.iri == iri) {
+            continue;
+        }
+        let node = Graph::iri(iri);
+        let symbol = text(graph, &node, &format!("{LV2}symbol")).unwrap_or_default();
+        let name = text(graph, &node, &format!("{RDFS}label"))
+            .or_else(|| text(graph, &node, &format!("{LV2}name")))
+            .unwrap_or_else(|| symbol.clone());
+        port_groups.push(PortGroup {
+            iri: iri.to_owned(),
+            symbol,
+            name,
+        });
+    }
+
     Ok(Lv2PluginInfo {
         name,
         vendor,
@@ -448,6 +486,7 @@ fn describe(graph: &Graph, plugin: &Term, folder: &Path) -> Result<Lv2PluginInfo
         optional_features: iris(graph, plugin, &format!("{LV2}optionalFeature")),
         extension_data: iris(graph, plugin, &format!("{LV2}extensionData")),
         ports,
+        port_groups,
         uri,
     })
 }
@@ -588,6 +627,10 @@ fn describe_port(graph: &Graph, node: &Term, uri: &str) -> Result<PortInfo, Lv2E
         unit,
         scale_points,
         range_steps,
+        group: graph
+            .object(node, &format!("{PG}group"))
+            .and_then(Term::iri)
+            .map(str::to_owned),
     })
 }
 

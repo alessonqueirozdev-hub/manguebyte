@@ -111,6 +111,18 @@ pub(crate) fn find_param(slots: &[ParamSlot], id: ParamId) -> Option<&ParamSlot>
         .and_then(|at| slots.get(at))
 }
 
+/// One audio output bus besides the main one.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AuxBus {
+    /// The group's IRI, or `None` for ports in no group.
+    pub(crate) group: Option<String>,
+    /// Its ports, in index order.
+    pub(crate) ports: Vec<u32>,
+    /// Whether its ports are connected; a bus whose ports may all be left
+    /// unconnected can be switched off.
+    pub(crate) connected: bool,
+}
+
 /// Which port does what, worked out once from the description.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Layout {
@@ -119,6 +131,10 @@ pub(crate) struct Layout {
     pub(crate) sidechain_inputs: Vec<u32>,
     pub(crate) main_outputs: Vec<u32>,
     pub(crate) other_outputs: Vec<u32>,
+    /// The audio output buses besides the main one: audio outputs in a
+    /// port group other than the first output's, one bus per group, in
+    /// the order the groups first appear.
+    pub(crate) aux_outputs: Vec<AuxBus>,
     pub(crate) cv: Vec<u32>,
     /// Every control port, inputs and outputs, with its starting value.
     pub(crate) controls: Vec<(u32, f32)>,
@@ -144,6 +160,9 @@ impl Layout {
             atom_bytes: ATOM_BYTES,
             ..Self::default()
         };
+        // The group of the first audio output, whose ports are the main
+        // output.
+        let mut main_group: Option<Option<&str>> = None;
         for port in &info.ports {
             let index = port.index;
             match (port.kind, port.direction) {
@@ -157,8 +176,27 @@ impl Layout {
                 (PortKind::Audio, Direction::Output) => {
                     if port.properties.side_chain {
                         layout.other_outputs.push(index);
-                    } else {
+                    } else if main_group.get_or_insert(port.group.as_deref())
+                        == &port.group.as_deref()
+                    {
                         layout.main_outputs.push(index);
+                    } else {
+                        let bus = match layout
+                            .aux_outputs
+                            .iter_mut()
+                            .position(|bus| bus.group == port.group)
+                        {
+                            Some(found) => found,
+                            None => {
+                                layout.aux_outputs.push(AuxBus {
+                                    group: port.group.clone(),
+                                    ports: Vec::new(),
+                                    connected: true,
+                                });
+                                layout.aux_outputs.len() - 1
+                            }
+                        };
+                        layout.aux_outputs[bus].ports.push(index);
                     }
                 }
                 (PortKind::Cv, _) => layout.cv.push(index),
@@ -493,6 +531,62 @@ impl Lv2Plugin {
             self.layout.sidechain_inputs.len(),
             self.layout.main_outputs.len(),
         )
+    }
+
+    /// The plugin's audio output buses besides the main one, in their
+    /// order, each as its name and channel count: the audio outputs in a
+    /// port group other than the first output's, one bus per group. Their
+    /// output is read with
+    /// [`Lv2Processor::process_with_aux`](super::Lv2Processor::process_with_aux).
+    pub fn aux_outputs(&self) -> Vec<(String, usize)> {
+        let info = &self.info;
+        self.layout
+            .aux_outputs
+            .iter()
+            .map(|bus| {
+                let named = bus.group.as_deref().and_then(|iri| {
+                    info.port_groups
+                        .iter()
+                        .find(|group| group.iri == iri)
+                        .map(|group| group.name.clone())
+                });
+                (named.unwrap_or_default(), bus.ports.len())
+            })
+            .collect()
+    }
+
+    /// Switches auxiliary output bus `index` of
+    /// [`aux_outputs`](Self::aux_outputs) on or off from the next
+    /// activation: off, its ports are left unconnected, which tells the
+    /// plugin nobody listens to them, and the bus is silent. Every bus
+    /// starts on.
+    ///
+    /// # Errors
+    ///
+    /// - [`Lv2Error::AlreadyActive`] while the plugin is active.
+    /// - [`Lv2Error::InvalidArgument`] for a bus the plugin lacks.
+    /// - [`Lv2Error::Unsupported`] to switch off a bus with a port the
+    ///   plugin does not allow to be left unconnected.
+    pub fn set_aux_output_active(&mut self, index: usize, active: bool) -> Result<(), Lv2Error> {
+        if self.is_active() {
+            return Err(Lv2Error::AlreadyActive);
+        }
+        let Some(bus) = self.layout.aux_outputs.get(index) else {
+            return Err(Lv2Error::InvalidArgument("no such auxiliary output bus"));
+        };
+        let optional = bus.ports.iter().all(|&port| {
+            self.info
+                .ports
+                .get(port as usize)
+                .is_some_and(|port| port.properties.connection_optional)
+        });
+        if !active && !optional {
+            return Err(Lv2Error::Unsupported(
+                "a port of the bus may not be left unconnected",
+            ));
+        }
+        Arc::make_mut(&mut self.layout).aux_outputs[index].connected = active;
+        Ok(())
     }
 
     /// Whether the plugin takes MIDI: it has an atom input that says it

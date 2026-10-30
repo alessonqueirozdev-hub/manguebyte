@@ -106,7 +106,7 @@ use std::path::PathBuf;
 use manguebyte_core::ParamId;
 
 pub use description::{
-    Direction, Lv2PluginInfo, MAX_PLUGINS_PER_BUNDLE, MAX_PORTS, PortInfo, PortKind,
+    Direction, Lv2PluginInfo, MAX_PLUGINS_PER_BUNDLE, MAX_PORTS, PortGroup, PortInfo, PortKind,
     PortProperties, read_bundle,
 };
 pub use library::{Lv2Entry, Lv2Library};
