@@ -1585,7 +1585,7 @@ fn a_partial_bank_does_not_use_the_heap() {
 /// The effects a synth workstation needs, at their heaviest settings.
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {
-    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, Tremolo};
+    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, RingCarrier, RingModulator, Tremolo};
 
     check(
         "Bitcrusher",
@@ -1609,6 +1609,14 @@ fn the_workstation_effects_do_not_use_the_heap() {
             .with_shape(LfoShape::Square),
     );
 
+    check(
+        "RingModulator",
+        RingModulator::<f32>::new()
+            .with_frequency_hz(777.0)
+            .with_stereo_phase(0.25)
+            .with_mix(0.6),
+    );
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1626,11 +1634,31 @@ fn the_workstation_effects_do_not_use_the_heap() {
             transport.advance(frames, SPEC.sample_rate);
         }
     });
+
+    // Multiplied by a sidechain, in pieces.
+    let mut key = AudioBuffer::<f32>::new(1, 256);
+    key.channel_mut(0).fill(0.5);
+    let context = ProcessContext::new(&events, &transport).with_sidechain(&key);
+    let mut ring = RingModulator::<f32>::new().with_carrier(RingCarrier::Sidechain);
+    ring.prepare(&SPEC);
+    assert_no_heap_use("ring modulation by a sidechain", || {
+        for frames in [256, 1, 100] {
+            buffer.set_num_frames(frames);
+            ring.process_with(&mut buffer, &context);
+            split_at_events_with(
+                &mut ring,
+                &mut buffer,
+                &context,
+                |_, _| {},
+                |ring, piece, piece_context| ring.process_with(piece, piece_context),
+            );
+        }
+    });
 }
 
 #[test]
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
-    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, Tremolo};
+    use manguebyte_dsp::{AutoPan, Bitcrusher, LfoShape, RingModulator, Tremolo};
 
     let mut crusher = Bitcrusher::<f32>::new();
     crusher.prepare(&SPEC);
@@ -1638,6 +1666,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     tremolo.prepare(&SPEC);
     let mut pan = AutoPan::<f32>::new();
     pan.prepare(&SPEC);
+    let mut ring = RingModulator::<f32>::new();
+    ring.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1679,6 +1709,11 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
             });
             pan.set_smoothing_ms(turn);
             pan.process(&mut buffer);
+
+            ring.set_frequency_hz(100.0 * turn);
+            ring.set_mix(turn / 14.0);
+            ring.set_stereo_phase(turn / 14.0);
+            ring.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));

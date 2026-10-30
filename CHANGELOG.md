@@ -117,6 +117,12 @@ break the API.
   lands on the beat whatever the block size, and the equal-power auto-pan
   keeps the power of the two sides. `Lfo::phase` and `Lfo::shape` read the
   LFO's place in its cycle and its shape.
+- `RingModulator`: the input multiplied by a cosine carrier of a frequency
+  in hertz, with a stereo phase offset, or by the sidechain of
+  `process_with` (`RingCarrier`), with a mix. Measured by FFT: a tone comes
+  out at exactly the sum and the difference of the two frequencies, each
+  at half its level, and every other bin, the tone's and the carrier's
+  among them, is empty to within 1e-9.
 
 ### Formats
 
