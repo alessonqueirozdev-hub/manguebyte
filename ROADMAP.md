@@ -238,6 +238,14 @@ Everything a standalone audio application needs, short of a user interface.
   the system grants it. Run and measured on Windows only; the CLAP
   `thread-pool` extension and macOS audio workgroups are not done
   (TECH_DEBT item 107)
+- 🚧 Graceful degradation under overload (`manguebyte_core::governor`,
+  ADR 0018): a governor that measures each block against its deadline and
+  gives the instrument a budget in cost units for the next one, off when
+  rendering offline, with a quality floor. Done and tested on a fake clock;
+  on the real clock only on one loaded laptop at normal thread priority.
+  No instrument of the framework spends a budget yet, the wrappers do not
+  turn it off for a host's offline render, and the render pool's report
+  is passed by hand (TECH_DEBT item 111)
 - ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 
@@ -501,6 +509,9 @@ designed for Rust can do better:
 - Compile-time checked real-time safety for user code
 - Processing graphs that the compiler can inline end to end
 - Deterministic offline rendering for testing audio code in CI
+- Instruments that render less, rather than glitch, when the machine
+  cannot keep up: a budget learnt from each block's time
+  (`core::governor`, ADR 0018), where JUCE only measures the load
 - First-class CLAP support, including its newer extensions
 - A plugin API in which sharing state between threads incorrectly does not
   compile

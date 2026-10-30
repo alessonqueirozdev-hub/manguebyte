@@ -94,6 +94,41 @@ Windows, `SCHED_FIFO` elsewhere), reporting what they got. A pool of zero
 workers renders everything on the calling thread.
 `cargo run --release -p manguebyte-core --example pool_speed` measures
 speed-up, block times and wake latency.
+## A budget for the processor
+
+`manguebyte_core::governor::Governor` keeps an instrument that has been
+asked for too much inside the block's deadline, by telling it how much
+to render. Each block it measures the rendering time against the
+deadline and gives a budget for the next block in cost units the
+instrument defines (a partial, a voice at a tier); the instrument spends
+it in its own order of priority and reports what it spent and whether it
+wanted more. The governor learns the cost of a unit on this machine, now,
+answers a slowdown that lasts three blocks, ignores a lone preemption,
+and recovers by at most a doubling every half second. Offline it always
+gives the full budget and never reads the clock; a quality floor and a
+maximum bound it. ADR 0018 explains the design.
+
+```rust
+use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+
+let mut governor = Governor::new(GovernorConfig::default());
+governor.set_sample_rate(48_000.0);
+// In each audio callback:
+let mut allowance = Allowance::new(governor.budget());
+governor.begin_block();
+for _voice in 0..64 {
+    if allowance.try_take(32.0) {
+        // Render the voice at its full tier.
+    } else if allowance.try_take(8.0) {
+        // Render it at its cheap tier.
+    } // Otherwise steal it for this block.
+}
+governor.end_block(128, allowance.spent(), allowance.limited());
+```
+
+`cargo run --release -p manguebyte-dsp --example governor_organ` plays a
+synthetic organ of `PartialBank` pipes asked for twice what the machine
+fits, on the real clock, and prints the loads it measured.
 
 ## The binary's own file
 

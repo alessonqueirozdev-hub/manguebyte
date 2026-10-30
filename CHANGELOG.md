@@ -34,6 +34,33 @@ break the API.
   48 kHz: 6.47 ms a block on one thread, 3.55 ms on two (1.83 times
   faster), 1.64 ms on four (3.94), no gain from eight; a parked worker
   starts about 20 to 30 µs after `run` begins (TECH_DEBT item 107).
+- `governor`: keeps an instrument inside the block's deadline by giving it
+  a budget to spend (ADR 0018). `Governor` measures each block's rendering
+  time against its deadline (frames over the sample rate; two reads of the
+  monotonic clock a block, through `Instant`) and gives a budget for the
+  next block in abstract cost units, which the instrument spends in its
+  own order of priority: demote voices, drop partials, steal voices. The
+  instrument states relative costs; the governor learns the load of one
+  unit, from the lowest of the last three blocks (`spike_blocks`), so a
+  lone preemption moves nothing, with a fast attack (half the way a block,
+  all of it above the ceiling, at most twice the estimate a block), a slow
+  release, a 5 % hysteresis, and a recovery of at most a doubling every
+  half second; it settles at the target (70 % unless set) less the
+  hysteresis. Offline it gives the maximum budget and never reads the
+  clock; `set_quality_floor` and `set_max_budget` bound it; `note_missed`
+  counts a render pool's missed jobs as a full deadline's load.
+  `Allowance` spends a budget tier by tier and says whether the
+  instrument was limited. Nothing allocates or locks. Tested on a fake
+  clock: a step to twice what fits brought under the target within three
+  blocks and kept there, a rise between target and ceiling answered within
+  six, a slow ramp never more than 1 % over the target, recovery monotonic
+  and never faster than the doubling rate whatever the block size, lone
+  preemptions ignored, a budget below the cheapest voice recovering, noise
+  inside the band moving nothing and larger noise within stated bounds,
+  offline, floor, maximum, missed jobs; no heap use under the counting
+  allocator. `manguebyte-dsp`'s `examples/governor_organ.rs` plays a
+  `PartialBank` organ asked for twice what fits, on the real clock
+  (TECH_DEBT item 111).
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
   `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,
   `peak`, `dot`, `sum_of_squares`, `complex_multiply_add`,
