@@ -363,8 +363,12 @@ our own, and nothing claimed before its test exists.
   them equal whole ones, motion turns off with the system's setting.
   Not worked by hand in a host yet ([TECH_DEBT](docs/TECH_DEBT.md) item 99)
 - 🚧 Accessibility: every widget describes itself (the method has no
-  default) and the test harness finds widgets only that way; platform
-  adapters not started
+  default) and the test harness finds widgets only that way; each frame
+  lists the widgets whose description changed (`Frame::access`), such as
+  names that follow the language through `TextSource`, tested headless
+  with a language switch across eight widgets
+  ([TECH_DEBT](docs/TECH_DEBT.md) item 102); platform adapters not
+  started, so nothing reads that list yet
 - 🚧 High-DPI: scale flows from the host through the contract to the
   renderer, and a Win32 window takes the system's scale when the host gives
   none; a change of scale while a window is open, such as moving it to a

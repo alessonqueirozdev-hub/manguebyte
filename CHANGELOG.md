@@ -748,7 +748,43 @@ equal to a whole one bit for bit at 1x, 1.25x and 2x
 - Limits: TECH_DEBT 98. The spectrum view and the EQ editor are not
   started.
 
+Texts that change while the window is open, such as names that follow
+the language the person picks:
+
+- `TextSource`: a text a widget shows or is named by, fixed or read once
+  per frame from a source of anything that reads as text (`String`,
+  `&'static str`, `Arc<str>`) or from a `State<String>`, which is read
+  again only when its version moves and kept shared, not copied. It is
+  read once when made, and polling makes no heap call unless the source
+  does: a closure that builds a `String` builds one every frame, one that
+  returns a `&'static str` from a table does not.
+- `Knob`, `Slider`, `Toggle` and `ComboBox` gain `label_source`; a new
+  name lays out again, draws the control again and is told to assistive
+  technology. `list_view_named`, `zone_map_named`, `waveform_view_named`
+  and `piano_keyboard_named` take the accessible name as a `TextSource`;
+  those names are not drawn, so a new one only reaches assistive
+  technology. `Label::dynamic` takes any source that reads as text, and
+  `Label::from_source` is new. The fixed-string calls are unchanged.
+- `UpdateCx::request_access_update`: a widget says its description
+  changed in a way a screen reader should hear about. `Frame::access`
+  and `Root::access_updates` list those widgets for the frame, in tree
+  order, for a window layer to send to the platform (no platform adapter
+  exists yet, TECH_DEBT 40); `testing::Harness::access_updates` shows
+  them. Labels and the widgets above report their changed names.
+- Tested headless (`tests/dynamic_text.rs`, `motion.rs`, `realtime.rs`):
+  a screen of all eight widgets named from one table in English,
+  Portuguese and Spanish renames every one in the frame after the switch,
+  for the scene and for the screen reader, draws again only the four that
+  draw their names, and draws nothing in the frame after; a name that
+  grows lays out again without overlapping its neighbours at 1x, 1.25x
+  and 2x; steady frames before and after a switch make no heap call; the
+  screen is idle before and after a switch. Limits: TECH_DEBT 102.
+
 ### Breaking
+
+- In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
+  must name it. A `Label::from_state` whose state is set to the same
+  text again no longer lays out again.
 
 - In `manguebyte-ui`'s theme (ADR 0011): `Palette`'s fields are new.
   The old `text_muted` is `text_secondary` (and `text_muted` is now a

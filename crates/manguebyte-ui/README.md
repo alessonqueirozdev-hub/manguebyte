@@ -44,8 +44,16 @@ Documentation: <https://docs.rs/manguebyte-ui>
 - Parameters read from their atomics each frame and changed only through
   gestures; no listeners anywhere: lists, scroll views and text fields
   share their state with the application through values it polls.
-- An accessibility description every widget must give, and a test harness
-  (`testing::Harness`) that finds widgets only through it.
+- Texts that change while the window is open (`TextSource`): labels, the
+  names of knobs, sliders, switches and combo boxes (`label_source`) and
+  of lists, zone maps, waveform views and keyboards (`list_view_named`
+  and the like) can follow a source or a `State`, the language for
+  instance, polled once a frame with no heap call unless the source makes
+  one. A new name lays out and draws again only what shows it.
+- An accessibility description every widget must give, a list of the
+  widgets whose description changed in each frame (`Frame::access`) for
+  a window layer to pass on, and a test harness (`testing::Harness`) that
+  finds widgets only through it.
 
 `examples/views_demo.rs` drives two lists with drag between them inside a
 scroll view, with no window, and writes what it drew to PNG files:
