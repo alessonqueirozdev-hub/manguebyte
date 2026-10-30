@@ -290,7 +290,7 @@ fn a_bundle_loads_through_the_one_interface_and_its_state_travels() {
 #[ignore = "needs the example units installed, as the macOS AU job does"]
 fn the_scanner_lists_the_installed_bundles() {
     let candidates = find(&standard_paths(Format::Au), &[Format::Au]);
-    for name in ["Mangue Pluck", "Mangue Duck"] {
+    for name in ["Mangue Pluck", "Mangue Duck", "Mangue Divisions"] {
         assert!(
             candidates.iter().any(|found| found.path == installed(name)),
             "{name} is found by its name"
@@ -315,7 +315,7 @@ fn the_scanner_lists_the_installed_bundles() {
         .map(|plugin| plugin.entry.name.as_str())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["Mangue Duck", "Mangue Pluck"]);
+    assert_eq!(names, ["Mangue Divisions", "Mangue Duck", "Mangue Pluck"]);
     // The second scan is the cache's.
     let again = scanner.scan(&mine, &mut cache);
     assert_eq!((again.cached, again.scanned), (mine.len(), 0));
@@ -353,7 +353,9 @@ fn install_fake(name: &str, subtype: &str, body: &str) -> Fake {
     let _ = std::fs::remove_dir_all(&bundle);
     let executable = bundle.join("Contents/MacOS").join(name);
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    let source = common::scratch_folder(&format!("au-fake-{name}")).join("fake.rs");
+    // Held until rustc is done: the folder goes when the value does.
+    let scratch = common::scratch_folder(&format!("au-fake-{name}"));
+    let source = scratch.join("fake.rs");
     std::fs::write(
         &source,
         format!(
