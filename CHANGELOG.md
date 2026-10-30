@@ -97,6 +97,15 @@ break the API.
   1.25 times faster in `f32` and 1.5 in `f64`; a 63-tap direct FIR is as
   fast as before in `f32` and 1.1 times faster in `f64`. The output is
   still the same however the audio is cut into blocks.
+- `Bitcrusher`: bit depth as a continuous value (a step of `2^(1 - bits)`),
+  optional triangular dither, and sample-rate reduction by a zero-order
+  hold of any factor from 1 to 64, whole or not, with an optional
+  eighth-order elliptic anti-aliasing low-pass. Measured: every output is a
+  whole number of steps within half a step of its input; the noise of
+  rounding a sine matches `step² / 12` to 0.25 dB (0.5 dB at 6 bits) and
+  dithered `step² / 4`; dither carries a tone of 0.3 steps through at its
+  level to 5%; with anti-aliasing, a 10 kHz tone held at a quarter of
+  48 kHz folds back more than 85 dB quieter than without.
 
 ### Formats
 

@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod biquad;
+mod bitcrusher;
 mod cascade;
 mod chorus;
 mod context;
@@ -70,6 +71,7 @@ pub mod wavetable;
 pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
+pub use bitcrusher::Bitcrusher;
 pub use cascade::{BiquadCascade, IirFilter};
 pub use chorus::Chorus;
 pub use context::{ProcessContext, Transport, split_at_events, split_at_events_with};

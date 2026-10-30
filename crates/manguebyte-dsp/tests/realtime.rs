@@ -1581,3 +1581,43 @@ fn a_partial_bank_does_not_use_the_heap() {
     });
     assert!(left.iter().all(|x| x.is_finite()));
 }
+
+/// The effects a synth workstation needs, at their heaviest settings.
+#[test]
+fn the_workstation_effects_do_not_use_the_heap() {
+    use manguebyte_dsp::Bitcrusher;
+
+    check(
+        "Bitcrusher",
+        Bitcrusher::<f32>::new()
+            .with_bits(3.5)
+            .with_downsample(5.5)
+            .with_dither(true)
+            .with_anti_alias(true)
+            .with_mix(0.7),
+    );
+}
+
+#[test]
+fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
+    use manguebyte_dsp::Bitcrusher;
+
+    let mut crusher = Bitcrusher::<f32>::new();
+    crusher.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("changing workstation effect settings", || {
+        for step in 0..14u8 {
+            let turn = f64::from(step);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            crusher.set_bits(1.0 + 2.0 * turn);
+            crusher.set_downsample(1.0 + 4.5 * turn);
+            crusher.set_dither(step % 2 == 0);
+            crusher.set_anti_alias(step % 3 != 0);
+            crusher.set_mix(turn / 14.0);
+            crusher.process(&mut buffer);
+        }
+    });
+    assert!(all_finite(&buffer));
+}
