@@ -63,11 +63,13 @@ pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
 pub use envelope::{EnvelopeEditor, envelope};
 pub use image::{Fit, ImageView, image};
-pub use keyboard::{KeyRange, KeyboardState, NoteEvent, PianoKeyboard, piano_keyboard};
+pub use keyboard::{
+    KeyRange, KeyboardState, NoteEvent, PianoKeyboard, piano_keyboard, piano_keyboard_named,
+};
 pub use keys::{KeySpan, is_black, note_name, note_name_portuguese};
 pub use knob::{Knob, knob};
 pub use label::{Label, label};
-pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view};
+pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view, list_view_named};
 pub use meter::{Meter, meter};
 pub use pill::{Pill, pill};
 pub use scroll_view::{ScrollView, ScrollViewBuilder, scroll_view};
@@ -77,16 +79,18 @@ pub use toggle::{Toggle, toggle};
 pub use wave_data::{MAX_ZERO_SEARCH, Waveform};
 pub use waveform::{
     MAX_PIXELS_PER_FRAME, Marker, MarkerKind, MarkerOrder, WaveformEvent, WaveformState,
-    WaveformView, ZOOM_STEP, waveform_view,
+    WaveformView, ZOOM_STEP, waveform_view, waveform_view_named,
 };
-pub use zone_map::{Zone, ZoneEvent, ZoneMap, ZoneMapState, zone_map};
+pub use zone_map::{Zone, ZoneEvent, ZoneMap, ZoneMapState, zone_map, zone_map_named};
 
 use manguebyte_gfx::{
     Color, Extend, LinearGradient, Point, Rect, RoundedRect, Scene, Shadow, Shape, Stop, Stroke,
     TextLayout, TextStyle,
 };
 
+use crate::source::TextSource;
 use crate::theme::Theme;
+use crate::widget::UpdateCx;
 
 /// Space every control keeps free inside its rectangle, in logical pixels:
 /// room for the focus ring, and for the rasteriser's tolerance, so that
@@ -125,6 +129,11 @@ impl<K: PartialEq> Cached<K> {
         Cached { entry: None }
     }
 
+    /// Forgets the layout kept, because what it shows changed.
+    pub(crate) fn clear(&mut self) {
+        self.entry = None;
+    }
+
     /// The layout for `width` and `key`, made by `make` if the one kept was
     /// made for something else.
     pub(crate) fn get(
@@ -142,6 +151,31 @@ impl<K: PartialEq> Cached<K> {
         }
         let (_, _, layout) = self.entry.get_or_insert_with(|| (width, key, make()));
         layout
+    }
+}
+
+/// Reads a control's own name again, if it was given one. When it changed
+/// the layout kept of it is forgotten, the interface is laid out again
+/// (the control's width depends on its name) and the control drawn
+/// again, and assistive technology is told.
+pub(crate) fn poll_label(
+    label: &mut Option<TextSource>,
+    name: &mut Cached<TextStyle>,
+    cx: &mut UpdateCx<'_>,
+) {
+    if label.as_mut().is_some_and(TextSource::poll) {
+        name.clear();
+        cx.request_layout();
+        cx.request_access_update();
+    }
+}
+
+/// Reads a widget's name for assistive technology again; when it changed,
+/// assistive technology is told. Nothing is drawn: the widget does not
+/// show its name.
+pub(crate) fn poll_name(name: &mut TextSource, cx: &mut UpdateCx<'_>) {
+    if name.poll() {
+        cx.request_access_update();
     }
 }
 

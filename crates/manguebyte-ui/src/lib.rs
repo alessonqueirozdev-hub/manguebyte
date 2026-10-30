@@ -216,10 +216,11 @@ pub use widgets::{
     ListState, ListView, MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder,
     Meter, Pill, RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform,
     WaveformEvent, WaveformState, WaveformView, ZOOM_STEP, canvas, combo, image, knob, label,
-    list_view, meter, pill, scroll_view, slider, text_field, toggle, waveform_view,
+    list_view, list_view_named, meter, pill, scroll_view, slider, text_field, toggle,
+    waveform_view, waveform_view_named,
 };
 pub use widgets::{
     EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,
     ZoneMap, ZoneMapState, envelope, is_black, note_name, note_name_portuguese, piano_keyboard,
-    zone_map,
+    piano_keyboard_named, zone_map, zone_map_named,
 };

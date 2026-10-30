@@ -10,6 +10,7 @@ use crate::access::{AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
 use crate::motion::{Animated, Lerp};
 use crate::param::{ParamBinding, ParamHandle};
+use crate::source::TextSource;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// Space between the switch and its name.
@@ -32,7 +33,7 @@ const INSET: f32 = 3.0;
 /// transport. Tab and [`Action::Focus`] give it the focus.
 pub struct Toggle {
     binding: ParamBinding,
-    label: Option<String>,
+    label: Option<TextSource>,
     name: Cached<TextStyle>,
     /// Where the thumb is, from 0 (off) to 1 (on), moving on a spring;
     /// `None` until the first frame puts it where the value is.
@@ -86,13 +87,23 @@ impl Toggle {
     /// parameter's name.
     #[must_use]
     pub fn label(mut self, text: impl Into<String>) -> Toggle {
+        self.label = Some(TextSource::fixed(text));
+        self
+    }
+
+    /// The same switch named by `text`, fixed or read once per frame (see
+    /// [`TextSource`]): a switch whose name follows the language, say. A
+    /// new name lays the interface out again, draws the switch again and
+    /// is sent to assistive technology.
+    #[must_use]
+    pub fn label_source(mut self, text: impl Into<TextSource>) -> Toggle {
         self.label = Some(text.into());
         self
     }
 
     fn name_text(&self) -> &str {
         match &self.label {
-            Some(label) => label,
+            Some(label) => label.as_str(),
             None => self.binding.handle().name(),
         }
     }
@@ -135,6 +146,7 @@ impl Widget for Toggle {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_label(&mut self.label, &mut self.name, cx);
         if self.binding.poll(cx.now()) {
             cx.request_paint();
         }
@@ -200,7 +212,7 @@ impl Widget for Toggle {
 
         let text_x = pill.right() + SPACE;
         let room = (rect.right() - MARGIN - text_x).max(0.0);
-        let (label, binding) = (self.label.as_deref(), &self.binding);
+        let (label, binding) = (self.label.as_ref().map(TextSource::as_str), &self.binding);
         let name = self.name.get(room, style, || {
             let text = label.unwrap_or_else(|| binding.handle().name());
             line(text, &style, room)

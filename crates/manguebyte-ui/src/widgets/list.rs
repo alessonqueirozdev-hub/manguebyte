@@ -12,6 +12,7 @@ use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
 use crate::motion::{Animated, Lerp};
 use crate::scroll::{AUTO_STEP, Bars, Geometry, auto_scroll, follow_bars, paint_bars, snap};
+use crate::source::TextSource;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 use crate::widgets::{focus_ring, line};
@@ -476,7 +477,7 @@ struct Press {
 ///
 /// What happens is polled from its [`ListState`]: no callback runs.
 pub struct ListView {
-    name: String,
+    name: TextSource,
     data: Box<dyn ListData>,
     state: ListState,
     bars: Bars,
@@ -544,6 +545,18 @@ pub struct ListView {
 /// assert!(matches!(state.take_events().as_slice(), [ListEvent::Activated(11)]));
 /// ```
 pub fn list_view(name: impl Into<String>, data: impl ListData, state: ListState) -> ListView {
+    list_view_named(TextSource::fixed(name), data, state)
+}
+
+/// A list as [`list_view`] makes, named by `name`, fixed or read once per
+/// frame (see [`TextSource`]): a list whose name follows the language,
+/// say. Its name is not drawn: a new one is only sent to assistive
+/// technology.
+pub fn list_view_named(
+    name: impl Into<TextSource>,
+    data: impl ListData,
+    state: ListState,
+) -> ListView {
     ListView {
         name: name.into(),
         data: Box::new(data),
@@ -966,6 +979,7 @@ impl Widget for ListView {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_name(&mut self.name, cx);
         let len = self.data.len();
         let revision = self.data.revision();
         if len != self.len {
@@ -1287,7 +1301,7 @@ impl Widget for ListView {
 impl std::fmt::Debug for ListView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ListView")
-            .field("name", &self.name)
+            .field("name", &self.name.as_str())
             .field("len", &self.len)
             .field("state", &self.state)
             .finish_non_exhaustive()

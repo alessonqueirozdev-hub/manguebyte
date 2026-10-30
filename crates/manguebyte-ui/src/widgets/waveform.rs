@@ -13,6 +13,7 @@ use super::{focus_ring, hline, line, line_height, snap_px, value_style, vline};
 use crate::access::{AccessItem, AccessNode, AccessRange, Action, Actions, Role, selection_color};
 use crate::event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
 use crate::motion::Lerp;
+use crate::source::TextSource;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -641,7 +642,7 @@ fn frame_text(wave: Option<&Waveform>, frame: u64) -> String {
 /// says what is shown, and each marker a [`Role::Slider`] whose value is
 /// its place in seconds and frames, which can be raised, lowered and set.
 pub struct WaveformView {
-    name: String,
+    name: TextSource,
     state: WaveformState,
     version: Option<u64>,
     press: Option<Press>,
@@ -676,6 +677,14 @@ pub struct WaveformView {
 /// assert_eq!(state.marker(WaveformState::START).map(|m| m.frame), Some(481));
 /// ```
 pub fn waveform_view(name: impl Into<String>, state: WaveformState) -> WaveformView {
+    waveform_view_named(TextSource::fixed(name), state)
+}
+
+/// A view as [`waveform_view`] makes, named by `name`, fixed or read once
+/// per frame (see [`TextSource`]): a view whose name follows the language,
+/// say. Its name is not drawn: a new one is only sent to assistive
+/// technology.
+pub fn waveform_view_named(name: impl Into<TextSource>, state: WaveformState) -> WaveformView {
     WaveformView {
         name: name.into(),
         state,
@@ -1110,6 +1119,7 @@ impl Widget for WaveformView {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_name(&mut self.name, cx);
         let version = self.state.version();
         if self.version != Some(version) {
             self.version = Some(version);
@@ -1397,7 +1407,7 @@ impl Widget for WaveformView {
 impl std::fmt::Debug for WaveformView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WaveformView")
-            .field("name", &self.name)
+            .field("name", &self.name.as_str())
             .field("state", &self.state)
             .finish_non_exhaustive()
     }

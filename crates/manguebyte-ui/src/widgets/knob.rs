@@ -15,6 +15,7 @@ use crate::access::{AccessNode, Action, Role};
 use crate::event::{Event, Handled};
 use crate::motion::Lerp;
 use crate::param::ParamHandle;
+use crate::source::TextSource;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -60,7 +61,7 @@ const SWEEP: f32 = 1.5 * PI;
 /// value read at that moment.
 pub struct Knob {
     adjust: Adjust,
-    label: Option<String>,
+    label: Option<TextSource>,
     name: Cached<TextStyle>,
     /// Made for the value shown, as bits, whether it is a value sent, and
     /// the style.
@@ -117,12 +118,22 @@ impl Knob {
     /// assistive technology, instead of the parameter's name.
     #[must_use]
     pub fn label(mut self, text: impl Into<String>) -> Knob {
+        self.label = Some(TextSource::fixed(text));
+        self
+    }
+
+    /// The same knob named by `text`, fixed or read once per frame (see
+    /// [`TextSource`]): a knob whose name follows the language, say. A
+    /// new name lays the interface out again, draws the knob again and
+    /// is sent to assistive technology.
+    #[must_use]
+    pub fn label_source(mut self, text: impl Into<TextSource>) -> Knob {
         self.label = Some(text.into());
         self
     }
 
     fn name_text(&self) -> &str {
-        name_of(self.label.as_deref(), &self.adjust)
+        name_of(self.label.as_ref().map(TextSource::as_str), &self.adjust)
     }
 }
 
@@ -160,6 +171,7 @@ impl Widget for Knob {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_label(&mut self.label, &mut self.name, cx);
         if self.adjust.binding.poll(cx.now()) {
             cx.request_paint();
         }
@@ -195,7 +207,7 @@ impl Widget for Knob {
             );
         }
 
-        let (label, adjust) = (self.label.as_deref(), &self.adjust);
+        let (label, adjust) = (self.label.as_ref().map(TextSource::as_str), &self.adjust);
         let name = self.name.get(width, name_style, || {
             line(name_of(label, adjust), &name_style, width)
         });

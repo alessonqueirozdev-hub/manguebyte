@@ -11,6 +11,7 @@ use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Button, DropData, Event, Handled, Key, KeyEvent, Modifiers};
 use crate::motion::{Animated, Lerp};
+use crate::source::TextSource;
 use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
@@ -381,7 +382,7 @@ fn files(payload: &DragPayload) -> Option<Vec<String>> {
 /// zone a [`Role::ListItem`] whose value gives its keys, velocities, root
 /// and overlaps, which can be pressed to select it.
 pub struct ZoneMap {
-    name: String,
+    name: TextSource,
     span: KeySpan,
     state: ZoneMapState,
     takes: Takes,
@@ -419,6 +420,15 @@ pub struct ZoneMap {
 /// assert!(matches!(state.take_events().as_slice(), [ZoneEvent::Edited(ids)] if ids == &[1]));
 /// ```
 pub fn zone_map(name: impl Into<String>, span: KeySpan, state: ZoneMapState) -> ZoneMap {
+    zone_map_named(TextSource::fixed(name), span, state)
+}
+
+/// A map as [`zone_map`] makes, named by `name`, fixed or read once per
+/// frame (see [`TextSource`]): a map whose name follows the language, say.
+/// Its name is not drawn: a new one is only sent to assistive technology.
+/// The names of notes in its zones' descriptions come from
+/// [`note_names`](ZoneMap::note_names), as for any map.
+pub fn zone_map_named(name: impl Into<TextSource>, span: KeySpan, state: ZoneMapState) -> ZoneMap {
     ZoneMap {
         name: name.into(),
         span,
@@ -1097,6 +1107,7 @@ impl Widget for ZoneMap {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_name(&mut self.name, cx);
         let version = self.state.version();
         if self.version != Some(version) {
             self.version = Some(version);
@@ -1454,7 +1465,7 @@ impl Widget for ZoneMap {
 impl std::fmt::Debug for ZoneMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoneMap")
-            .field("name", &self.name)
+            .field("name", &self.name.as_str())
             .field("span", &self.span)
             .field("state", &self.state)
             .finish_non_exhaustive()

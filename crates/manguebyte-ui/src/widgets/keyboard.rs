@@ -11,6 +11,7 @@ use super::{device_px, focus_ring, glow_fill, line, snap_px, value_style, vertic
 use crate::access::{AccessItem, AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
 use crate::motion::{Animated, Lerp};
+use crate::source::TextSource;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// How tall the strip along the top that shows key ranges is, in logical
@@ -262,7 +263,7 @@ type Names = Box<dyn Fn(u8) -> String>;
 /// is down, sounding, and in or the root of a range, and which can be
 /// pressed to hold it down and pressed again to let it go.
 pub struct PianoKeyboard {
-    name: String,
+    name: TextSource,
     span: KeySpan,
     state: KeyboardState,
     names: Names,
@@ -313,6 +314,19 @@ pub struct PianoKeyboard {
 /// ```
 pub fn piano_keyboard(
     name: impl Into<String>,
+    span: KeySpan,
+    state: KeyboardState,
+) -> PianoKeyboard {
+    piano_keyboard_named(TextSource::fixed(name), span, state)
+}
+
+/// A keyboard as [`piano_keyboard`] makes, named by `name`, fixed or read
+/// once per frame (see [`TextSource`]): a keyboard whose name follows the
+/// language, say. Its name is not drawn: a new one is only sent to
+/// assistive technology. The names of its keys come from
+/// [`note_names`](PianoKeyboard::note_names), as for any keyboard.
+pub fn piano_keyboard_named(
+    name: impl Into<TextSource>,
     span: KeySpan,
     state: KeyboardState,
 ) -> PianoKeyboard {
@@ -635,6 +649,7 @@ impl Widget for PianoKeyboard {
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_name(&mut self.name, cx);
         let version = self.state.version();
         if self.version != Some(version) {
             self.version = Some(version);
@@ -947,7 +962,7 @@ impl Drop for PianoKeyboard {
 impl std::fmt::Debug for PianoKeyboard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PianoKeyboard")
-            .field("name", &self.name)
+            .field("name", &self.name.as_str())
             .field("span", &self.span)
             .field("state", &self.state)
             .finish_non_exhaustive()
