@@ -9,8 +9,8 @@
 //! that definition. The sums keep the running sums of the definition, one
 //! per lane, so they too give the definition's result.
 
-use super::Peak;
-use super::scalar::{self, SQUARE_LANES};
+use super::scalar::{self, PARTIAL_FRAMES, PARTIAL_LANES, SQUARE_LANES};
+use super::{Partials, Peak};
 use crate::Sample;
 
 /// A vector register and the operations the kernels need on it.
@@ -186,6 +186,166 @@ pub(super) unsafe fn scale_ramp<V: Vector>(
         }
     }
     scalar::scale_ramp(&mut dst[body..], start, step, body);
+}
+
+/// The ramp of [`scale_ramp`], applied to `src` and added to `dst`.
+#[inline(always)]
+pub(super) unsafe fn add_scaled_ramp<V: Vector>(
+    dst: &mut [V::T],
+    src: &[V::T],
+    start: V::T,
+    step: V::T,
+    exact: usize,
+) {
+    let limit = dst.len().min(exact);
+    let body = limit - limit % V::LANES;
+    let (d, s) = (dst.as_mut_ptr(), src.as_ptr());
+    let mut first = [V::T::ZERO; MAX_LANES];
+    for (k, value) in first.iter_mut().enumerate().take(V::LANES) {
+        *value = scalar::index(k);
+    }
+    // SAFETY: as in `scale_ramp`; `src` is as long as `dst`.
+    unsafe {
+        let mut index = V::load(first.as_ptr());
+        let advance = V::splat(scalar::index(V::LANES));
+        let (start_v, step_v) = (V::splat(start), V::splat(step));
+        let mut i = 0;
+        while i < body {
+            let gain = V::add(start_v, V::mul(step_v, index));
+            let product = V::mul(V::load(s.add(i)), gain);
+            V::store(d.add(i), V::add(V::load(d.add(i)), product));
+            index = V::add(index, advance);
+            i += V::LANES;
+        }
+    }
+    scalar::add_scaled_ramp(&mut dst[body..], &src[body..], start, step, body);
+}
+
+#[inline(always)]
+pub(super) unsafe fn add_product<V: Vector>(dst: &mut [V::T], a: &[V::T], b: &[V::T]) {
+    let body = dst.len() - dst.len() % V::LANES;
+    let (d, pa, pb) = (dst.as_mut_ptr(), a.as_ptr(), b.as_ptr());
+    // SAFETY: as in `copy_scaled`; `a` and `b` are as long as `dst`.
+    unsafe {
+        let mut i = 0;
+        while i < body {
+            let product = V::mul(V::load(pa.add(i)), V::load(pb.add(i)));
+            V::store(d.add(i), V::add(V::load(d.add(i)), product));
+            i += V::LANES;
+        }
+    }
+    scalar::add_product(&mut dst[body..], &a[body..], &b[body..]);
+}
+
+/// The bank of partials with each lane of a register one partial: the
+/// registers of a group of [`PARTIAL_LANES`] partials are its running sums,
+/// lane for lane, and every lane does what the definition does to its
+/// partial, operation for operation. `x * c - y * s` is worked out as
+/// `x * c + y * -s`, which is the same number.
+#[inline(always)]
+pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+) {
+    let regs = PARTIAL_LANES / V::LANES;
+    debug_assert!(regs <= MAX_REGS && regs * V::LANES == PARTIAL_LANES);
+    let count = partials.len();
+    let body = count - count % PARTIAL_LANES;
+    if body > 0 {
+        let mut sums_left = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
+        let mut sums_right = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
+        let (cos, sin, gain) = (
+            partials.cos.as_mut_ptr(),
+            partials.sin.as_mut_ptr(),
+            partials.gain.as_mut_ptr(),
+        );
+        let (cos_step, sin_step, gain_step) = (
+            partials.cos_step.as_ptr(),
+            partials.sin_step.as_ptr(),
+            partials.gain_step.as_ptr(),
+        );
+        let (left_gain, right_gain) = (partials.left_gain.as_ptr(), partials.right_gain.as_ptr());
+        let (sl, sr) = (sums_left.as_mut_ptr(), sums_right.as_mut_ptr());
+        let mut start = 0;
+        while start < left.len() {
+            let frames = (left.len() - start).min(PARTIAL_FRAMES);
+            sums_left[..frames * PARTIAL_LANES].fill(0.0);
+            sums_right[..frames * PARTIAL_LANES].fill(0.0);
+            // SAFETY: partial `group + r * LANES` and the `LANES` after it
+            // are below `body`, inside every slice of `partials`, which
+            // have the same length; the sums read and written are below
+            // `frames * PARTIAL_LANES`, inside the arrays. The caller knows
+            // the processor has the instructions.
+            unsafe {
+                let zero = V::splat(0.0);
+                let flip = V::splat(-0.0);
+                let mut group = 0;
+                while group < body {
+                    let mut x = [zero; MAX_REGS];
+                    let mut y = [zero; MAX_REGS];
+                    let mut g = [zero; MAX_REGS];
+                    let mut c = [zero; MAX_REGS];
+                    let mut s = [zero; MAX_REGS];
+                    let mut minus_s = [zero; MAX_REGS];
+                    let mut step = [zero; MAX_REGS];
+                    let mut to_left = [zero; MAX_REGS];
+                    let mut to_right = [zero; MAX_REGS];
+                    for r in 0..regs {
+                        let at = group + r * V::LANES;
+                        x[r] = V::load(cos.add(at));
+                        y[r] = V::load(sin.add(at));
+                        g[r] = V::load(gain.add(at));
+                        c[r] = V::load(cos_step.add(at));
+                        s[r] = V::load(sin_step.add(at));
+                        minus_s[r] = V::xor(s[r], flip);
+                        step[r] = V::load(gain_step.add(at));
+                        to_left[r] = V::load(left_gain.add(at));
+                        to_right[r] = V::load(right_gain.add(at));
+                    }
+                    for t in 0..frames {
+                        let (row_left, row_right) =
+                            (sl.add(t * PARTIAL_LANES), sr.add(t * PARTIAL_LANES));
+                        for r in 0..regs {
+                            g[r] = V::add(g[r], step[r]);
+                            let v = V::mul(g[r], y[r]);
+                            let at_left = row_left.add(r * V::LANES);
+                            V::store(at_left, V::add(V::load(at_left), V::mul(v, to_left[r])));
+                            let at_right = row_right.add(r * V::LANES);
+                            V::store(at_right, V::add(V::load(at_right), V::mul(v, to_right[r])));
+                            let next_x = V::add(V::mul(x[r], c[r]), V::mul(y[r], minus_s[r]));
+                            let next_y = V::add(V::mul(x[r], s[r]), V::mul(y[r], c[r]));
+                            x[r] = next_x;
+                            y[r] = next_y;
+                        }
+                    }
+                    for r in 0..regs {
+                        let at = group + r * V::LANES;
+                        V::store(cos.add(at), x[r]);
+                        V::store(sin.add(at), y[r]);
+                        V::store(gain.add(at), g[r]);
+                    }
+                    group += PARTIAL_LANES;
+                }
+                for t in 0..frames {
+                    let (row_left, row_right) =
+                        (sl.add(t * PARTIAL_LANES), sr.add(t * PARTIAL_LANES));
+                    let mut sums_l = [zero; MAX_REGS];
+                    let mut sums_r = [zero; MAX_REGS];
+                    for r in 0..regs {
+                        sums_l[r] = V::load(row_left.add(r * V::LANES));
+                        sums_r[r] = V::load(row_right.add(r * V::LANES));
+                    }
+                    left[start + t] += reduce_registers::<V>(sums_l, regs);
+                    right[start + t] += reduce_registers::<V>(sums_r, regs);
+                }
+            }
+            start += frames;
+        }
+    }
+    for i in body..count {
+        scalar::add_partial_in_order(left, right, partials, i);
+    }
 }
 
 #[inline(always)]
@@ -404,6 +564,41 @@ macro_rules! entry_points {
             (left: slice_mut, right: slice_mut, src: slice) -> unit);
         entry_points!(@pair $feature, complex_multiply_add, complex_multiply_add_f32,
             complex_multiply_add_f64, $f32, $f64, (sum: slice_mut, a: slice, b: slice) -> unit);
+        entry_points!(@pair $feature, add_product, add_product_f32, add_product_f64, $f32, $f64,
+            (dst: slice_mut, a: slice, b: slice) -> unit);
+
+        #[target_feature(enable = $feature)]
+        pub(in $crate::vector) unsafe fn add_scaled_ramp_f32(
+            dst: &mut [f32],
+            src: &[f32],
+            start: f32,
+            step: f32,
+        ) {
+            // SAFETY: the caller knows the processor has the feature.
+            // Indices are exact in `f32` up to 2^24.
+            unsafe { generic::add_scaled_ramp::<$f32>(dst, src, start, step, 1 << 24) }
+        }
+
+        #[target_feature(enable = $feature)]
+        pub(in $crate::vector) unsafe fn add_scaled_ramp_f64(
+            dst: &mut [f64],
+            src: &[f64],
+            start: f64,
+            step: f64,
+        ) {
+            // SAFETY: as above; every index is exact in `f64`.
+            unsafe { generic::add_scaled_ramp::<$f64>(dst, src, start, step, usize::MAX) }
+        }
+
+        #[target_feature(enable = $feature)]
+        pub(in $crate::vector) unsafe fn add_partials(
+            left: &mut [f32],
+            right: &mut [f32],
+            partials: &mut $crate::vector::Partials<'_>,
+        ) {
+            // SAFETY: the caller knows the processor has the feature.
+            unsafe { generic::add_partials::<$f32>(left, right, partials) }
+        }
 
         #[target_feature(enable = $feature)]
         pub(in $crate::vector) unsafe fn scale_ramp_f32(dst: &mut [f32], start: f32, step: f32) {

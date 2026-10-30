@@ -2,8 +2,9 @@
 //!
 //! These are the loops audio code runs most: scaling, adding and mixing
 //! blocks, gain ramps, peaks, sums of squares, dot products for filters,
-//! the complex products of a convolution, stereo interleaving and the
-//! conversions between integer samples and `f32`. Each one has a plain
+//! the complex products of a convolution, a bank of sine partials for
+//! additive synthesis, stereo interleaving and the conversions between
+//! integer samples and `f32`. Each one has a plain
 //! scalar version, which is its definition, and versions that use the
 //! vector instructions of the processor it runs on:
 //!
@@ -31,8 +32,9 @@
 //! # Results are the same on every backend
 //!
 //! - **Element-wise operations** ([`scale`], [`copy_scaled`], [`add`],
-//!   [`add_scaled`], [`multiply`], [`scale_ramp`],
-//!   [`complex_multiply_add`], the stereo (de)interleaving and every
+//!   [`add_scaled`], [`multiply`], [`scale_ramp`], [`add_scaled_ramp`],
+//!   [`add_product`], [`complex_multiply_add`], the stereo
+//!   (de)interleaving and every
 //!   conversion) do exactly what their scalar definition does to each
 //!   element, in the same order: a product and then a sum, never a fused
 //!   multiply-add, which rounds once instead of twice. Their results are
@@ -53,6 +55,12 @@
 //!   is given, not on where a block starts in memory. It is not the same
 //!   as adding the elements one after another from the first; it is
 //!   usually closer to the exact sum.
+//! - **[`add_partials`]** works out every partial's samples, phasor and
+//!   gain exactly as its definition does, one lane of a register per
+//!   partial, and adds the samples of a frame in the same kind of fixed
+//!   order: 16 running sums, then pairs, then the rest. Its output is the
+//!   same on every backend too. The function says how far that order can
+//!   take the result from adding the partials one after another.
 //!
 //! ```
 //! use manguebyte_core::vector;
@@ -350,6 +358,63 @@ impl<T: Sample> Peak<T> {
     }
 }
 
+/// A bank of sine partials, one element of each slice per partial, for
+/// [`Backend::add_partials`]. Every slice has the same length.
+///
+/// A partial is a point `(cos, sin)` on the unit circle turned each frame
+/// by the rotation `(cos_step, sin_step)`, which is `(cos w, sin w)` for a
+/// partial of `w` radians per frame, under a gain that grows by
+/// `gain_step` each frame. Its output is `gain * sin`, sent to the left
+/// and right channels scaled by `left_gain` and `right_gain`.
+#[derive(Debug)]
+pub struct Partials<'a> {
+    /// The cosines of the phasors: advanced by each call.
+    pub cos: &'a mut [f32],
+    /// The sines of the phasors, which are what is heard: advanced by each
+    /// call.
+    pub sin: &'a mut [f32],
+    /// The gains: advanced by each call.
+    pub gain: &'a mut [f32],
+    /// The cosines of the rotations each frame.
+    pub cos_step: &'a [f32],
+    /// The sines of the rotations each frame.
+    pub sin_step: &'a [f32],
+    /// What each gain grows by each frame.
+    pub gain_step: &'a [f32],
+    /// What the output is scaled by on the left channel.
+    pub left_gain: &'a [f32],
+    /// What the output is scaled by on the right channel.
+    pub right_gain: &'a [f32],
+}
+
+impl Partials<'_> {
+    /// The number of partials: the length of the slices.
+    pub fn len(&self) -> usize {
+        self.cos.len()
+    }
+
+    /// Whether there are no partials.
+    pub fn is_empty(&self) -> bool {
+        self.cos.is_empty()
+    }
+
+    #[track_caller]
+    fn check(&self) {
+        let n = self.cos.len();
+        for len in [
+            self.sin.len(),
+            self.gain.len(),
+            self.cos_step.len(),
+            self.sin_step.len(),
+            self.gain_step.len(),
+            self.left_gain.len(),
+            self.right_gain.len(),
+        ] {
+            same_length(n, len);
+        }
+    }
+}
+
 impl Backend {
     /// Multiplies every element of `dst` by `gain`: `dst[i] = dst[i] * gain`.
     #[inline]
@@ -446,6 +511,102 @@ impl Backend {
             f64 => scale_ramp_f64(as_type_mut(dst).unwrap(), as_value(start), as_value(step)),
             other => scalar::scale_ramp(dst, start, step, 0),
         );
+    }
+
+    /// Adds `src` under a linear ramp to `dst`:
+    /// `dst[i] = dst[i] + src[i] * (start + step * i)`, the gain worked out
+    /// as in [`scale_ramp`](Self::scale_ramp) and each product rounded
+    /// before the sum. This is a gain change mixed into a bus without a
+    /// zipper.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slices differ in length.
+    #[inline]
+    #[track_caller]
+    pub fn add_scaled_ramp<S: Sample>(self, dst: &mut [S], src: &[S], start: S, step: S) {
+        same_length(dst.len(), src.len());
+        let backend = self.usable();
+        by_type!(backend, S;
+            f32 => add_scaled_ramp_f32(as_type_mut(dst).unwrap(), as_type(src).unwrap(), as_value(start), as_value(step)),
+            f64 => add_scaled_ramp_f64(as_type_mut(dst).unwrap(), as_type(src).unwrap(), as_value(start), as_value(step)),
+            other => scalar::add_scaled_ramp(dst, src, start, step, 0),
+        );
+    }
+
+    /// Adds the products of `a` and `b` to `dst`:
+    /// `dst[i] = dst[i] + a[i] * b[i]`, the product rounded before the sum
+    /// (not a fused multiply-add). This is a block mixed in under a gain
+    /// that changes every frame, such as an envelope.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slices differ in length.
+    #[inline]
+    #[track_caller]
+    pub fn add_product<S: Sample>(self, dst: &mut [S], a: &[S], b: &[S]) {
+        same_length(dst.len(), a.len());
+        same_length(dst.len(), b.len());
+        let backend = self.usable();
+        by_type!(backend, S;
+            f32 => add_product_f32(as_type_mut(dst).unwrap(), as_type(a).unwrap(), as_type(b).unwrap()),
+            f64 => add_product_f64(as_type_mut(dst).unwrap(), as_type(a).unwrap(), as_type(b).unwrap()),
+            other => scalar::add_product(dst, a, b),
+        );
+    }
+
+    /// Renders a bank of sine partials for `left.len()` frames and adds it
+    /// to `left` and `right`, advancing the phasors and gains in
+    /// `partials`.
+    ///
+    /// Each frame, each partial does exactly this, in this order:
+    ///
+    /// ```text
+    /// gain += gain_step
+    /// v = gain * sin
+    /// (add v * left_gain to the left sum and v * right_gain to the right)
+    /// (cos, sin) = (cos * cos_step - sin * sin_step, cos * sin_step + sin * cos_step)
+    /// ```
+    ///
+    /// so the gain moves before the sample is made and the phasor turns
+    /// after. Every backend works out these numbers for every partial bit
+    /// for bit as written, a lane of a vector register per partial, which
+    /// is what makes a large bank fast: the partials are independent, and
+    /// a rotation that waits on the one before it waits once per register
+    /// rather than once per partial.
+    ///
+    /// The sums are added in an order that does not depend on the backend,
+    /// so the output too is the same on every backend. For each frame, the
+    /// partials before the last whole group of 16 add to 16 running sums
+    /// that start at zero, partial `i` to sum `i % 16`, in the order of
+    /// `i`; the sums are added in pairs (`s[j] + s[j + 8]`, halving until
+    /// one is left) and the result added to the output sample. The
+    /// partials after them, fewer than 16, then add to the output one after
+    /// another. Against adding every partial straight to the output one
+    /// after another, the result differs only by the rounding of the sums:
+    /// by less than `2 * (len + 5) * 2^-24` times the sum of the magnitudes
+    /// of the terms, and usually far less.
+    ///
+    /// The phasors are not brought back to the unit circle here. Each
+    /// rotation in `f32` moves a phasor's magnitude by up to a few parts in
+    /// 10^7, so a caller that runs a bank for long must rescale them every
+    /// so often (`PartialBank` in `manguebyte-dsp` does it every 64
+    /// frames).
+    ///
+    /// A bank whose length is a multiple of 16 runs entirely in vector
+    /// registers; the partials after the last whole group run one at a
+    /// time. Nothing allocates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `left` and `right` differ in length, or the slices of
+    /// `partials` do.
+    #[inline]
+    #[track_caller]
+    pub fn add_partials(self, left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
+        same_length(left.len(), right.len());
+        partials.check();
+        run!(self.usable(), add_partials(left, right, partials));
     }
 
     /// The largest magnitude in `src`, zero for an empty slice. A slice
@@ -677,6 +838,27 @@ pub fn multiply<S: Sample>(dst: &mut [S], src: &[S]) {
 #[inline]
 pub fn scale_ramp<S: Sample>(dst: &mut [S], start: S, step: S) {
     Backend::detect().scale_ramp(dst, start, step);
+}
+
+/// [`Backend::add_scaled_ramp`] on the [detected](Backend::detect) backend.
+#[inline]
+#[track_caller]
+pub fn add_scaled_ramp<S: Sample>(dst: &mut [S], src: &[S], start: S, step: S) {
+    Backend::detect().add_scaled_ramp(dst, src, start, step);
+}
+
+/// [`Backend::add_product`] on the [detected](Backend::detect) backend.
+#[inline]
+#[track_caller]
+pub fn add_product<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
+    Backend::detect().add_product(dst, a, b);
+}
+
+/// [`Backend::add_partials`] on the [detected](Backend::detect) backend.
+#[inline]
+#[track_caller]
+pub fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
+    Backend::detect().add_partials(left, right, partials);
 }
 
 /// [`Backend::peak`] on the [detected](Backend::detect) backend.

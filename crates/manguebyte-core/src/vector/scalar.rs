@@ -2,7 +2,7 @@
 //! time. The vector backends also run these on the elements left over at
 //! the end of a slice.
 
-use super::Peak;
+use super::{Partials, Peak};
 use crate::Sample;
 
 /// How many running sums [`dot`] keeps for a sample type: 16 for `f32`, 8
@@ -75,6 +75,26 @@ pub(super) fn multiply<S: Sample>(dst: &mut [S], src: &[S]) {
 pub(super) fn scale_ramp<S: Sample>(dst: &mut [S], start: S, step: S, first: usize) {
     for (k, x) in dst.iter_mut().enumerate() {
         *x *= start + step * index::<S>(first + k);
+    }
+}
+
+/// The ramp from index `first` on, added: element `k` of `src` is scaled
+/// by `start + step * (first + k)` and added to `dst`.
+pub(super) fn add_scaled_ramp<S: Sample>(
+    dst: &mut [S],
+    src: &[S],
+    start: S,
+    step: S,
+    first: usize,
+) {
+    for (k, (d, &s)) in dst.iter_mut().zip(src).enumerate() {
+        *d += s * (start + step * index::<S>(first + k));
+    }
+}
+
+pub(super) fn add_product<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
+    for ((d, &x), &y) in dst.iter_mut().zip(a).zip(b) {
+        *d += x * y;
     }
 }
 
@@ -162,6 +182,96 @@ pub(super) fn complex_multiply_add<S: Sample>(sum: &mut [S], a: &[S], b: &[S]) {
     }
 }
 
+/// Running sums [`add_partials`] keeps for each frame: partial `i` of those
+/// before the last whole group of 16 goes to sum `i % 16`.
+pub(super) const PARTIAL_LANES: usize = 16;
+
+/// Frames whose running sums [`add_partials`] keeps at once. Only the
+/// memory it takes depends on it, not the result.
+pub(super) const PARTIAL_FRAMES: usize = 64;
+
+/// The bank of partials, in the order
+/// [`Backend::add_partials`](super::Backend::add_partials) gives.
+pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
+    let count = partials.len();
+    let body = count - count % PARTIAL_LANES;
+    if body > 0 {
+        let mut sums_left = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
+        let mut sums_right = [0.0f32; PARTIAL_LANES * PARTIAL_FRAMES];
+        for (out_left, out_right) in left
+            .chunks_mut(PARTIAL_FRAMES)
+            .zip(right.chunks_mut(PARTIAL_FRAMES))
+        {
+            let frames = out_left.len();
+            let sums_left = &mut sums_left[..frames * PARTIAL_LANES];
+            let sums_right = &mut sums_right[..frames * PARTIAL_LANES];
+            sums_left.fill(0.0);
+            sums_right.fill(0.0);
+            for i in 0..body {
+                let lane = i % PARTIAL_LANES;
+                let (mut x, mut y, mut g) = (partials.cos[i], partials.sin[i], partials.gain[i]);
+                let (c, s, step) = (
+                    partials.cos_step[i],
+                    partials.sin_step[i],
+                    partials.gain_step[i],
+                );
+                let (to_left, to_right) = (partials.left_gain[i], partials.right_gain[i]);
+                for t in 0..frames {
+                    g += step;
+                    let v = g * y;
+                    sums_left[t * PARTIAL_LANES + lane] += v * to_left;
+                    sums_right[t * PARTIAL_LANES + lane] += v * to_right;
+                    let next_x = x * c - y * s;
+                    let next_y = x * s + y * c;
+                    x = next_x;
+                    y = next_y;
+                }
+                partials.cos[i] = x;
+                partials.sin[i] = y;
+                partials.gain[i] = g;
+            }
+            for (t, (l, r)) in out_left.iter_mut().zip(out_right.iter_mut()).enumerate() {
+                let at = t * PARTIAL_LANES;
+                *l += reduce(&mut sums_left[at..at + PARTIAL_LANES]);
+                *r += reduce(&mut sums_right[at..at + PARTIAL_LANES]);
+            }
+        }
+    }
+    for i in body..count {
+        add_partial_in_order(left, right, partials, i);
+    }
+}
+
+/// Partial `i` added straight to the output, frame after frame: what the
+/// partials after the last whole group of [`PARTIAL_LANES`] do.
+pub(super) fn add_partial_in_order(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+    i: usize,
+) {
+    let (mut x, mut y, mut g) = (partials.cos[i], partials.sin[i], partials.gain[i]);
+    let (c, s, step) = (
+        partials.cos_step[i],
+        partials.sin_step[i],
+        partials.gain_step[i],
+    );
+    let (to_left, to_right) = (partials.left_gain[i], partials.right_gain[i]);
+    for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        g += step;
+        let v = g * y;
+        *l += v * to_left;
+        *r += v * to_right;
+        let next_x = x * c - y * s;
+        let next_y = x * s + y * c;
+        x = next_x;
+        y = next_y;
+    }
+    partials.cos[i] = x;
+    partials.sin[i] = y;
+    partials.gain[i] = g;
+}
+
 pub(super) fn i16_le_to_f32(dst: &mut [f32], src: &[u8]) {
     for (d, s) in dst.iter_mut().zip(src.chunks_exact(2)) {
         *d = f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0;
@@ -245,6 +355,18 @@ pub(super) fn scale_ramp_f32(dst: &mut [f32], start: f32, step: f32) {
 }
 pub(super) fn scale_ramp_f64(dst: &mut [f64], start: f64, step: f64) {
     scale_ramp(dst, start, step, 0);
+}
+pub(super) fn add_scaled_ramp_f32(dst: &mut [f32], src: &[f32], start: f32, step: f32) {
+    add_scaled_ramp(dst, src, start, step, 0);
+}
+pub(super) fn add_scaled_ramp_f64(dst: &mut [f64], src: &[f64], start: f64, step: f64) {
+    add_scaled_ramp(dst, src, start, step, 0);
+}
+pub(super) fn add_product_f32(dst: &mut [f32], a: &[f32], b: &[f32]) {
+    add_product(dst, a, b);
+}
+pub(super) fn add_product_f64(dst: &mut [f64], a: &[f64], b: &[f64]) {
+    add_product(dst, a, b);
 }
 pub(super) fn peak_f32(src: &[f32]) -> Peak<f32> {
     peak(src)

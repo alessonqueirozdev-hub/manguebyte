@@ -156,14 +156,15 @@ fn element_wise<S: TestFloat>() {
         let dst: Vec<S> = values(rng, len + offset, false);
         let src: Vec<S> = values(rng, len + offset, false);
         let gain: S = value(rng, false);
-        let (dst, src) = (&dst[offset..], &src[offset..]);
+        let other: Vec<S> = values(rng, len + offset, false);
+        let (dst, src, other) = (&dst[offset..], &src[offset..], &other[offset..]);
 
         let run = |backend: Backend, op: &Op<'_, S>| {
             let mut out = dst.to_vec();
             op(backend, &mut out);
             out
         };
-        let ops: [(&str, &Op<'_, S>); 6] = [
+        let ops: [(&str, &Op<'_, S>); 8] = [
             ("scale", &|b, d| b.scale(d, gain)),
             ("copy_scaled", &|b, d| b.copy_scaled(d, src, gain)),
             ("add", &|b, d| b.add(d, src)),
@@ -172,6 +173,10 @@ fn element_wise<S: TestFloat>() {
             ("scale_ramp", &|b, d| {
                 b.scale_ramp(d, gain, src.first().copied().unwrap_or(S::ONE))
             }),
+            ("add_scaled_ramp", &|b, d| {
+                b.add_scaled_ramp(d, src, gain, other.first().copied().unwrap_or(S::ONE))
+            }),
+            ("add_product", &|b, d| b.add_product(d, src, other)),
         ];
         for (name, op) in ops {
             let want = run(Backend::Scalar, op);
@@ -208,6 +213,18 @@ fn ramp_is_closed_form<S: TestFloat>() {
         for (index, &gain) in ones.iter().enumerate() {
             let want = S::from_f64(0.5) + S::from_f64(-0.125) * S::from_f64(index as f64);
             assert!(same(gain, want), "{} index {index}", backend.name());
+        }
+        let mut mixed = vec![S::ONE; 37];
+        backend.add_scaled_ramp(
+            &mut mixed,
+            &[S::from_f64(2.0); 37],
+            S::from_f64(0.5),
+            S::from_f64(-0.125),
+        );
+        for (index, &sum) in mixed.iter().enumerate() {
+            let gain = S::from_f64(0.5) + S::from_f64(-0.125) * S::from_f64(index as f64);
+            let want = S::ONE + S::from_f64(2.0) * gain;
+            assert!(same(sum, want), "{} mixed index {index}", backend.name());
         }
     }
 }
@@ -398,6 +415,227 @@ fn the_order_of_a_sum_is_sixteen_lanes_then_pairs_then_the_rest() {
     }
     let one_after_another = a.iter().fold(0.0f32, |sum, &x| sum + x);
     assert_eq!(one_after_another, tiny);
+}
+
+/// A bank of partials that owns its slices.
+#[derive(Clone, Debug, PartialEq)]
+struct Bank {
+    cos: Vec<f32>,
+    sin: Vec<f32>,
+    gain: Vec<f32>,
+    cos_step: Vec<f32>,
+    sin_step: Vec<f32>,
+    gain_step: Vec<f32>,
+    left_gain: Vec<f32>,
+    right_gain: Vec<f32>,
+}
+
+impl Bank {
+    /// Partials on the unit circle at random phases, at frequencies from 0
+    /// up to and including Nyquist, under random gains and ramps and pans.
+    fn random(rng: &mut Rng, count: usize) -> Self {
+        let mut bank = Bank {
+            cos: Vec::new(),
+            sin: Vec::new(),
+            gain: Vec::new(),
+            cos_step: Vec::new(),
+            sin_step: Vec::new(),
+            gain_step: Vec::new(),
+            left_gain: Vec::new(),
+            right_gain: Vec::new(),
+        };
+        for _ in 0..count {
+            let phase = rng.unit() * core::f64::consts::TAU;
+            let w = match rng.below(8) {
+                0 => 0.0,
+                1 => core::f64::consts::PI,
+                _ => rng.unit() * core::f64::consts::PI,
+            };
+            let pan = rng.unit() * core::f64::consts::FRAC_PI_2;
+            bank.cos.push(phase.cos() as f32);
+            bank.sin.push(phase.sin() as f32);
+            bank.gain.push((rng.unit() * 2.0 - 1.0) as f32);
+            bank.cos_step.push(w.cos() as f32);
+            bank.sin_step.push(w.sin() as f32);
+            bank.gain_step
+                .push(((rng.unit() * 2.0 - 1.0) * 1e-3) as f32);
+            bank.left_gain.push(pan.cos() as f32);
+            bank.right_gain.push(pan.sin() as f32);
+        }
+        bank
+    }
+
+    fn view(&mut self) -> Partials<'_> {
+        Partials {
+            cos: &mut self.cos,
+            sin: &mut self.sin,
+            gain: &mut self.gain,
+            cos_step: &self.cos_step,
+            sin_step: &self.sin_step,
+            gain_step: &self.gain_step,
+            left_gain: &self.left_gain,
+            right_gain: &self.right_gain,
+        }
+    }
+
+    /// Each partial added straight to the output one after another, in a
+    /// loop written out once more: what the order of the sums is measured
+    /// against. Also returns, for each frame, the sum of the magnitudes of
+    /// the terms on the left.
+    fn in_order(&mut self, left: &mut [f32], right: &mut [f32]) -> Vec<f64> {
+        let mut magnitude: Vec<f64> = left.iter().map(|&x| f64::from(x.abs())).collect();
+        for i in 0..self.cos.len() {
+            let (mut x, mut y, mut g) = (self.cos[i], self.sin[i], self.gain[i]);
+            let (c, s) = (self.cos_step[i], self.sin_step[i]);
+            for t in 0..left.len() {
+                g += self.gain_step[i];
+                let v = g * y;
+                left[t] += v * self.left_gain[i];
+                right[t] += v * self.right_gain[i];
+                magnitude[t] += f64::from((v * self.left_gain[i]).abs());
+                let nx = x * c - y * s;
+                let ny = x * s + y * c;
+                x = nx;
+                y = ny;
+            }
+            self.cos[i] = x;
+            self.sin[i] = y;
+            self.gain[i] = g;
+        }
+        magnitude
+    }
+}
+
+/// Counts of partials to try: every one up to three groups of 16, and some
+/// larger ones that end inside a group.
+fn partial_counts() -> Vec<usize> {
+    let mut counts: Vec<usize> = (0..=if cfg!(miri) { 17 } else { 49 }).collect();
+    if !cfg!(miri) {
+        counts.extend([63, 64, 65, 100, 257]);
+    }
+    counts
+}
+
+fn partial_frames() -> Vec<usize> {
+    if cfg!(miri) {
+        vec![0, 1, 3, 65]
+    } else {
+        vec![0, 1, 2, 3, 7, 8, 15, 16, 17, 63, 64, 65, 129, 200]
+    }
+}
+
+#[test]
+fn partials_are_the_same_on_every_backend_bit_for_bit() {
+    for backend in backends() {
+        for count in partial_counts() {
+            for frames in partial_frames() {
+                let mut rng = Rng::new((count * 1_000 + frames) as u64);
+                let bank = Bank::random(&mut rng, count);
+                let start: Vec<f32> = (0..frames + 1)
+                    .map(|_| (rng.unit() * 2.0 - 1.0) as f32)
+                    .collect();
+                let what = format!("{} count {count} frames {frames}", backend.name());
+
+                let run = |backend: Backend| {
+                    let mut bank = bank.clone();
+                    // The right channel starts one sample in, so the two
+                    // do not share an alignment.
+                    let (mut left, mut right) = (start[..frames].to_vec(), start[1..].to_vec());
+                    backend.add_partials(&mut left, &mut right, &mut bank.view());
+                    (bank, left, right)
+                };
+                let (want_bank, want_left, want_right) = run(Backend::Scalar);
+                let (got_bank, got_left, got_right) = run(backend);
+                assert_same(&got_left, &want_left, &format!("left {what}"));
+                assert_same(&got_right, &want_right, &format!("right {what}"));
+                for (got, want, name) in [
+                    (&got_bank.cos, &want_bank.cos, "cos"),
+                    (&got_bank.sin, &want_bank.sin, "sin"),
+                    (&got_bank.gain, &want_bank.gain, "gain"),
+                ] {
+                    assert_same(got, want, &format!("{name} {what}"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn each_partial_is_the_plain_loop_bit_for_bit() {
+    // Alone in its bank, a partial's samples go through sums that hold
+    // nothing else, so the output is the plain loop's exactly; with fewer
+    // than 16 partials, every one is added straight to the output in turn.
+    for backend in backends() {
+        for count in [1, 5, 15, 16, 32] {
+            let mut rng = Rng::new(count as u64);
+            let mut bank = Bank::random(&mut rng, count);
+            if count >= 16 {
+                for i in 1..count {
+                    bank.gain[i] = 0.0;
+                    bank.gain_step[i] = 0.0;
+                }
+            }
+            let mut by_hand = bank.clone();
+            let (mut left, mut right) = (vec![0.25f32; 333], vec![-0.5f32; 333]);
+            let (mut want_left, mut want_right) = (left.clone(), right.clone());
+            backend.add_partials(&mut left, &mut right, &mut bank.view());
+            by_hand.in_order(&mut want_left, &mut want_right);
+            assert_eq!(left, want_left, "{} count {count}", backend.name());
+            assert_eq!(right, want_right, "{} count {count}", backend.name());
+            assert_eq!(bank, by_hand, "{} count {count}", backend.name());
+        }
+    }
+}
+
+#[test]
+fn partials_differ_from_adding_them_in_turn_only_by_the_rounding_of_the_sums() {
+    for backend in backends() {
+        for count in [
+            16,
+            17,
+            40,
+            64,
+            100,
+            257,
+            if cfg!(miri) { 300 } else { 3_000 },
+        ] {
+            let frames = if cfg!(miri) { 9 } else { 150 };
+            let mut rng = Rng::new(count as u64 + 77);
+            let mut bank = Bank::random(&mut rng, count);
+            let mut by_hand = bank.clone();
+            let mut left: Vec<f32> = (0..frames).map(|t| (t as f32).sin()).collect();
+            let mut right = left.clone();
+            let (mut want_left, mut want_right) = (left.clone(), right.clone());
+            backend.add_partials(&mut left, &mut right, &mut bank.view());
+            let magnitude = by_hand.in_order(&mut want_left, &mut want_right);
+            // Each partial's own numbers are the same; only the order of
+            // the additions differs.
+            assert_eq!(bank, by_hand, "{} count {count}", backend.name());
+            let bound = 2.0 * (count as f64 + 5.0) * f64::from(f32::EPSILON / 2.0);
+            let mut worst = 0.0f64;
+            for t in 0..frames {
+                let error = f64::from((left[t] - want_left[t]).abs());
+                assert!(
+                    error <= bound * magnitude[t],
+                    "{} count {count} frame {t}: {error} against {}",
+                    backend.name(),
+                    bound * magnitude[t]
+                );
+                worst = worst.max(error / magnitude[t]);
+            }
+            // Far inside the bound in practice: a few roundings of the
+            // largest terms.
+            assert!(worst < 64.0 * f64::from(f32::EPSILON), "{count}: {worst}");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "slice lengths differ")]
+fn a_bank_with_slices_of_different_lengths_is_refused() {
+    let mut bank = Bank::random(&mut Rng::new(1), 4);
+    bank.left_gain.pop();
+    add_partials(&mut [0.0; 8], &mut [0.0; 8], &mut bank.view());
 }
 
 #[test]
