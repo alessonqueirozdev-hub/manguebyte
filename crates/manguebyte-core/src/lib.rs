@@ -12,6 +12,9 @@
 //! - [`decibels`]: gain conversions.
 //! - [`NoDenormals`]: stops near-silence from slowing the processor down.
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
+//! - [`pool`]: rendering independent jobs (voices, divisions, chains) on
+//!   several cores inside one audio callback, with output identical to one
+//!   thread's.
 //! - [`module`]: the file of the binary this code is linked into, such as a
 //!   plugin's own library.
 //! - [`source`]: sources of audio that are pulled a block at a time, and
@@ -27,6 +30,7 @@ mod denormal;
 pub mod log;
 pub mod module;
 mod param_id;
+pub mod pool;
 mod sample;
 mod smoothing;
 pub mod source;
