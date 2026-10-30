@@ -12,7 +12,7 @@ use manguebyte_midi::MidiMessage;
 use crate::controllers::{ControllerTable, MAX_CONTROLLERS};
 use crate::instrument::Instrument;
 use crate::interpolate::Interpolation;
-use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Player, Start};
+use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Modulation, Player, Start};
 use crate::region::Trigger;
 
 /// Most voices a [`Sampler`] accepts.
@@ -69,6 +69,34 @@ const CHANNEL_AT_REST: ChannelState = ChannelState {
     bend: 0,
     keys: [KEY_UP; 128],
 };
+
+/// A pitch ratio and a gain set from outside, as they ramp over a block:
+/// from `from` at its start to `to` on its last frame, and `next` for the
+/// block after.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Line {
+    from: (f64, f64),
+    to: (f64, f64),
+    next: (f64, f64),
+}
+
+const LEVEL: Line = Line {
+    from: (1.0, 1.0),
+    to: (1.0, 1.0),
+    next: (1.0, 1.0),
+};
+
+impl Line {
+    /// The block starts: on to what was set for it.
+    fn advance(&mut self) {
+        self.from = self.to;
+        self.to = self.next;
+    }
+
+    fn is_level(&self) -> bool {
+        self.from == (1.0, 1.0) && self.to == (1.0, 1.0)
+    }
+}
 
 /// A voice of the pool: what it plays and which instrument it reads.
 #[derive(Debug, Clone)]
@@ -187,6 +215,12 @@ pub struct Sampler<S: Sample = f32> {
     changes: Vec<PendingChange>,
     /// How many of `changes` the block under way has applied.
     applied: usize,
+    /// Pitch and level from outside, per key and for every voice.
+    keys: Box<[Line]>,
+    all: Line,
+    /// Frames of the block under way, and of it rendered.
+    block_frames: u64,
+    block_done: u64,
     marker: PhantomData<S>,
 }
 
@@ -282,6 +316,10 @@ impl<S: Sample> Sampler<S> {
                 controllers: ControllerTable::new(),
                 changes: Vec::with_capacity(MAX_PENDING_CONTROLLER_CHANGES),
                 applied: 0,
+                keys: vec![LEVEL; 128].into_boxed_slice(),
+                all: LEVEL,
+                block_frames: 0,
+                block_done: 0,
                 marker: PhantomData,
             },
             SamplerLoader {
@@ -402,6 +440,34 @@ impl<S: Sample> Sampler<S> {
                 return;
             }
         }
+    }
+
+    /// Sets the pitch ratio and gain a model outside the sampler gives the
+    /// voices of `key` (the note's key, 0 to 127, on any channel, before
+    /// `note_offset`): the wind of an organ's model, which moves every
+    /// pipe's pitch and level a little. The next block processed moves
+    /// them along a straight line from where they stand to these values on
+    /// its last frame, every frame of the way, and they hold after it. The
+    /// ratio multiplies the step the voice reads its sample at (1 leaves it
+    /// alone, and 2 is an octave up), through the same interpolator, so a
+    /// few cents never alias; it is held to what a voice can read. The gain
+    /// multiplies the voice's level. They multiply with those of
+    /// [`modulate_all`](Self::modulate_all). A value that is not a number
+    /// is ignored. Real-time safe.
+    ///
+    /// The line is laid over the host's block, so the same values set
+    /// before blocks cut differently give a slightly different output; a
+    /// model that runs once a block wants exactly that.
+    pub fn modulate_key(&mut self, key: u8, pitch_ratio: f32, gain: f32) {
+        if let Some(line) = self.keys.get_mut(usize::from(key & 0x7F)) {
+            set_line(line, pitch_ratio, gain);
+        }
+    }
+
+    /// Sets the pitch ratio and gain of every voice, as
+    /// [`modulate_key`](Self::modulate_key) does for one key's.
+    pub fn modulate_all(&mut self, pitch_ratio: f32, gain: f32) {
+        set_line(&mut self.all, pitch_ratio, gain);
     }
 
     /// Chooses how samples are read between their frames. The default is
@@ -880,10 +946,34 @@ impl<S: Sample> Sampler<S> {
     }
 
     fn render(&mut self, piece: &mut AudioBuffer<S>) {
+        let len = self.block_frames.max(1);
+        let all = self.all;
+        let offset = self.block_done;
         for voice in &mut self.voices {
             if !voice.player.active {
                 continue;
             }
+            let key = &self.keys[usize::from(voice.player.note.key & 0x7F)];
+            let modulation = if key.is_level() && all.is_level() {
+                Modulation::NONE
+            } else {
+                let step = |line: &Line| {
+                    (
+                        (line.to.0 - line.from.0) / len as f64,
+                        (line.to.1 - line.from.1) / len as f64,
+                    )
+                };
+                let (key_step, all_step) = (step(key), step(&all));
+                Modulation {
+                    active: true,
+                    ratio: [key.from.0, all.from.0],
+                    ratio_step: [key_step.0, all_step.0],
+                    gain: [key.from.1, all.from.1],
+                    gain_step: [key_step.1, all_step.1],
+                    offset,
+                    len,
+                }
+            };
             match self.instruments[voice.slot].as_deref() {
                 Some(instrument) => voice.player.render(
                     instrument,
@@ -891,12 +981,23 @@ impl<S: Sample> Sampler<S> {
                     piece,
                     &self.controllers,
                     self.clock,
+                    &modulation,
                 ),
                 None => voice.player.stop(),
             }
         }
         self.clock = self.clock.wrapping_add(piece.num_frames() as u64);
+        self.block_done += piece.num_frames() as u64;
     }
+}
+
+/// Sets what a line heads for in the next block.
+fn set_line(line: &mut Line, pitch_ratio: f32, gain: f32) {
+    if pitch_ratio.is_nan() || gain.is_nan() {
+        return;
+    }
+    let ratio = f64::from(pitch_ratio).clamp(1.0 / 65_536.0, 256.0);
+    line.next = (ratio, f64::from(gain).max(0.0));
 }
 
 /// Finds a voice for a region and starts it, after silencing what its
@@ -1028,6 +1129,12 @@ impl<S: Sample> Processor<S> for Sampler<S> {
         self.take_arrivals();
         buffer.clear();
         let frames = buffer.num_frames();
+        for line in self.keys.iter_mut() {
+            line.advance();
+        }
+        self.all.advance();
+        self.block_frames = frames as u64;
+        self.block_done = 0;
         let mut position = 0;
         for event in context.events {
             let at = (event.offset as usize).min(frames);
@@ -1079,6 +1186,11 @@ impl<S: Sample> Processor<S> for Sampler<S> {
         self.controllers.reset(defaults);
         for change in &self.changes {
             self.controllers.jump(change.controller, change.value);
+        }
+        // What was set from outside holds, at once.
+        for line in self.keys.iter_mut().chain(core::iter::once(&mut self.all)) {
+            line.from = line.next;
+            line.to = line.next;
         }
         self.changes.clear();
         self.applied = 0;

@@ -12,6 +12,7 @@ use crate::instrument::{
 };
 use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
 use crate::region::OffMode;
+use crate::resample::{fixed_step, sinc_taps};
 use crate::stream::{Lease, MARGIN};
 
 /// Seconds of the fade a voice gets when it is cut short: by a choke group
@@ -180,6 +181,46 @@ enum Crossfade {
     In,
     /// Falling as a cosine to 0, then stopping: a sustain handing over.
     Out,
+}
+
+/// What a model outside the sampler does to a voice's pitch and level
+/// over a piece of a block: two straight lines each, multiplied, at
+/// `offset + k + 1` frames for the piece's frame `k`, held from `len`
+/// frames on. `active` is false when it changes nothing, and the voice
+/// then reads as it would without it, bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Modulation {
+    pub(crate) active: bool,
+    pub(crate) ratio: [f64; 2],
+    pub(crate) ratio_step: [f64; 2],
+    pub(crate) gain: [f64; 2],
+    pub(crate) gain_step: [f64; 2],
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+}
+
+impl Modulation {
+    pub(crate) const NONE: Self = Self {
+        active: false,
+        ratio: [1.0; 2],
+        ratio_step: [0.0; 2],
+        gain: [1.0; 2],
+        gain_step: [0.0; 2],
+        offset: 0,
+        len: 0,
+    };
+
+    /// The pitch ratio and gain at frame `frame` of the piece.
+    #[inline]
+    fn at(&self, frame: usize) -> (f64, f64) {
+        let at = (self.offset + frame as u64 + 1).min(self.len) as f64;
+        let line =
+            |start: [f64; 2], step: [f64; 2]| (start[0] + step[0] * at) * (start[1] + step[1] * at);
+        (
+            line(self.ratio, self.ratio_step),
+            line(self.gain, self.gain_step),
+        )
+    }
 }
 
 /// Frames compared when a release looks for the start that continues the
@@ -643,7 +684,7 @@ impl Player {
             self.base_cents + self.bend_cents + self.expression_cents + self.modulation_cents;
         let ratio = (2f64.powf(cents / 1_200.0) * self.rate_ratio).clamp(1.0 / 65_536.0, 256.0);
         let ratio = if ratio.is_finite() { ratio } else { 1.0 };
-        self.step = (ratio * ONE as f64).round() as u64;
+        self.step = fixed_step(ratio);
         self.step_frames = self.step as f64 / ONE as f64;
     }
 
@@ -718,12 +759,13 @@ impl Player {
         buffer: &mut AudioBuffer<S>,
         controls: &C,
         clock: u64,
+        modulation: &Modulation,
     ) {
         if !self.active {
             return;
         }
         let frames = buffer.num_frames();
-        let at = (controls, clock);
+        let at = (controls, clock, modulation);
         match buffer.num_channels() {
             0 => self.run(instrument, interpolation, frames, at, |_, _, _| {}),
             1 => {
@@ -765,7 +807,7 @@ impl Player {
         instrument: &Instrument,
         interpolation: Interpolation,
         frames: usize,
-        (controls, clock): (&C, u64),
+        (controls, clock, modulation): (&C, u64, &Modulation),
         mut emit: impl FnMut(usize, f64, f64),
     ) {
         let Some(zone) = instrument.zones.get(self.zone) else {
@@ -843,9 +885,18 @@ impl Player {
                     self.crossfade = Crossfade::None;
                 }
             }
+            // The step for this frame, and the gain, with what a model
+            // outside does to them.
+            let step = if modulation.active {
+                let (ratio, outside) = modulation.at(frame);
+                gain *= outside;
+                fixed_step(self.step_frames * ratio)
+            } else {
+                self.step
+            };
             let fraction_bits = self.position & (ONE - 1);
             let fraction = fraction_bits as f64 / ONE as f64;
-            let (first, count) = if self.step == ONE && fraction_bits == 0 {
+            let (first, count) = if step == ONE && fraction_bits == 0 {
                 // At its own pitch and rate, from a whole frame, the sample
                 // is read as it is.
                 weights[0] = 1.0;
@@ -853,11 +904,7 @@ impl Player {
             } else {
                 match interpolation {
                     Interpolation::Sinc => {
-                        let half =
-                            instrument
-                                .sinc
-                                .weights(fraction, self.step_frames, &mut weights);
-                        (index as i64 + 1 - half as i64, 2 * half)
+                        sinc_taps(&instrument.sinc, self.position, step, &mut weights)
                     }
                     Interpolation::Cubic => {
                         weights[..4].copy_from_slice(&cubic_weights(fraction));
@@ -900,7 +947,7 @@ impl Player {
                 left * gain * self.gain_left,
                 right * gain * self.gain_right,
             );
-            self.position = self.position.wrapping_add(self.step);
+            self.position = self.position.wrapping_add(step);
             self.wrap(zone);
         }
         let index = self.position >> 32;

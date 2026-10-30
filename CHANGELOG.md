@@ -419,6 +419,21 @@ break the API.
   alignment the phase jumps by up to 2.2 rad; with no sustain to cross
   from, the release starts at full level. `tests/blocks.rs` and
   `tests/realtime.rs` play them too. Both `Sampler` and `SamplerVoice`.
+- Pitch and level from a model outside the sampler, for Caecilia's wind:
+  `Sampler::modulate_key(key, pitch_ratio, gain)` and `modulate_all`, which
+  the next block reaches along a straight line, frame by frame, and
+  `SamplerVoice::modulate(pitch_ratio, gain, frames)`. The ratio scales the
+  step the voice reads at through the same interpolator; a voice with no
+  modulation reads as before, bit for bit. `SincReader` is that
+  interpolator on its own, public, with a ratio for every output frame
+  (`process(input, ratios, output)`), and the voices find their taps with
+  the same function. `tests/modulation.rs`: a 2-cent, 5 Hz frequency
+  modulation of a 1 kHz sample measures 1.9996 cents through the sampler
+  and 1.9999 through `SincReader` (bound 0.01), within 1.9e-5 of the
+  ideal waveform (bound 1e-4); a gain ramps over one block and other keys
+  are left alone; `SamplerVoice` takes the same; `SincReader` gives the
+  same bits in pieces of any size. `tests/realtime.rs` runs all three
+  under the counting allocator.
 
 ### Fixed
 

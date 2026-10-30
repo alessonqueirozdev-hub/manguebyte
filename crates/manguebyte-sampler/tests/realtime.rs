@@ -146,6 +146,12 @@ fn set_parameters(sampler: &mut Sampler<f32>, block: usize) {
         let value = ((block * 7 + turn * 3) % 11) as f32 / 10.0;
         sampler.set_controller(controller, value, ((block * 37 + turn * 61) % 300) as u32);
     }
+    // A wind model moving pitch and level.
+    let wind = (block % 5) as f32 * 0.001;
+    sampler.modulate_all(1.0 + wind, 1.0 - wind);
+    for key in 36..92 {
+        sampler.modulate_key(key, 1.0 - wind * 0.5, 0.9 + wind);
+    }
 }
 
 #[test]
@@ -223,6 +229,9 @@ fn the_voice_never_allocates_inside_a_synth() {
     let transport = Transport::STOPPED;
     assert_no_heap_use("the synth of sampler voices", || {
         for events in &blocks {
+            for (turn, voice) in synth.voices_mut().enumerate() {
+                voice.modulate(1.0 + turn as f32 * 0.001, 0.9, 100);
+            }
             synth.process_with(&mut buffer, &ProcessContext::new(events, &transport));
         }
         synth.reset();
@@ -282,6 +291,15 @@ fn streaming_voices_and_cursors_never_allocate() {
         let a = store.handle(0).unwrap();
         let b = store.handle(1).unwrap();
         let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        let mut reader = manguebyte_sampler::SincReader::new();
+        let ratios: Vec<f32> = (0..512).map(|n| 1.0 + n as f32 * 1e-4).collect();
+        let mut read = vec![0.0f32; 512];
+        assert_no_heap_use("the sinc reader", || {
+            for _ in 0..10 {
+                reader.process(&left, &ratios, &mut read);
+                reader.set_position(0.0);
+            }
+        });
         assert_no_heap_use("cursors", || {
             let mut cursors = [store.cursor(a, 0), store.cursor(b, 100)];
             for turn in 0..200 {

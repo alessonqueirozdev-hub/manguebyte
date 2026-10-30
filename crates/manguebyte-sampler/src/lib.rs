@@ -158,6 +158,14 @@
 //! whose measured quality and cost are stated there. A sample played at its
 //! own pitch and rate is read as it is.
 //!
+//! A model outside the sampler, such as an organ's wind, moves the pitch
+//! and level of the voices of a key ([`Sampler::modulate_key`]), of every
+//! voice ([`Sampler::modulate_all`]) or of a [`SamplerVoice`]
+//! ([`SamplerVoice::modulate`]) along a straight line over a block, frame
+//! by frame, through the same interpolator. [`SincReader`] is that
+//! interpolator on its own, with a ratio for every output frame, for a
+//! player with voices of its own.
+//!
 //! # Streaming from disk
 //!
 //! [`Instrument::load_streaming`] keeps in memory only the head of each
@@ -181,6 +189,7 @@ mod interpolate;
 mod packed;
 mod player;
 mod region;
+mod resample;
 mod sampler;
 pub mod sfz;
 mod source;
@@ -197,6 +206,7 @@ pub use region::{
     EnvelopeSpec, EnvelopeStage, FilterType, KeyCenter, LoopMode, MAX_RELEASE_ALIGN, Modulation,
     ModulationTarget, OffMode, Region, Trigger,
 };
+pub use resample::{SINC_MAX_TAPS, SincReader};
 pub use sampler::{
     MAX_HELD_NOTES, MAX_LOADER_CAPACITY, MAX_PENDING_CONTROLLER_CHANGES, MAX_POLYPHONY, Sampler,
     SamplerLoader,

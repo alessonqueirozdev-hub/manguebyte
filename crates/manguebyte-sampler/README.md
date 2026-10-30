@@ -33,6 +33,14 @@ material, and unpacked block by block as voices play it. Players with
 voices of their own use the same layer through `SampleStore` and
 `StreamCursor`.
 
+For organs: release samples can be chosen by how long the key was held
+(`mangue_loheld`, `mangue_hiheld`) and start with an equal-power crossfade
+from the sustaining loop, aligned in phase with it
+(`mangue_release_crossfade`, `mangue_release_align`); a model outside the
+sampler moves each key's pitch and level frame by frame
+(`Sampler::modulate_key`), and `SincReader` offers the same windowed-sinc
+reading, with a ratio for every frame, to any player.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
