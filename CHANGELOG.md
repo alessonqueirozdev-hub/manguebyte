@@ -157,6 +157,21 @@ break the API.
   60 Hz tone is turned down by the low band alone, by the 15 dB its
   compressor settles at, while a 10 kHz tone 40 dB down beside it moves
   by less than 0.05 dB.
+- `TapeSaturation`: a first-order pre-emphasis shelf, an asymmetric `tanh`
+  curve of the crate's own (the middle moved off zero, the gain scaled back
+  by the slope at zero so quiet signals keep their level) run four times
+  oversampled, the exact inverse shelf, a DC blocker, and wow and flutter
+  from a delay line read at a moving position, with drift that makes the
+  wow's rate and depth wander along a seeded random path; a mix with the
+  dry signal delayed to line up, and a fixed reported latency. Measured:
+  wow of 10 cents and flutter of 4 cents move a tone's pitch, tracked by
+  its zero crossings, up by the depth to 0.1 cent and down by the same
+  ratio; drift repeats from its seed and stays within a quarter more depth
+  at a quarter more rate; a quiet tone passes within 0.01 dB; a symmetric
+  curve makes no second harmonic (below -100 dB) and an asymmetric one
+  does; up to 20 kHz the oversampling holds what folds back more than
+  100 dB down, where the same curve at the sample rate leaves it less than
+  40 dB down; the impulse arrives at the reported latency.
 
 ### Formats
 

@@ -67,6 +67,7 @@ pub mod sources;
 pub mod stft;
 mod svf;
 mod synth;
+mod tape;
 #[cfg(test)]
 mod testing;
 pub mod timeline;
@@ -111,6 +112,7 @@ pub use shifter::FrequencyShifter;
 pub use stft::{SpectralProcessor, Stft, StftError, StftSettings};
 pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
+pub use tape::TapeSaturation;
 pub use transient::TransientShaper;
 pub use tremolo::{AutoPan, Tremolo};
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};

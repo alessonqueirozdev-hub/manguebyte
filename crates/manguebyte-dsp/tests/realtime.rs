@@ -1587,7 +1587,7 @@ fn a_partial_bank_does_not_use_the_heap() {
 fn the_workstation_effects_do_not_use_the_heap() {
     use manguebyte_dsp::{
         AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingCarrier,
-        RingModulator, StereoWidener, TransientShaper, Tremolo,
+        RingModulator, StereoWidener, TapeSaturation, TransientShaper, Tremolo,
     };
 
     check(
@@ -1661,6 +1661,16 @@ fn the_workstation_effects_do_not_use_the_heap() {
         compressor
     });
 
+    check(
+        "TapeSaturation",
+        TapeSaturation::<f32>::new()
+            .with_drive_db(30.0)
+            .with_wow_cents(30.0)
+            .with_flutter_cents(10.0)
+            .with_drift(1.0)
+            .with_mix(0.5),
+    );
+
     // Locked to a transport that moves on, block by block.
     let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
     let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
@@ -1704,7 +1714,7 @@ fn the_workstation_effects_do_not_use_the_heap() {
 fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
     use manguebyte_dsp::{
         AutoPan, Bitcrusher, FrequencyShifter, LfoShape, MultibandCompressor, RingModulator,
-        StereoWidener, TransientShaper, Tremolo,
+        StereoWidener, TapeSaturation, TransientShaper, Tremolo,
     };
 
     let mut crusher = Bitcrusher::<f32>::new();
@@ -1723,6 +1733,8 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     shaper.prepare(&SPEC);
     let mut multiband = MultibandCompressor::<f32>::new(200.0, 2_000.0);
     multiband.prepare(&SPEC);
+    let mut tape = TapeSaturation::<f32>::new();
+    tape.prepare(&SPEC);
     let shapes = [
         LfoShape::Sine,
         LfoShape::Triangle,
@@ -1795,6 +1807,16 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
                 compressor.set_attack_ms(turn);
             }
             multiband.process(&mut buffer);
+
+            tape.set_drive_db(2.0 * turn);
+            tape.set_asymmetry(turn / 28.0);
+            tape.set_wow_cents(2.0 * turn);
+            tape.set_wow_hz(0.5 + turn / 4.0);
+            tape.set_flutter_cents(turn / 1.4);
+            tape.set_flutter_hz(2.0 + turn);
+            tape.set_drift(turn / 14.0);
+            tape.set_mix(1.0 - turn / 14.0);
+            tape.process(&mut buffer);
         }
     });
     assert!(all_finite(&buffer));
