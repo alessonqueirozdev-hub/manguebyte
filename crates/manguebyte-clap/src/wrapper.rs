@@ -96,8 +96,8 @@ use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::output::{OutputBuffer, OutputEvent};
 use manguebyte_plugin::{
-    AudioLayout, ParamWatcher, Plugin, PluginKind, VoiceInfo, load_state, offered_layouts,
-    plugin_info, save_state, set_library_path,
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, VoiceInfo, load_state,
+    offered_layouts, plugin_info, save_state, set_library_path,
 };
 
 use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
@@ -407,6 +407,11 @@ unsafe extern "C" fn factory_create<P: Plugin>(
             layouts: offered_layouts::<P>(),
             config: AtomicUsize::new(0),
             sidechain_on: AtomicBool::new(true),
+            // Every port starts active, as `audio-ports-activation` says.
+            aux_on: P::AUX_OUTPUTS
+                .iter()
+                .map(|_| AtomicBool::new(true))
+                .collect(),
             active: AtomicBool::new(false),
             has_voice_info: voices.is_some(),
             voices: Mutex::new(voices),
@@ -423,6 +428,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
+                aux: AuxOutputs::new(),
                 events: EventBuffer::new(),
                 piece: EventBuffer::new(),
                 changes: Vec::with_capacity(TRANSPORT_CHANGES),
@@ -470,6 +476,10 @@ pub(crate) struct Instance<P: Plugin> {
     /// Whether the sidechain port is active (`audio-ports-activation`).
     /// Only changed while the plugin is not active.
     sidechain_on: AtomicBool,
+    /// Whether each auxiliary output port is active
+    /// (`audio-ports-activation`), in the order of [`Plugin::AUX_OUTPUTS`].
+    /// Only changed while the plugin is not active.
+    aux_on: Box<[AtomicBool]>,
     /// Whether the plugin is active, so that ports are not changed under
     /// it.
     active: AtomicBool,
@@ -498,6 +508,9 @@ struct Audio<P> {
     layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
+    /// The auxiliary output ports, switched as `Instance::aux_on` was
+    /// when the plugin was activated.
+    aux: AuxOutputs,
     events: EventBuffer,
     /// The events of one piece of a block cut at a transport event,
     /// counted from the piece's start.
@@ -704,6 +717,10 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
         audio.layout = layout;
         audio.buffer = AudioBuffer::new(layout.outputs, max_frames);
         audio.sidechain = AudioBuffer::new(layout.sidechain, max_frames);
+        audio.aux = AuxOutputs::for_plugin::<P>(max_frames);
+        for (index, on) in instance.aux_on.iter().enumerate() {
+            audio.aux.set_active(index, on.load(Ordering::Relaxed));
+        }
         audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
         audio.piece = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
         audio.plugin.set_layout(layout);
@@ -852,7 +869,7 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
         ptr::from_ref(Vtables::<P>::PORTS_CONFIG).cast()
     } else if (id == CLAP_EXT_AUDIO_PORTS_ACTIVATION
         || id == CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT)
-        && P::LAYOUT.sidechain > 0
+        && (P::LAYOUT.sidechain > 0 || !P::AUX_OUTPUTS.is_empty())
     {
         ptr::from_ref(Vtables::<P>::PORTS_ACTIVATION).cast()
     } else if id == CLAP_EXT_VOICE_INFO && has_voice_info {
@@ -910,6 +927,7 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         }
         audio.buffer.set_num_frames(frames);
         audio.buffer.clear();
+        audio.aux.start_block(frames);
         let layout = audio.layout;
 
         // SAFETY: the pointers in `process` are valid for this call.
@@ -947,9 +965,17 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         // Everything was read from the inputs before this point, so writing
         // is sound even when the host processes in place.
         unsafe {
+            // The main output, if there is one, then the auxiliary ones; a
+            // port switched off, or one the plugin lacks, is silent.
             let outputs = ports(process.audio_outputs, process.audio_outputs_count);
+            let mains = usize::from(layout.outputs > 0);
             for (index, port) in outputs.iter().enumerate() {
-                write_port(port, (index == 0).then_some(&audio.buffer), frames);
+                let source = if index < mains {
+                    Some(&audio.buffer)
+                } else {
+                    audio.aux.bus(index - mains)
+                };
+                write_port(port, source, frames);
             }
             // What the plugin sent goes after the parameter values that
             // went before the block, all of which are on frame 0.
@@ -978,6 +1004,7 @@ impl<P: Plugin> Audio<P> {
             layout,
             buffer,
             sidechain,
+            aux,
             events,
             piece,
             changes,
@@ -998,7 +1025,7 @@ impl<P: Plugin> Audio<P> {
             }
             let output = &mut notes.output;
             return catch_unwind(AssertUnwindSafe(|| {
-                plugin.process_with_output(buffer, &context, output);
+                plugin.process_with_aux(buffer, &context, output, aux);
             }))
             .is_ok();
         }
@@ -1039,10 +1066,12 @@ impl<P: Plugin> Audio<P> {
             let output: &mut OutputBuffer = piece_output;
             let finished = buffer.windowed(start..end, |window| {
                 let mut run = |context: &ProcessContext<'_, f32>| {
-                    catch_unwind(AssertUnwindSafe(|| {
-                        plugin.process_with_output(window, context, output);
-                    }))
-                    .is_ok()
+                    aux.windowed(start..end, |aux| {
+                        catch_unwind(AssertUnwindSafe(|| {
+                            plugin.process_with_aux(window, context, output, aux);
+                        }))
+                        .is_ok()
+                    })
                 };
                 if keyed {
                     sidechain.windowed(start..end, |side| {
@@ -2022,6 +2051,13 @@ fn port_channels(layout: AudioLayout, is_input: bool) -> ([usize; 2], usize) {
     (present, count)
 }
 
+/// How many ports there are in one direction under `layout`: the main and
+/// sidechain ports, and after the main output the auxiliary ones.
+fn port_count<P: Plugin>(layout: AudioLayout, is_input: bool) -> usize {
+    let aux = if is_input { 0 } else { P::AUX_OUTPUTS.len() };
+    port_channels(layout, is_input).1 + aux
+}
+
 /// The port type of a port of `channels` channels.
 fn port_type(channels: usize) -> *const c_char {
     match channels {
@@ -2048,7 +2084,7 @@ unsafe extern "C" fn audio_ports_count<P: Plugin>(
 ) -> u32 {
     guard(0, || {
         // SAFETY: the host passes a plugin it created through our factory.
-        port_channels(unsafe { selected::<P>(plugin) }, is_input).1 as u32
+        port_count::<P>(unsafe { selected::<P>(plugin) }, is_input) as u32
     })
 }
 
@@ -2064,9 +2100,23 @@ unsafe extern "C" fn audio_ports_get<P: Plugin>(
         let (channels, count) = port_channels(layout, is_input);
         let index = index as usize;
         // SAFETY: `info` is a struct the host owns, or null.
-        let Some(info) = (unsafe { info.as_mut() }).filter(|_| index < count) else {
+        let Some(info) =
+            (unsafe { info.as_mut() }).filter(|_| index < port_count::<P>(layout, is_input))
+        else {
             return false;
         };
+        if index >= count {
+            // An auxiliary output, after the main one: its own name and
+            // width, never main, never in place.
+            let aux = P::AUX_OUTPUTS[index - count];
+            info.id = index as clap_id;
+            copy_text(aux.name, &mut info.name);
+            info.flags = CLAP_AUDIO_PORT_SUPPORTS_64BITS;
+            info.channel_count = aux.channels as u32;
+            info.port_type = port_type(aux.channels);
+            info.in_place_pair = CLAP_INVALID_ID;
+            return true;
+        }
         let channels = channels[index];
         // The main port is the first one, except that an instrument's only
         // input port is its sidechain.
@@ -2144,7 +2194,7 @@ unsafe extern "C" fn ports_config_get<P: Plugin>(
         config.id = index;
         copy_text(&config_name(layout), &mut config.name);
         config.input_port_count = port_channels(layout, true).1 as u32;
-        config.output_port_count = port_channels(layout, false).1 as u32;
+        config.output_port_count = port_count::<P>(layout, false) as u32;
         config.has_main_input = layout.inputs > 0;
         config.main_input_channel_count = layout.inputs as u32;
         config.main_input_port_type = port_type(layout.inputs);
@@ -2172,6 +2222,9 @@ unsafe extern "C" fn ports_config_select<P: Plugin>(
         // A new configuration has its ports active again, as
         // `audio-ports-activation` says of a selection.
         instance.sidechain_on.store(true, Ordering::Relaxed);
+        for on in &instance.aux_on {
+            on.store(true, Ordering::Relaxed);
+        }
         true
     })
 }
@@ -2197,13 +2250,24 @@ unsafe extern "C" fn ports_set_active<P: Plugin>(
         }
         let layout = instance.selected();
         let index = port_index as usize;
-        if index >= port_channels(layout, is_input).1 {
+        let mains = port_channels(layout, is_input).1;
+        if index >= port_count::<P>(layout, is_input) {
             return false;
         }
         let is_sidechain =
             is_input && layout.sidechain > 0 && index == usize::from(layout.inputs > 0);
         if is_sidechain {
             instance.sidechain_on.store(is_active, Ordering::Relaxed);
+            return true;
+        }
+        if let Some(on) = (!is_input)
+            .then(|| index.checked_sub(mains))
+            .flatten()
+            .and_then(|aux| instance.aux_on.get(aux))
+        {
+            // An auxiliary output: off, it is not given to the plugin and
+            // is written silent.
+            on.store(is_active, Ordering::Relaxed);
             return true;
         }
         // The main ports carry what the plugin is; they stay on.

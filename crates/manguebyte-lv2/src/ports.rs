@@ -1,6 +1,6 @@
 //! Which port has which index.
 
-use manguebyte_plugin::AudioLayout;
+use manguebyte_plugin::{AudioLayout, AuxOutput};
 
 /// What one port of the plugin carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -11,6 +11,15 @@ pub enum PortRole {
     Sidechain(usize),
     /// A channel of the audio output, counted from zero.
     AudioOutput(usize),
+    /// A channel of an auxiliary output bus: the bus's place in
+    /// [`Plugin::AUX_OUTPUTS`](manguebyte_plugin::Plugin::AUX_OUTPUTS) and
+    /// the channel in it, both counted from zero.
+    AuxOutput {
+        /// Which bus.
+        bus: usize,
+        /// Which of its channels.
+        channel: usize,
+    },
     /// The atom sequence of MIDI and transport events coming in.
     Control,
     /// The atom sequence going out.
@@ -22,12 +31,14 @@ pub enum PortRole {
 }
 
 /// The ports of a plugin, in index order: main audio inputs, sidechain
-/// inputs, audio outputs, the control and notify atom ports, the latency
-/// output, then one control input per parameter in the order the
-/// parameter set visits them.
+/// inputs, audio outputs, the channels of each auxiliary output bus in
+/// turn, the control and notify atom ports, the latency output, then one
+/// control input per parameter in the order the parameter set visits them.
 ///
-/// Indices only change when the layout or the parameters do, and adding a
-/// parameter at the end of the set leaves every earlier index as it was.
+/// Indices only change when the layout, the auxiliary buses or the
+/// parameters do, and adding a parameter at the end of the set leaves
+/// every earlier index as it was. A plugin without auxiliary buses has the
+/// ports it had before they existed.
 ///
 /// ```
 /// use manguebyte_lv2::{PortLayout, PortRole};
@@ -45,6 +56,7 @@ pub struct PortLayout {
     inputs: usize,
     sidechain: usize,
     outputs: usize,
+    aux: &'static [AuxOutput],
     params: usize,
 }
 
@@ -56,12 +68,45 @@ impl PortLayout {
             inputs: layout.inputs,
             sidechain: layout.sidechain,
             outputs: layout.outputs,
+            aux: &[],
             params,
         }
     }
 
-    const fn control_index(&self) -> usize {
+    /// The same ports with the channels of `aux` after the main outputs.
+    ///
+    /// ```
+    /// use manguebyte_lv2::{PortLayout, PortRole};
+    /// use manguebyte_plugin::{AudioLayout, AuxOutput};
+    ///
+    /// const BUSES: &[AuxOutput] = &[AuxOutput::stereo("Great"), AuxOutput::new("Pedal", 1)];
+    /// let ports = PortLayout::new(AudioLayout::STEREO_INSTRUMENT, 1).with_aux(BUSES);
+    /// assert_eq!(ports.index(PortRole::AuxOutput { bus: 1, channel: 0 }), Some(4));
+    /// assert_eq!(ports.role(5), Some(PortRole::Control));
+    /// ```
+    #[must_use]
+    pub const fn with_aux(self, aux: &'static [AuxOutput]) -> Self {
+        Self { aux, ..self }
+    }
+
+    /// How many channels the auxiliary buses have together.
+    const fn aux_channels(&self) -> usize {
+        let mut total = 0;
+        let mut bus = 0;
+        while bus < self.aux.len() {
+            total += self.aux[bus].channels;
+            bus += 1;
+        }
+        total
+    }
+
+    /// The index of the first auxiliary port.
+    const fn aux_index(&self) -> usize {
         self.inputs + self.sidechain + self.outputs
+    }
+
+    const fn control_index(&self) -> usize {
+        self.aux_index() + self.aux_channels()
     }
 
     /// How many ports there are.
@@ -78,6 +123,18 @@ impl PortLayout {
                 self.inputs + self.sidechain + channel,
                 channel < self.outputs,
             ),
+            PortRole::AuxOutput { bus, channel } => {
+                let mut index = self.aux_index();
+                let mut before = 0;
+                while before < bus && before < self.aux.len() {
+                    index += self.aux[before].channels;
+                    before += 1;
+                }
+                (
+                    index + channel,
+                    bus < self.aux.len() && channel < self.aux[bus].channels,
+                )
+            }
             PortRole::Control => (self.control_index(), true),
             PortRole::Notify => (self.control_index() + 1, true),
             PortRole::Latency => (self.control_index() + 2, true),
@@ -93,8 +150,16 @@ impl PortLayout {
             PortRole::AudioInput(index)
         } else if index < self.inputs + self.sidechain {
             PortRole::Sidechain(index - self.inputs)
-        } else if index < control {
+        } else if index < self.aux_index() {
             PortRole::AudioOutput(index - self.inputs - self.sidechain)
+        } else if index < control {
+            let mut channel = index - self.aux_index();
+            let mut bus = 0;
+            while channel >= self.aux[bus].channels {
+                channel -= self.aux[bus].channels;
+                bus += 1;
+            }
+            PortRole::AuxOutput { bus, channel }
         } else if index == control {
             PortRole::Control
         } else if index == control + 1 {
@@ -129,11 +194,17 @@ mod tests {
                 sidechain: 0,
             },
         ] {
-            for params in [0, 1, 5] {
-                let ports = PortLayout::new(layout, params);
+            const BUSES: &[AuxOutput] = &[
+                AuxOutput::stereo("a"),
+                AuxOutput::new("b", 1),
+                AuxOutput::new("c", 3),
+            ];
+            for (params, aux) in [(0, &[][..]), (1, BUSES), (5, &[][..]), (5, BUSES)] {
+                let ports = PortLayout::new(layout, params).with_aux(aux);
+                let aux_channels: usize = aux.iter().map(|bus| bus.channels).sum();
                 assert_eq!(
                     ports.count(),
-                    layout.inputs + layout.sidechain + layout.outputs + 3 + params
+                    layout.inputs + layout.sidechain + layout.outputs + aux_channels + 3 + params
                 );
                 for index in 0..ports.count() {
                     let role = ports.role(index).unwrap();
@@ -144,6 +215,18 @@ mod tests {
                 assert_eq!(ports.index(PortRole::AudioInput(layout.inputs)), None);
                 assert_eq!(ports.index(PortRole::Sidechain(layout.sidechain)), None);
                 assert_eq!(ports.index(PortRole::AudioOutput(layout.outputs)), None);
+                let past = PortRole::AuxOutput {
+                    bus: aux.len(),
+                    channel: 0,
+                };
+                assert_eq!(ports.index(past), None);
+                if let Some(last) = aux.last() {
+                    let wide = PortRole::AuxOutput {
+                        bus: aux.len() - 1,
+                        channel: last.channels,
+                    };
+                    assert_eq!(ports.index(wide), None);
+                }
             }
         }
     }

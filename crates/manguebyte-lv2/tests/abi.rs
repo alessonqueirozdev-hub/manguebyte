@@ -817,6 +817,8 @@ impl<P: Plugin> Host<P> {
                         outputs[channel].as_mut_ptr().cast()
                     }
                 }
+                // The plugins here have no auxiliary buses.
+                PortRole::AuxOutput { .. } => ptr::null_mut(),
                 PortRole::Control => control.as_mut_ptr().cast(),
                 PortRole::Notify => notify.as_mut_ptr().cast(),
                 PortRole::Latency => (&raw mut *self.latency).cast(),

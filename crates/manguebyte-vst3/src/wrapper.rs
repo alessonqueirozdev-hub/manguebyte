@@ -75,7 +75,7 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::{
-    AudioLayout, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
+    AudioLayout, AuxOutputs, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
     apply_param_events, load_state, offered_layouts, save_state,
 };
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};
@@ -238,6 +238,35 @@ fn audio_buses<P: Plugin>(layout: AudioLayout, is_input: bool) -> ([usize; 2], u
     (widths, count)
 }
 
+/// How many audio buses there are in one direction: those of
+/// [`audio_buses`], and after the main output the auxiliary ones.
+fn audio_bus_count<P: Plugin>(is_input: bool) -> usize {
+    let aux = if is_input { 0 } else { P::AUX_OUTPUTS.len() };
+    audio_buses::<P>(P::LAYOUT, is_input).1 + aux
+}
+
+/// The width of audio bus `index` in one direction under `layout`, or
+/// `None` past the last bus. An auxiliary output has its fixed width.
+fn audio_bus_width<P: Plugin>(layout: AudioLayout, is_input: bool, index: usize) -> Option<usize> {
+    let (widths, count) = audio_buses::<P>(layout, is_input);
+    if index < count {
+        return Some(widths[index]);
+    }
+    if is_input {
+        return None;
+    }
+    P::AUX_OUTPUTS.get(index - count).map(|aux| aux.channels)
+}
+
+/// The index among the auxiliary outputs of audio output bus `index`, for
+/// one that is auxiliary.
+fn aux_bus<P: Plugin>(index: usize) -> Option<usize> {
+    let mains = usize::from(P::LAYOUT.outputs > 0);
+    index
+        .checked_sub(mains)
+        .filter(|&aux| aux < P::AUX_OUTPUTS.len())
+}
+
 /// The index of the sidechain among the audio input buses, for a plugin
 /// that has one.
 fn sidechain_bus<P: Plugin>() -> Option<usize> {
@@ -255,6 +284,9 @@ struct Audio<P> {
     layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
+    /// The auxiliary output buses, switched as `Component::aux_active`
+    /// was when the component was activated.
+    aux: AuxOutputs,
     events: EventBuffer,
     /// Controller moves and notes that arrived in a block with no audio,
     /// for the next block that has some.
@@ -358,6 +390,9 @@ pub(crate) struct Component<P: Plugin> {
     /// Whether the host has switched the sidechain bus on (`activateBus`).
     /// It starts off, as its bus info says.
     sidechain_active: AtomicBool,
+    /// Whether the host has switched each auxiliary output bus on, in the
+    /// order of [`Plugin::AUX_OUTPUTS`]. Each starts as declared.
+    aux_active: Box<[AtomicBool]>,
     /// Whether the component is active, so that buses are not rearranged
     /// under it.
     active: AtomicBool,
@@ -428,6 +463,10 @@ impl<P: Plugin> Component<P> {
             layouts: offered_layouts::<P>(),
             config: AtomicUsize::new(0),
             sidechain_active: AtomicBool::new(false),
+            aux_active: P::AUX_OUTPUTS
+                .iter()
+                .map(|aux| AtomicBool::new(aux.active_by_default))
+                .collect(),
             active: AtomicBool::new(false),
             selected_unit: AtomicI32::new(vst::kRootUnitId),
             audio: UnsafeCell::new(Audio {
@@ -439,6 +478,7 @@ impl<P: Plugin> Component<P> {
                 layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
+                aux: AuxOutputs::new(),
                 events: EventBuffer::new(),
                 held: EventBuffer::new(),
                 raw: EventBuffer::new(),
@@ -1049,7 +1089,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
     unsafe fn getBusCount(&self, media: vst::MediaType, direction: vst::BusDirection) -> i32 {
         let is_input = direction == BusDirections_::kInput as vst::BusDirection;
         if media == MediaTypes_::kAudio as vst::MediaType {
-            audio_buses::<P>(P::LAYOUT, is_input).1 as i32
+            audio_bus_count::<P>(is_input) as i32
         } else if media == MediaTypes_::kEvent as vst::MediaType {
             i32::from(if is_input {
                 takes_notes::<P>()
@@ -1096,16 +1136,32 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
             return kInvalidArgument;
         }
 
-        let (channels, count) = audio_buses::<P>(self.selected(), is_input);
-        if index < 0 || index as usize >= count {
+        let Some(width) = usize::try_from(index)
+            .ok()
+            .and_then(|index| audio_bus_width::<P>(self.selected(), is_input, index))
+        else {
             return kInvalidArgument;
+        };
+        if let Some(aux) = aux_bus::<P>(index as usize).filter(|_| !is_input) {
+            let aux = P::AUX_OUTPUTS[aux];
+            bus.mediaType = media;
+            bus.direction = direction;
+            bus.channelCount = width as i32;
+            copy_wide(aux.name, &mut bus.name);
+            bus.busType = BusTypes_::kAux as vst::BusType;
+            bus.flags = if aux.active_by_default {
+                default_active
+            } else {
+                0
+            };
+            return kResultOk;
         }
         // The main bus is the first one, except that an instrument's only
         // input is its sidechain.
         let is_main = index == 0 && !(is_input && P::LAYOUT.inputs == 0);
         bus.mediaType = media;
         bus.direction = direction;
-        bus.channelCount = channels[index as usize] as i32;
+        bus.channelCount = width as i32;
         let name = match (is_main, is_input) {
             (true, true) => "Input",
             (true, false) => "Output",
@@ -1152,6 +1208,14 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
         if is_sidechain && !self.active.load(Ordering::Relaxed) {
             self.sidechain_active.store(state != 0, Ordering::Relaxed);
         }
+        // So does an auxiliary output's, whether the plugin is given it.
+        let is_output = media == MediaTypes_::kAudio as vst::MediaType
+            && direction == BusDirections_::kOutput as vst::BusDirection;
+        if let Some(aux) = aux_bus::<P>(index as usize).filter(|_| is_output) {
+            if !self.active.load(Ordering::Relaxed) {
+                self.aux_active[aux].store(state != 0, Ordering::Relaxed);
+            }
+        }
         kResultOk
     }
 
@@ -1167,6 +1231,10 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                 audio.layout = layout;
                 audio.buffer = AudioBuffer::new(layout.outputs, max_block);
                 audio.sidechain = AudioBuffer::new(layout.sidechain, max_block);
+                audio.aux = AuxOutputs::for_plugin::<P>(max_block);
+                for (index, on) in self.aux_active.iter().enumerate() {
+                    audio.aux.set_active(index, on.load(Ordering::Relaxed));
+                }
                 audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
                 audio.held = EventBuffer::with_capacity(HELD_EVENTS);
                 audio.raw = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
@@ -1280,14 +1348,17 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             [(inputs, num_inputs, true), (outputs, num_outputs, false)]
                 .into_iter()
                 .all(|(wanted, count, is_input)| {
-                    let (channels, ours) = audio_buses::<P>(layout, is_input);
+                    // The auxiliary outputs have one width each, which has
+                    // to be asked for as it is.
+                    let ours = audio_bus_count::<P>(is_input);
                     if count < 0 || count as usize != ours || (ours > 0 && wanted.is_null()) {
                         return false;
                     }
                     (0..ours).all(|index| {
+                        let width = audio_bus_width::<P>(layout, is_input, index).unwrap_or(0);
                         // SAFETY: the host passes `count` arrangements, and
                         // `index` is below `count`.
-                        unsafe { *wanted.add(index) == arrangement(channels[index]) }
+                        unsafe { *wanted.add(index) == arrangement(width) }
                     })
                 })
         };
@@ -1316,12 +1387,14 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
         arr: *mut vst::SpeakerArrangement,
     ) -> tresult {
         let is_input = direction == BusDirections_::kInput as vst::BusDirection;
-        let (channels, count) = audio_buses::<P>(self.selected(), is_input);
-        if arr.is_null() || index < 0 || index as usize >= count {
+        let width = usize::try_from(index)
+            .ok()
+            .and_then(|index| audio_bus_width::<P>(self.selected(), is_input, index));
+        let (false, Some(width)) = (arr.is_null(), width) else {
             return kInvalidArgument;
-        }
+        };
         // SAFETY: a non-null pointer to a value the host owns.
-        unsafe { *arr = arrangement(channels[index as usize]) };
+        unsafe { *arr = arrangement(width) };
         kResultOk
     }
 
@@ -1397,6 +1470,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
 
             audio.buffer.set_num_frames(frames);
             audio.buffer.clear();
+            audio.aux.start_block(frames);
             let layout = audio.layout;
             let wide = data.symbolicSampleSize == vst::SymbolicSampleSizes_::kSample64 as i32;
             // SAFETY: the bus pointers in `data` are valid for this call,
@@ -1424,14 +1498,15 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             if layout.sidechain > 0 {
                 context = context.with_sidechain(&audio.sidechain);
             }
-            let (plugin, buffer, output) = (
+            let (plugin, buffer, output, aux) = (
                 &mut audio.plugin,
                 &mut audio.buffer,
                 &mut audio.notes.output,
+                &mut audio.aux,
             );
             output.clear();
             let finished = catch_unwind(AssertUnwindSafe(|| {
-                plugin.process_with_output(buffer, &context, output);
+                plugin.process_with_aux(buffer, &context, output, aux);
             }))
             .is_ok();
             if !finished {
@@ -1447,8 +1522,14 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             // Everything was read from the inputs before this point, so
             // writing is sound even when the host processes in place.
             unsafe {
+                // The main output, then the auxiliary ones; a bus switched
+                // off is silent.
                 for (index, bus) in buses(data.outputs, data.numOutputs).iter_mut().enumerate() {
-                    write_bus(bus, (index == 0).then_some(&audio.buffer), frames, wide);
+                    let source = match aux_bus::<P>(index) {
+                        Some(aux) => audio.aux.bus(aux),
+                        None => (index == 0).then_some(&audio.buffer),
+                    };
+                    write_bus(bus, source, frames, wide);
                 }
                 audio.notes.send(frames, data.outputEvents);
             }

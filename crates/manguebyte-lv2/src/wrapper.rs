@@ -48,7 +48,7 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
-use manguebyte_plugin::{ParamWatcher, Plugin, load_state, save_state};
+use manguebyte_plugin::{AuxOutputs, ParamWatcher, Plugin, load_state, save_state};
 
 use crate::atom::{Events, NumberTypes, Object, Sequence, number};
 use crate::ports::{PortLayout, PortRole};
@@ -636,10 +636,18 @@ struct Connections {
     audio_in: Box<[*const f32]>,
     sidechain: Box<[*const f32]>,
     audio_out: Box<[*mut f32]>,
+    /// The channels of every auxiliary output bus, bus after bus.
+    aux_out: Box<[*mut f32]>,
     control: *const u8,
     notify: *mut u8,
     latency: *mut f32,
     params: Box<[*const f32]>,
+}
+
+/// Where the channels of auxiliary bus `bus` of `P` start among
+/// `Connections::aux_out`.
+fn aux_start<P: Plugin>(bus: usize) -> usize {
+    P::AUX_OUTPUTS[..bus].iter().map(|aux| aux.channels).sum()
 }
 
 /// One plugin as the host sees it.
@@ -668,6 +676,9 @@ struct Audio<P> {
     port_values: Box<[f32]>,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
+    /// The auxiliary output buses; a bus is on while the host has any of
+    /// its ports connected.
+    aux: AuxOutputs,
     /// The events of the block.
     events: EventBuffer,
     /// The events of the piece being processed, counted from its start.
@@ -770,7 +781,7 @@ unsafe extern "C" fn instantiate<P: Plugin>(
             log: log_feature,
             sample_rate,
             max_block,
-            ports: PortLayout::new(layout, count),
+            ports: PortLayout::new(layout, count).with_aux(P::AUX_OUTPUTS),
             audio: UnsafeCell::new(Audio {
                 plugin,
                 active: false,
@@ -779,6 +790,8 @@ unsafe extern "C" fn instantiate<P: Plugin>(
                     audio_in: vec![ptr::null(); layout.inputs].into_boxed_slice(),
                     sidechain: vec![ptr::null(); layout.sidechain].into_boxed_slice(),
                     audio_out: vec![ptr::null_mut(); layout.outputs].into_boxed_slice(),
+                    aux_out: vec![ptr::null_mut(); aux_start::<P>(P::AUX_OUTPUTS.len())]
+                        .into_boxed_slice(),
                     control: ptr::null(),
                     notify: ptr::null_mut(),
                     latency: ptr::null_mut(),
@@ -787,6 +800,7 @@ unsafe extern "C" fn instantiate<P: Plugin>(
                 port_values: vec![f32::NAN; count].into_boxed_slice(),
                 buffer: AudioBuffer::new(layout.outputs, max_block),
                 sidechain: AudioBuffer::new(layout.sidechain, max_block),
+                aux: AuxOutputs::for_plugin::<P>(max_block),
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 piece: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 input: NoteInput::new(P::MPE),
@@ -828,6 +842,12 @@ unsafe extern "C" fn connect_port<P: Plugin>(handle: LV2_Handle, port: u32, data
             PortRole::Param(index) => connections.params.get_mut(index),
             PortRole::AudioOutput(channel) => {
                 if let Some(slot) = connections.audio_out.get_mut(channel) {
+                    *slot = data.cast();
+                }
+                return;
+            }
+            PortRole::AuxOutput { bus, channel } => {
+                if let Some(slot) = connections.aux_out.get_mut(aux_start::<P>(bus) + channel) {
                     *slot = data.cast();
                 }
                 return;
@@ -964,7 +984,7 @@ unsafe extern "C" fn run<P: Plugin>(handle: LV2_Handle, sample_count: u32) {
 ///
 /// Every non-null output must have room for `start + frames` samples.
 unsafe fn silence(connections: &Connections, start: usize, frames: usize) {
-    for &port in &connections.audio_out {
+    for &port in connections.audio_out.iter().chain(&connections.aux_out) {
         if !port.is_null() {
             // SAFETY: per this function's contract.
             unsafe { std::slice::from_raw_parts_mut(port.add(start), frames) }.fill(0.0);
@@ -1344,9 +1364,22 @@ impl<P: Plugin> Instance<P> {
             context = context.with_sidechain(&audio.sidechain);
         }
         audio.output.clear();
-        audio
-            .plugin
-            .process_with_output(&mut audio.buffer, &context, &mut audio.output);
+        // A bus whose ports are all left unconnected is off.
+        let mut first = 0;
+        for (bus, declared) in P::AUX_OUTPUTS.iter().enumerate() {
+            let ports = &audio.connections.aux_out[first..first + declared.channels];
+            audio
+                .aux
+                .set_active(bus, ports.iter().any(|port| !port.is_null()));
+            first += declared.channels;
+        }
+        audio.aux.start_block(frames);
+        audio.plugin.process_with_aux(
+            &mut audio.buffer,
+            &context,
+            &mut audio.output,
+            &mut audio.aux,
+        );
 
         // What the plugin sent goes out on the notify port as MIDI 1.0, on
         // the block's frames; past the piece's end is its last frame. What
@@ -1382,6 +1415,20 @@ impl<P: Plugin> Instance<P> {
             match (channel < audio.buffer.num_channels()).then(|| audio.buffer.channel(channel)) {
                 Some(samples) => out.copy_from_slice(samples),
                 None => out.fill(0.0),
+            }
+        }
+        let mut ports = audio.connections.aux_out.iter();
+        for (bus, declared) in P::AUX_OUTPUTS.iter().enumerate() {
+            for channel in 0..declared.channels {
+                let Some(&port) = ports.next().filter(|port| !port.is_null()) else {
+                    continue;
+                };
+                // SAFETY: as above.
+                let out = unsafe { std::slice::from_raw_parts_mut(port.add(start), frames) };
+                match audio.aux.bus(bus) {
+                    Some(written) => out.copy_from_slice(written.channel(channel)),
+                    None => out.fill(0.0),
+                }
             }
         }
     }

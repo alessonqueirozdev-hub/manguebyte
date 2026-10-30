@@ -445,6 +445,8 @@ impl Host {
                 PortRole::Sidechain(_) => inputs[2].as_mut_ptr().cast(),
                 PortRole::AudioOutput(channel) if in_place => inputs[channel].as_mut_ptr().cast(),
                 PortRole::AudioOutput(channel) => outputs[channel].as_mut_ptr().cast(),
+                // The plugins here have no auxiliary buses.
+                PortRole::AuxOutput { .. } => std::ptr::null_mut(),
                 PortRole::Control => control.as_mut_ptr().cast(),
                 PortRole::Notify => notify.as_mut_ptr().cast(),
                 PortRole::Latency => (&raw mut self.latency).cast(),
