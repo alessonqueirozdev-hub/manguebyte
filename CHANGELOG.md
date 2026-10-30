@@ -9,6 +9,31 @@ break the API.
 
 ### Core
 
+- `pool`: rendering independent jobs (voices, divisions, chains of
+  effects) on several cores inside one audio callback, with output bit for
+  bit that of one thread (ADR 0015). `RenderPool` owns a fixed set of
+  `Job`s and a fixed number of workers started with it; `run` renders the
+  first `count` jobs on the workers and the calling thread, taken from an
+  atomic counter, and `rendered` gives them back in index order to mix.
+  The audio thread renders any job no thread has begun and spins, for at
+  most the pool's wait limit, only for jobs a worker is rendering; a job a
+  late worker still holds is dropped from that block, counted in
+  `BlockReport` and `PoolStats`, and not lent out by `job_mut` until it is
+  done. Nothing allocates or locks on the audio thread; parked workers are
+  woken with `Thread::unpark`. Workers ask for real-time scheduling
+  (MMCSS "Pro Audio" on Windows, `SCHED_FIFO` elsewhere) and report what
+  they got; `Promotion` does the same for any thread. A pool of zero
+  workers renders on the calling thread. `run_with` and `Helper` let a
+  host's threads do the work, as CLAP's `thread-pool` extension would.
+  Tested: bit identity over 1 to 8 threads, five block sizes and random
+  job sets; a worker stalled for 400 ms costs the audio thread the 2 ms
+  limit; no heap use under the counting allocator; workers ended on drop;
+  an idle pool of seven workers used no measurable processor time over a
+  second. `examples/pool_speed.rs`, on an Intel Core i3-1215U busy with
+  other builds, 64 voices of 32 partials in blocks of 128 frames at
+  48 kHz: 6.47 ms a block on one thread, 3.55 ms on two (1.83 times
+  faster), 1.64 ms on four (3.94), no gain from eight; a parked worker
+  starts about 20 to 30 µs after `run` begins (TECH_DEBT item 107).
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
   `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,
   `peak`, `dot`, `sum_of_squares`, `complex_multiply_add`,

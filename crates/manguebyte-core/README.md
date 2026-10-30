@@ -47,6 +47,54 @@ println!("running on {}", Backend::detect().name());
 operation on every backend the processor has against the loops they
 replaced.
 
+## Rendering on several cores
+
+`manguebyte_core::pool::RenderPool` renders independent jobs, such as the
+voices of an instrument or the divisions of an organ, on several cores
+inside one audio callback ([ADR 0015](../../docs/adr/0015-rendering-on-several-cores.md)).
+The pool owns the jobs and a fixed number of worker threads started with
+it; each block, `run` renders them on the workers and on the calling
+thread, and `rendered` hands them back in index order to mix, so the
+output is bit for bit that of one thread whatever the number of cores.
+
+```rust
+use manguebyte_core::pool::{Job, PoolConfig, RenderPool};
+
+struct Voice {
+    level: f32,
+    out: [f32; 128],
+}
+
+impl Job for Voice {
+    fn render(&mut self) {
+        self.out.fill(self.level);
+    }
+}
+
+let voices = (0..16).map(|_| Voice { level: 0.1, out: [0.0; 128] }).collect();
+// Off the audio thread, in `prepare`:
+let mut pool = RenderPool::new(voices, PoolConfig::all_cores());
+// On the audio thread, each block:
+let report = pool.run(16);
+let mut mix = [0.0f32; 128];
+for (_, voice) in pool.rendered() {
+    for (sum, sample) in mix.iter_mut().zip(&voice.out) {
+        *sum += sample;
+    }
+}
+assert!(report.is_complete());
+```
+
+Nothing on the audio thread allocates or locks, and it never waits longer
+than the pool's wait limit: a job a stalled worker still holds when the
+limit passes is dropped from that block and counted, never mixed
+half-rendered. Workers park between blocks, so an idle pool uses no
+processor time, and ask for real-time scheduling (MMCSS "Pro Audio" on
+Windows, `SCHED_FIFO` elsewhere), reporting what they got. A pool of zero
+workers renders everything on the calling thread.
+`cargo run --release -p manguebyte-core --example pool_speed` measures
+speed-up, block times and wake latency.
+
 ## The binary's own file
 
 `manguebyte_core::module::file()` names the file of the binary the code

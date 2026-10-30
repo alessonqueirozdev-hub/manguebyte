@@ -221,6 +221,14 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Parameter state save and restore, tolerant of version changes
 - ✅ Denormal protection: `NoDenormals`, held by the wrappers, the
   standalone engine, the device streams and the test harness (ADR 0006)
+- ✅ Rendering on several cores inside one audio callback
+  (`manguebyte_core::pool`, ADR 0015): a fixed set of jobs on workers
+  started up front, output bit for bit that of one thread, a wait bounded
+  by a limit with late jobs dropped and counted, no allocation or lock on
+  the audio thread, parked workers when idle, real-time priority where
+  the system grants it. Run and measured on Windows only; the CLAP
+  `thread-pool` extension and macOS audio workgroups are not done
+  (TECH_DEBT item 107)
 - ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 
@@ -246,7 +254,8 @@ Write a processor once and ship it in every format.
   events inside a block, which cut it there
 - ⬜ CLAP extensions still to come: note-end events, tail (issue #25),
   presets (`preset-load` and the preset-discovery factory), remote
-  controls, `render`, `thread-pool`, a native 64-bit path (TECH_DEBT 91)
+  controls, `render`, `thread-pool` (the pool's side is
+  `RenderPool::run_with`, TECH_DEBT 107), a native 64-bit path (TECH_DEBT 91)
 - ✅ VST 3: audio and event buses, every automation point on its frame,
   notes with ids, tuning and note expression, the MIDI controllers a
   plugin declares through hidden parameters, parameters, units, state,
