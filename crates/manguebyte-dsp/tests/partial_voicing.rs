@@ -1515,10 +1515,10 @@ fn largest_step(signal: &[f32]) -> f64 {
 fn changing_the_air_while_playing_does_not_click() {
     // What the air adds, on a partial of gain 1 at 100 Hz, stays smooth while
     // its depth or width moves: the largest step from sample to sample in
-    // a change is within 1.3 times that of playing at the larger depth, and
-    // under `depth · 4 · (w + (1 + 2 / 16) / 32 · 2)`, four standard
-    // deviations of noise turning at w and moving between its values
-    // and depths in an update.
+    // a change is within 1.3 times that of playing steadily at the larger
+    // depth. In absolute terms, under `depth · 4 · (w + (1 + 2 / 16) / 32 · 2)`,
+    // four standard deviations of noise turning at `w` and moving between
+    // its values and depths in an update.
     let hz = 100.0;
     let w = std::f64::consts::TAU * hz / RATE;
     let depth = 0.1f32;
@@ -1579,7 +1579,7 @@ fn changing_the_air_while_playing_does_not_click() {
         change(&mut airy, air);
         let step = largest_step(&added(&mut plain, &mut airy, 1_024));
         eprintln!("{name}: largest step {step:.6}");
-        assert!(step < 1.3 * steady.max(bound / 2.0), "{name}: {step}");
+        assert!(step < 1.3 * steady, "{name}: {step} against {steady}");
     }
 
     // From nothing, too: on a bank running the plain kernel.

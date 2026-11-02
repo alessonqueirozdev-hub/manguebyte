@@ -573,7 +573,7 @@ impl PartialBank {
     /// a jump.
     ///
     /// ```
-    /// use manguebyte_dsp::{PartialAir, PartialBank};
+    /// use manguebyte_dsp::PartialBank;
     ///
     /// let mut bank = PartialBank::new(16);
     /// bank.set_voicing_seed(0x1234);

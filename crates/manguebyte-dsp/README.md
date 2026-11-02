@@ -160,6 +160,52 @@ let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
 bank.render_add(&mut left, &mut right);
 ```
 
+By themselves the partials are perfectly clean and steady. The bank can make
+them sound blown instead, three ways, all multiplying what the caller sets, so
+`gain`, `ramp_to` and `set_rotation` mean what they did (ADR 0026):
+
+- `set_air` puts narrow-band noise around a partial, of a depth and a
+  bandwidth, by multiplying its phasor by `1 + depth · n(t)` on the way to the
+  output: a skirt shaped like a resonance's, with the partial's own level
+  where it was.
+- `start_attack` makes a partial speak: a delay, a rise, an overshoot that
+  settles, a breath of extra air that starts wide and narrows, a pitch that
+  settles. Upper partials can speak first.
+- `set_wind_jitter` wanders the whole bank's gain and frequency, by the same
+  ratio for every partial, on top of what a bellows model sets.
+
+`PipeVoicing::FLUE_PRINCIPAL` works these out for a flue principal, as a
+starting point: most of its numbers are judgements, and say so.
+`set_voicing_seed` picks the noise: give every pipe its own. Everything
+updates every 32 frames, with straight lines between. A bank with none of it
+on runs the plain kernel and gives the same bits as if it did not exist; with
+it, the output is the same on every backend and whatever the blocks. 2 000
+partials at 48 kHz cost 1.3 to 1.7 times the plain kernel with air, and 1.8
+to 2.9 with every partial always in an attack and the jitter on (0.05 to 0.17
+of a core on AVX2; `examples/partial_voicing_speed.rs`, one logical processor
+of a busy Intel Core i3-1215U). `examples/organ_pipe_wavs.rs` writes a pipe and a
+chord, plain and voiced, to compare by ear.
+
+```rust
+use manguebyte_dsp::{Partial, PartialBank, PipeVoicing};
+
+let voicing = PipeVoicing::FLUE_PRINCIPAL;
+let mut bank = PartialBank::new(16);
+bank.set_sample_rate(48_000.0);
+bank.set_len(8);
+bank.set_voicing_seed(60);
+bank.set_wind_jitter(voicing.jitter);
+for i in 0..8 {
+    let harmonic = (i + 1) as f32;
+    let hz = 261.63 * f64::from(harmonic);
+    bank.set(i, Partial { freq_hz: hz, gain: 0.2 / harmonic, pan: 0.0 });
+    bank.set_air(i, voicing.air(harmonic, hz));
+    bank.start_attack(i, &voicing.attack(harmonic, 48_000.0));
+}
+let (mut left, mut right) = (vec![0.0f32; 4_800], vec![0.0f32; 4_800]);
+bank.render_add(&mut left, &mut right);
+```
+
 ## The space around the pipes
 
 The `space` module puts an organ's pipes in a room, for an organ that

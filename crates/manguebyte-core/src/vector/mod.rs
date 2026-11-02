@@ -957,6 +957,38 @@ pub fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut Partials
 
 /// [`Backend::add_modulated_partials`] on the [detected](Backend::detect)
 /// backend.
+///
+/// ```
+/// use manguebyte_core::vector::{self, PartialModulators, Partials};
+///
+/// // A partial at 0 Hz, its phasor at a quarter turn, under a gain of 0.5.
+/// let (mut cos, mut sin, mut gain) = ([0.0f32], [1.0f32], [0.5f32]);
+/// // A modulator going from 1 towards 2.
+/// let (mut re, mut im) = ([1.0f32], [0.0f32]);
+/// let (mut left, mut right) = ([0.0f32; 4], [0.0f32; 4]);
+/// vector::add_modulated_partials(
+///     &mut left,
+///     &mut right,
+///     &mut Partials {
+///         cos: &mut cos,
+///         sin: &mut sin,
+///         gain: &mut gain,
+///         cos_step: &[1.0],
+///         sin_step: &[0.0],
+///         gain_step: &[0.0],
+///         left_gain: &[1.0],
+///         right_gain: &[0.0],
+///     },
+///     &mut PartialModulators {
+///         re: &mut re,
+///         im: &mut im,
+///         re_step: &[0.25],
+///         im_step: &[0.0],
+///     },
+/// );
+/// assert_eq!(left, [0.625, 0.75, 0.875, 1.0]);
+/// assert_eq!(re, [2.0]);
+/// ```
 #[inline]
 #[track_caller]
 pub fn add_modulated_partials(

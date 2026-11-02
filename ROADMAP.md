@@ -187,6 +187,15 @@ Everything a standalone audio application needs, short of a user interface.
   0.16 of a core on AVX2 against a whole core for the scalar kernel. NEON
   and WebAssembly SIMD are not yet run, and a block biquad across lanes is
   not started (TECH_DEBT 103)
+- 🚧 Voicing a bank of partials (`PartialBank`, ADR 0026): narrow-band air
+  around each partial, an attack for each with overshoot, breath and a
+  settling pitch, and wind jitter that keeps harmonics in ratio. A bank
+  that asks for none of it renders the same bits as before; with it, the
+  same bits on every backend and whatever the blocks; its level, width,
+  timing and depth measured on the output. 2 000 partials cost 1.3 to 1.7
+  times the plain kernel with air, up to 2.9 with everything on all at once.
+  Not yet wired into Caecilia and not yet judged by ear: its defaults are
+  mostly judgements (TECH_DEBT 119)
 - 🚧 The space around an organ's pipes (`manguebyte_dsp::space`, ADR
   0025): each pipe placed into up to 16 channels with pan, fractional
   delay, distance gain and air absorption, through shared fixed-point
