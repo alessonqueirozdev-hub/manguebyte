@@ -177,6 +177,39 @@ fn duplex_streams_do_not_use_the_heap() {
     }
 }
 
+/// The thread a system delivers MIDI on is under no real-time rule of
+/// its own, but it runs on the system's time, so it keeps off the heap
+/// too, whatever it is told.
+#[cfg(feature = "midi")]
+#[test]
+fn delivering_midi_from_ports_does_not_use_the_heap() {
+    let mock = mock();
+    mock.add_midi_port(Direction::Input, "pads", "Pads");
+    let setup = setup().with_midi_input(manguebyte_devices::DeviceRef::new("pads", "Pads"));
+    let mut manager = DeviceManager::headless(&mock);
+    manager.start(&setup, callback).unwrap();
+    let mut out = vec![0.0f32; 2 * 512];
+    assert_no_heap_use("a port's messages", || {
+        // A note, a pedal, a key the other port strikes, the ends of it
+        // all, and a note-off for nothing.
+        mock.send_midi("keys", &[0x90, 60, 100, 0xB0, 64, 127, 0x90, 61, 90]);
+        mock.send_midi("pads", &[0x90, 60, 90, 0xB0, 64, 127]);
+        mock.send_midi("keys", &[0x80, 60, 0, 0xB0, 64, 0, 0xB0, 123, 0]);
+        mock.send_midi("pads", &[0x80, 60, 0, 0x80, 62, 0, 0xB0, 64, 0]);
+        mock.send_midi("pads", &[0xF8]);
+        // More than the queue holds, so that a note-off has to wait, and
+        // then room for it.
+        mock.send_midi("keys", &[0x90, 60, 100]);
+        for _ in 0..5_000 {
+            mock.send_midi("pads", &[0xB0, 7, 100]);
+        }
+        mock.send_midi("keys", &[0x80, 60, 0]);
+        assert!(mock.render(&mut out));
+        mock.send_midi("keys", &[0x90, 60, 100, 0x80, 60, 0]);
+        assert!(mock.render(&mut out));
+    });
+}
+
 #[cfg(feature = "midi")]
 #[test]
 fn mpe_from_a_port_becomes_per_note_events_without_the_heap() {

@@ -639,6 +639,26 @@ break the API.
 
 ### Fixed
 
+- A MIDI input port closed or unplugged while a note was held under a
+  device manager, as a standalone plugin's are, sent no note-off, so the
+  plugin never released the voice and it could sustain for ever; the same
+  went for a held sustain pedal. The place where the ports meet the queue
+  to the audio thread now follows each port's notes and pedals, with the
+  tracker of the MIDI output port (ADR 0023), and a port closed by
+  `disable_midi_input`, `Standalone::set_midi_input`, `apply`, `follow` or
+  `Standalone::poll_devices` gives the plugin a note-off of velocity zero
+  for every note it holds and then a controller 64 of zero for every
+  channel it holds a pedal down on, once. Nothing changes on the audio
+  thread: they reach it through the same wait-free queue. What
+  a port and another hold together is no longer one port's to end, which
+  also changes what a plugin hears from two ports in play: a note or pedal
+  two ports hold ends when the last lets go, and a key struck again while
+  held, by any port, is a note-off and a note-on on one frame, so every
+  note-on has one note-off. A note-off for a note the port does not hold is
+  dropped, and one that finds the queue full waits for room. Limits are in
+  `manguebyte_devices::midi` and TECH_DEBT item 120. Tested on the headless
+  backend, with no heap use on the audio path or the delivering thread.
+
 - Tests that write files under `CARGO_TARGET_TMPDIR` used fixed folder
   names, so two runs of them sharing a target directory (parallel agents,
   two CI-like runs) deleted or overwrote each other's LV2 bundles, scan

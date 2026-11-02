@@ -24,7 +24,8 @@ use crate::backend::MidiSender;
 const POLL: Duration = Duration::from_millis(1);
 
 /// What a message does to the notes a port plays.
-enum NoteChange {
+#[derive(Clone, Copy)]
+pub(super) enum NoteChange {
     On {
         group: u8,
         channel: u8,
@@ -51,10 +52,10 @@ type NoteAt = (u8, u8, u8);
 type ChannelAt = (u8, u8);
 
 /// The sustain pedal's controller.
-const SUSTAIN: u8 = 64;
+pub(super) const SUSTAIN: u8 = 64;
 
 impl NoteChange {
-    fn of_midi1(group: u8, message: &MidiMessage) -> Self {
+    pub(super) fn of_midi1(group: u8, message: &MidiMessage) -> Self {
         match *message {
             // A note-on of velocity zero is a note-off in MIDI 1.0.
             MidiMessage::NoteOn {
@@ -124,14 +125,15 @@ impl NoteChange {
 
 /// The notes a port is playing, one bit per note number for each group
 /// and channel, and the channels whose sustain pedal is down, which would
-/// keep them sounding after their note-offs.
-struct HeldNotes {
+/// keep them sounding after their note-offs. The MIDI output port keeps
+/// one, and so does every MIDI input port under a device manager.
+pub(super) struct HeldNotes {
     keys: [[u128; 16]; 16],
     pedals: [u16; 16],
 }
 
 impl HeldNotes {
-    const NONE: Self = Self {
+    pub(super) const NONE: Self = Self {
         keys: [[0; 16]; 16],
         pedals: [0; 16],
     };
@@ -139,7 +141,7 @@ impl HeldNotes {
     /// Follows a message on its way to the port, and says whether it is
     /// to be sent: every message is, but a note-off for a note the port is
     /// not playing, such as one that a change of port has already ended.
-    fn follow(&mut self, change: NoteChange) -> bool {
+    pub(super) fn follow(&mut self, change: NoteChange) -> bool {
         match change {
             NoteChange::On {
                 group,
@@ -179,9 +181,43 @@ impl HeldNotes {
         }
     }
 
+    /// Whether this note is held.
+    pub(super) fn holds(&self, (group, channel, key): NoteAt) -> bool {
+        self.keys[usize::from(group & 0x0F)][usize::from(channel & 0x0F)] & (1 << (key & 0x7F)) != 0
+    }
+
+    /// Whether this channel's pedal is down.
+    pub(super) fn pedal_down(&self, (group, channel): ChannelAt) -> bool {
+        self.pedals[usize::from(group & 0x0F)] & (1 << (channel & 0x0F)) != 0
+    }
+
+    /// The first note held, by group, channel and key. Does not allocate.
+    pub(super) fn first_note(&self) -> Option<NoteAt> {
+        (0..16u8).zip(&self.keys).find_map(|(group, channels)| {
+            (0..16u8)
+                .zip(channels)
+                .find(|(_, keys)| **keys != 0)
+                .map(|(channel, keys)| (group, channel, keys.trailing_zeros() as u8))
+        })
+    }
+
+    /// The first channel whose pedal is down, by group and channel. Does
+    /// not allocate.
+    pub(super) fn first_pedal(&self) -> Option<ChannelAt> {
+        (0..16u8)
+            .zip(self.pedals)
+            .find(|(_, pedals)| *pedals != 0)
+            .map(|(group, pedals)| (group, pedals.trailing_zeros() as u8))
+    }
+
+    /// Takes the notes held on one channel, one bit per note number.
+    pub(super) fn take_channel(&mut self, (group, channel): ChannelAt) -> u128 {
+        std::mem::take(&mut self.keys[usize::from(group & 0x0F)][usize::from(channel & 0x0F)])
+    }
+
     /// Takes every note held, as (group, channel, key), and every channel
     /// whose pedal is down, as (group, channel).
-    fn drain(&mut self) -> (Vec<NoteAt>, Vec<ChannelAt>) {
+    pub(super) fn drain(&mut self) -> (Vec<NoteAt>, Vec<ChannelAt>) {
         let Self { keys, pedals } = std::mem::replace(self, Self::NONE);
         let mut notes = Vec::new();
         let mut held_down = Vec::new();

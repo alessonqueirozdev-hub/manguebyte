@@ -694,6 +694,17 @@ impl<P: Plugin> Standalone<P> {
     /// ([`MidiInputs::All`]) turns the settings into a list of the ports
     /// open now but that one. A port that cannot be opened is reported as
     /// a fallback.
+    ///
+    /// The plugin hears the end of what a closed port holds, in its next
+    /// block: a note-off for every note, then a controller 64 of zero for
+    /// every channel with a sustain pedal down, once. A note or a pedal
+    /// another open port also holds lasts until that port lets go, and a
+    /// note-off for a key held down while the port was closed is dropped
+    /// when it opens again;
+    /// [the device manager's ports](manguebyte_devices::midi#several-input-ports)
+    /// say all of it. The same goes for a port that
+    /// [`apply_settings`](Self::apply_settings) leaves out or
+    /// [`poll_devices`](Self::poll_devices) finds gone.
     pub fn set_midi_input(&mut self, id: &str, open: bool) -> &SettingsReport {
         let connected = self
             .manager
@@ -806,6 +817,10 @@ impl<P: Plugin> Standalone<P> {
     /// the settings (or any port, with [`MidiInputs::All`]) is opened when
     /// it appears. Call it from a timer of the program's own, about every
     /// [`DEFAULT_POLL_INTERVAL`](manguebyte_devices::DEFAULT_POLL_INTERVAL).
+    ///
+    /// A MIDI input port that went away ends what it held, as
+    /// [`set_midi_input`](Self::set_midi_input) says, so the notes of a
+    /// keyboard pulled out while they are held sound until this call.
     ///
     /// Returns the report of what changed, or `None` when nothing did.
     pub fn poll_devices(&mut self) -> Option<&SettingsReport> {
@@ -993,6 +1008,10 @@ impl<P: Plugin> Standalone<P> {
     /// Plays a MIDI message as if it had come from a keyboard, at the start
     /// of the next block. Returns `false` if too many messages are already
     /// waiting.
+    ///
+    /// The plugin cannot tell these from a port's: a port that ends a note
+    /// on the same channel and key, by its note-off or by being closed,
+    /// ends this one too.
     pub fn send(&self, message: MidiMessage) -> bool {
         let mut notes = self
             .notes

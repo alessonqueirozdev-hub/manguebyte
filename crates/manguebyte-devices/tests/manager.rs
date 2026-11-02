@@ -731,6 +731,207 @@ mod midi {
         assert!(manager.midi_inputs().is_empty());
     }
 
+    /// A manager with two input ports whose callback hands on what it reads
+    /// on a channel.
+    fn listening(
+        mock: &MockBackend,
+        setup: &DeviceSetup,
+    ) -> (DeviceManager, mpsc::Receiver<MidiInputMessage>) {
+        mock.add_midi_port(Direction::Input, "keys", "Keys");
+        mock.add_midi_port(Direction::Input, "pads", "Pads");
+        let (messages, received) = mpsc::channel();
+        let mut manager = DeviceManager::headless(mock);
+        manager
+            .start(setup, move |io: &mut DeviceIo<'_>| {
+                io.read_midi(|_, message| {
+                    let _ = messages.send(message);
+                });
+            })
+            .unwrap();
+        (manager, received)
+    }
+
+    /// Plays a block, and takes what the callback read since the last call.
+    fn heard(mock: &MockBackend, received: &mpsc::Receiver<MidiInputMessage>) -> Vec<MidiMessage> {
+        render(mock, 2).unwrap();
+        received
+            .try_iter()
+            .filter_map(|message| match message {
+                MidiInputMessage::Channel(message) => Some(message),
+                MidiInputMessage::System(_) => None,
+            })
+            .collect()
+    }
+
+    fn off(channel: u8, note: u8) -> MidiMessage {
+        MidiMessage::NoteOff {
+            channel,
+            note,
+            velocity: 0,
+        }
+    }
+
+    fn lift(channel: u8) -> MidiMessage {
+        MidiMessage::ControlChange {
+            channel,
+            controller: 64,
+            value: 0,
+        }
+    }
+
+    fn both_ports() -> DeviceSetup {
+        DeviceSetup::default()
+            .with_midi_input(DeviceRef::new("keys", "Keys"))
+            .with_midi_input(DeviceRef::new("pads", "Pads"))
+    }
+
+    #[test]
+    fn an_input_port_that_is_disabled_ends_what_it_holds() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB2, 64, 127, 0x93, 61, 90]));
+        assert_eq!(heard(&mock, &received).len(), 3);
+
+        manager.disable_midi_input("keys");
+        assert_eq!(
+            heard(&mock, &received),
+            [off(0, 60), off(3, 61), lift(2)],
+            "the notes, then the pedals"
+        );
+        assert_eq!(heard(&mock, &received), [], "once");
+    }
+
+    #[test]
+    fn an_input_port_that_goes_away_ends_what_it_holds() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        manager.poll_devices();
+        assert!(mock.send_midi("pads", &[0x90, 60, 100, 0xB0, 64, 127]));
+        assert_eq!(heard(&mock, &received).len(), 2);
+
+        mock.remove_midi_port(Direction::Input, "pads");
+        let events = manager.poll_devices();
+        assert_eq!(heard(&mock, &received), [], "not followed yet");
+        assert!(manager.follow(&events[0]).is_some());
+        assert_eq!(heard(&mock, &received), [off(0, 60), lift(0)]);
+        assert_eq!(heard(&mock, &received), [], "once");
+    }
+
+    #[test]
+    fn an_input_port_a_new_setup_leaves_out_ends_what_it_holds() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert!(mock.send_midi("pads", &[0x90, 62, 100]));
+        assert_eq!(heard(&mock, &received).len(), 2);
+
+        let only_pads = DeviceSetup::default().with_midi_input(DeviceRef::new("pads", "Pads"));
+        manager.apply(&only_pads).unwrap();
+        assert_eq!(heard(&mock, &received), [off(0, 60)]);
+        // A setup that keeps the port leaves it holding its note.
+        manager.apply(&only_pads).unwrap();
+        assert_eq!(heard(&mock, &received), []);
+        assert!(mock.send_midi("pads", &[0x80, 62, 7]));
+        assert_eq!(
+            heard(&mock, &received),
+            [MidiMessage::NoteOff {
+                channel: 0,
+                note: 62,
+                velocity: 7
+            }],
+            "the port's own note-off is passed on as it is"
+        );
+    }
+
+    #[test]
+    fn an_input_port_ends_what_it_holds_while_the_stream_is_stopped() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert_eq!(heard(&mock, &received).len(), 1);
+
+        manager.stop();
+        manager.disable_midi_input("keys");
+        manager.restart().unwrap();
+        assert_eq!(heard(&mock, &received), [off(0, 60)]);
+    }
+
+    #[test]
+    fn what_ends_a_note_waits_when_the_queue_is_full() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB1, 64, 127]));
+        assert!(mock.send_midi("pads", &[0x90, 62, 100, 0x90, 63, 100]));
+        // More than the queue can hold, with no block read in between.
+        for _ in 0..5_000 {
+            assert!(mock.send_midi("pads", &[0xB0, 7, 100]));
+        }
+        // Neither fits: the port's own note-off, and those of its closing.
+        assert!(mock.send_midi("pads", &[0x80, 62, 0]));
+        manager.disable_midi_input("keys");
+        // A note that comes to a full queue is lost, with its note-off.
+        assert!(mock.send_midi("pads", &[0x90, 64, 100, 0x80, 64, 0]));
+
+        let first = heard(&mock, &received);
+        assert!(first.len() >= 4_000, "{}", first.len());
+        assert!(
+            !first
+                .iter()
+                .any(|message| matches!(message, MidiMessage::NoteOff { .. })),
+        );
+        assert!(!first.contains(&lift(1)));
+
+        // The next poll finds room for them, in order: notes, then pedals.
+        assert_eq!(manager.poll_devices(), []);
+        assert_eq!(
+            heard(&mock, &received),
+            [off(0, 60), off(0, 62), lift(1)],
+            "and only them"
+        );
+        assert_eq!(heard(&mock, &received), []);
+
+        // Nothing was left over to get in the way of the next note.
+        assert!(mock.send_midi("pads", &[0x80, 63, 0, 0x90, 64, 100, 0x80, 64, 0]));
+        assert_eq!(
+            heard(&mock, &received),
+            [
+                off(0, 63),
+                MidiMessage::NoteOn {
+                    channel: 0,
+                    note: 64,
+                    velocity: 100
+                },
+                off(0, 64),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_ends_a_note_goes_before_a_later_message_when_room_appears() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        for _ in 0..5_000 {
+            assert!(mock.send_midi("pads", &[0xB0, 7, 100]));
+        }
+        manager.disable_midi_input("keys");
+        heard(&mock, &received);
+
+        // No poll: the next message of any port brings it along, first.
+        assert!(mock.send_midi("pads", &[0x90, 60, 100]));
+        assert_eq!(
+            heard(&mock, &received),
+            [
+                off(0, 60),
+                MidiMessage::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 100
+                },
+            ]
+        );
+    }
+
     fn note_on(note: u8) -> Packet {
         Packet::from_midi1(
             0,

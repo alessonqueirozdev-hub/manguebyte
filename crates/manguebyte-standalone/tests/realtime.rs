@@ -1,8 +1,8 @@
 //! Proves that a standalone plugin's audio path never touches the heap:
 //! the device edge, the engine with its parameter changes, the program's
 //! notes and the MIDI of the ports, before and after a change of device,
-//! and the plugin's notes on their way to a MIDI output port that changes
-//! while they flow.
+//! the end of the notes of a MIDI input port that goes, and the plugin's
+//! notes on their way to a MIDI output port that changes while they flow.
 //!
 //! The headless backend calls the stream on the test's thread, exactly as
 //! a sound card's thread would, while a counting allocator watches.
@@ -199,6 +199,40 @@ fn a_running_standalone_does_not_use_the_heap() {
         app.set_output_device("b");
     }
     assert_eq!(app.sample_rate(), 44_100.0);
+}
+
+#[test]
+fn ending_the_notes_of_a_port_that_goes_does_not_use_the_heap() {
+    let mock = MockBackend::new();
+    mock.add_device(Direction::Output, MockBackend::device("a", "a", 2, 48_000));
+    mock.add_midi_port(Direction::Input, "keys", "Keys");
+    mock.add_midi_port(Direction::Input, "pads", "Pads");
+    let mut manager = DeviceManager::headless(&mock);
+    manager.set_crossfade(Duration::ZERO);
+    let mut app = Standalone::<Keys>::start_on(manager, StandaloneOptions::default()).unwrap();
+    let mut out = vec![0.0f32; 2 * 1_500];
+
+    // Notes and a pedal held on a port closed by the program, and on one
+    // unplugged: the audio thread reads what ends them as any other MIDI.
+    for (port, unplug) in [("keys", false), ("pads", true)] {
+        assert!(mock.send_midi(port, &[0xB0, 64, 127, 0x90, 60, 100, 0x90, 64, 90]));
+        assert_no_heap_use("the notes starting", || {
+            for frames in SIZES {
+                assert!(mock.render(&mut out[..2 * frames]));
+            }
+        });
+        if unplug {
+            mock.remove_midi_port(Direction::Input, port);
+            assert!(app.poll_devices().is_some());
+        } else {
+            app.set_midi_input(port, false);
+        }
+        assert_no_heap_use("the notes ending", || {
+            for frames in SIZES {
+                assert!(mock.render(&mut out[..2 * frames]));
+            }
+        });
+    }
 }
 
 /// Sends every note it is given back out, so that notes flow to the MIDI

@@ -21,8 +21,8 @@ use crate::hotswap::{
 };
 #[cfg(feature = "midi")]
 use crate::midi::{
-    MidiError, MidiInputMessage, MidiProtocol, MidiReceiver, MidiSink, MidiTransmitter,
-    SharedOutput, SharedOutputThread, Timed, merged_receiver, midi_output_queue,
+    MergedInput, MergedPort, MidiError, MidiInputMessage, MidiProtocol, MidiReceiver,
+    MidiTransmitter, SharedOutput, SharedOutputThread, merged_receiver, midi_output_queue,
 };
 #[cfg(feature = "midi")]
 use crate::setup::DeviceRef;
@@ -371,9 +371,9 @@ pub struct DeviceManager {
     #[cfg(feature = "midi")]
     midi_receiver: Option<MidiReceiver>,
     #[cfg(feature = "midi")]
-    midi_shared: Arc<Mutex<Producer<Timed>>>,
+    midi_shared: Arc<Mutex<MergedInput>>,
     #[cfg(feature = "midi")]
-    midi_inputs: Vec<(DeviceSummary, Box<dyn Send>)>,
+    midi_inputs: Vec<(DeviceSummary, MergedPort)>,
     /// The open MIDI output port, as the shared output has it, so that it
     /// can be lent out.
     #[cfg(feature = "midi")]
@@ -796,6 +796,10 @@ impl DeviceManager {
     /// crossfade once it has faded out.
     pub fn poll_devices(&mut self) -> Vec<DeviceEvent> {
         self.finish_crossfades(false);
+        // Note-offs of input ports that found the queue to the callback
+        // full, if any did.
+        #[cfg(feature = "midi")]
+        MergedInput::lock(&self.midi_shared).retry_owed();
         self.poller.poll()
     }
 
@@ -818,7 +822,9 @@ impl DeviceManager {
     /// device was lost, or when the setup would now pick other devices than
     /// those running (the saved device came back, the default changed while
     /// the setup asks for the default, a first device appeared), and opens
-    /// or closes the setup's MIDI ports as they come and go.
+    /// or closes the setup's MIDI ports as they come and go. An input port
+    /// that goes ends the notes and the sustain pedals it holds, as
+    /// [`disable_midi_input`](Self::disable_midi_input) says.
     ///
     /// Returns `None` when the event changes nothing here, and what the
     /// restart reported otherwise.
@@ -1545,8 +1551,7 @@ impl DeviceManager {
             if self.midi_inputs.iter().any(|(open, _)| open.id == port.id) {
                 continue;
             }
-            let sink = MidiSink::Shared(Arc::clone(&self.midi_shared));
-            match self.backend.connect_midi_input(&port.id, sink) {
+            match self.connect_midi_input(&port.id) {
                 Ok(connection) => self.midi_inputs.push((port.clone(), connection)),
                 Err(error) => report.fallbacks.push(Fallback::MidiPortMissing {
                     direction: Direction::Input,
@@ -1575,6 +1580,13 @@ impl DeviceManager {
         }
     }
 
+    /// Connects an input port to the queue the callback reads.
+    fn connect_midi_input(&self, id: &str) -> Result<MergedPort, MidiError> {
+        MergedInput::connect(&self.midi_shared, |sink| {
+            self.backend.connect_midi_input(id, sink)
+        })
+    }
+
     /// Puts `next` in place of the open MIDI output port, after ending
     /// the notes the old one plays.
     fn replace_midi_output(&mut self, next: Option<(DeviceSummary, Box<dyn MidiSender>)>) {
@@ -1592,15 +1604,15 @@ impl DeviceManager {
 
     /// A new MIDI queue for the callback, when the old receiver was lost
     /// with a callback that never came back. The ports are connected to it
-    /// again.
+    /// again, holding nothing as far as the new queue knows: no callback
+    /// that reads it has heard their notes.
     fn renew_midi(&mut self) {
         let (shared, receiver) = merged_receiver();
         self.midi_shared = shared;
         self.midi_receiver = Some(receiver);
         let ports: Vec<DeviceSummary> = self.midi_inputs.drain(..).map(|(port, _)| port).collect();
         for port in ports {
-            let sink = MidiSink::Shared(Arc::clone(&self.midi_shared));
-            if let Ok(connection) = self.backend.connect_midi_input(&port.id, sink) {
+            if let Ok(connection) = self.connect_midi_input(&port.id) {
                 self.midi_inputs.push((port, connection));
             }
         }
@@ -1681,7 +1693,8 @@ impl DeviceManager {
     }
 
     /// Adds a MIDI input port to the setup and opens it at once, without
-    /// restarting the audio.
+    /// restarting the audio. The port starts out holding nothing: a
+    /// note-off for a key held down since before is dropped.
     pub fn enable_midi_input(&mut self, port: DeviceRef) -> Result<(), MidiError> {
         if !self.setup.midi_inputs.contains(&port) {
             self.setup.midi_inputs.push(port.clone());
@@ -1689,8 +1702,7 @@ impl DeviceManager {
         if self.midi_inputs.iter().any(|(open, _)| open.id == port.id) {
             return Ok(());
         }
-        let sink = MidiSink::Shared(Arc::clone(&self.midi_shared));
-        let connection = self.backend.connect_midi_input(&port.id, sink)?;
+        let connection = self.connect_midi_input(&port.id)?;
         self.midi_inputs.push((
             DeviceSummary {
                 id: port.id,
@@ -1702,6 +1714,15 @@ impl DeviceManager {
     }
 
     /// Takes a MIDI input port out of the setup and closes it.
+    ///
+    /// The callback then gets a note-off for every note the port still
+    /// holds and a controller 64 of zero for every channel it holds a
+    /// sustain pedal down on, once, in the queue it reads, unless another
+    /// open port holds the same; see
+    /// [how ports are merged](crate::midi#several-input-ports). A port
+    /// that [`apply`](Self::apply) or [`follow`](Self::follow) closes does
+    /// the same. This takes a lock the threads that deliver MIDI take,
+    /// never the audio thread.
     pub fn disable_midi_input(&mut self, id: &str) {
         self.setup.midi_inputs.retain(|port| port.id != id);
         self.midi_inputs.retain(|(port, _)| port.id != id);

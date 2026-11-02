@@ -46,6 +46,50 @@
 //! then change, or come and go, while the audio thread sends, without
 //! leaving a note hanging on the port it leaves.
 //!
+//! # Several input ports
+//!
+//! Under a [`DeviceManager`](crate::DeviceManager) every input port feeds
+//! one queue, so a plugin hears one stream with no ports in it, in which a
+//! channel and a key are one note, whichever port plays it. The stream
+//! cannot keep two ports' notes apart, so the place where the ports meet
+//! does. It follows each port's notes and sustain pedals, and:
+//!
+//! - **A port that is closed**, by the program, by being unplugged or by a
+//!   change of setup, gives the plugin a note-off of velocity zero for
+//!   every note it holds, then a controller 64 of zero for every channel
+//!   it holds a pedal down on. An unplugged port is closed when the
+//!   program acts on what
+//!   [`DeviceManager::poll_devices`](crate::DeviceManager::poll_devices)
+//!   or a [`DeviceWatcher`](crate::DeviceWatcher) reports, so its notes
+//!   sound until then.
+//! - **A note-off for a note the port does not hold** is dropped, such as
+//!   that of a key held down while its port was closed and opened again.
+//! - **A note or a pedal two ports hold** lasts until the last of them lets
+//!   go: only then does the plugin get the note-off or the lift, whether
+//!   that port let go or was closed. A lift from a port whose pedal is not
+//!   down passes unless another port's is, since it changes nothing.
+//! - **A key struck again while it is held**, by the same port or another,
+//!   reaches the plugin as a note-off and a note-on on the same frame, so
+//!   the second strike is heard and every note-on has one note-off, also
+//!   for a plugin that counts them.
+//! - **Controllers 120 and 123 to 127** end the port's notes on that
+//!   channel, so closing the port owes them nothing, and controller 121
+//!   its pedal there.
+//! - **A note-off or a lift that finds the queue full** waits, and goes
+//!   first when there is room: at the next message of any port, or at the
+//!   next [`DeviceManager::poll_devices`](crate::DeviceManager::poll_devices).
+//!
+//! MPE member channels are channels like any other here. The input path
+//! carries MIDI 1.0 bytes, from the system's MIDI 1.0 API, so no MIDI 2.0
+//! message reaches this.
+//!
+//! What cannot be kept apart: the messages a program plays itself go to
+//! the engine by another way, `Standalone::send`, and are not followed
+//! here, so a port's note-off or closing ends a note the program plays on
+//! the same channel and key. A [`MidiInput`] opened by hand has a queue of
+//! its own and none of this: dropping it ends nothing, and held notes are
+//! left to whoever reads its [`MidiReceiver`].
+//!
 //! # MIDI 1.0 and MIDI 2.0 ports
 //!
 //! A port speaks MIDI 1.0 unless the application asks for MIDI 2.0 with
@@ -100,10 +144,12 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+mod merged;
 mod output;
 mod shared;
 mod ump;
 
+pub(crate) use merged::{MergedInput, MergedPort};
 pub use output::{
     MidiOutputQueue, MidiOutputThread, MidiProtocol, MidiTransmitter, PacketWriter,
     SYSEX_OUT_CAPACITY, midi_output_queue,
@@ -238,10 +284,15 @@ pub(crate) struct Timed {
 
 /// Where a port's messages go: a queue of its own, or one that several
 /// ports share. The shared queue's lock is taken by the threads the system
-/// delivers MIDI on, never by the audio thread, which only reads.
+/// delivers MIDI on and by the program's thread when a port opens or
+/// closes, never by the audio thread, which only reads.
 pub(crate) enum MidiSink {
     Own(Producer<Timed>),
-    Shared(Arc<Mutex<Producer<Timed>>>),
+    Merged {
+        shared: Arc<Mutex<MergedInput>>,
+        /// Which of the shared queue's ports this is.
+        port: u64,
+    },
 }
 
 impl MidiSink {
@@ -267,11 +318,7 @@ impl MidiSink {
                 Self::Own(producer) => {
                     let _ = producer.push(timed);
                 }
-                Self::Shared(shared) => {
-                    if let Ok(mut producer) = shared.lock() {
-                        let _ = producer.push(timed);
-                    }
-                }
+                Self::Merged { shared, port } => MergedInput::lock(shared).receive(*port, timed),
             }
         };
         parser.feed_slice(bytes, |event| match event {
@@ -287,11 +334,11 @@ impl MidiSink {
 /// largest size a device may announce in practice.
 pub const SYSEX_CAPACITY: usize = 65_536;
 
-/// One receiver for any number of ports: the sink to share between the
-/// ports, and the audio thread's end.
-pub(crate) fn merged_receiver() -> (Arc<Mutex<Producer<Timed>>>, MidiReceiver) {
+/// One receiver for any number of ports: what they are connected to, and
+/// the audio thread's end.
+pub(crate) fn merged_receiver() -> (Arc<Mutex<MergedInput>>, MidiReceiver) {
     let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
-    (Arc::new(Mutex::new(sender)), receiver)
+    (Arc::new(Mutex::new(MergedInput::new(sender))), receiver)
 }
 
 /// The system's input port with this identifier, and its name.
@@ -338,7 +385,10 @@ pub(crate) fn connect_input(
     Ok((connection, name))
 }
 
-/// An open MIDI input port. Receiving stops when it is dropped.
+/// An open MIDI input port. Receiving stops when it is dropped, which
+/// sends no note-offs: notes held then are left to whoever reads its
+/// [`MidiReceiver`]. A port under a [`DeviceManager`](crate::DeviceManager)
+/// [ends what it holds](self#several-input-ports).
 pub struct MidiInput {
     name: String,
     _connection: midir::MidiInputConnection<StreamParser>,
@@ -856,8 +906,11 @@ mod tests {
     #[test]
     fn a_shared_sink_merges_ports_into_one_receiver() {
         let (shared, mut receiver) = merged_receiver();
-        let mut first = MidiSink::Shared(Arc::clone(&shared));
-        let mut second = MidiSink::Shared(shared);
+        let sink = || MidiSink::Merged {
+            port: MergedInput::lock(&shared).add_port(),
+            shared: Arc::clone(&shared),
+        };
+        let (mut first, mut second) = (sink(), sink());
         let (mut a, mut b) = (StreamParser::new(0), StreamParser::new(0));
         // A message split across two deliveries and running status stay
         // with their own port, because each port has its own parser.
@@ -875,6 +928,22 @@ mod tests {
             })
         };
         assert_eq!(seen, [on(64, 100), on(60, 100), on(62, 90)]);
+    }
+
+    #[test]
+    fn what_a_closed_port_still_delivers_goes_nowhere() {
+        let (shared, mut receiver) = merged_receiver();
+        let port = MergedInput::lock(&shared).add_port();
+        let mut sink = MidiSink::Merged {
+            port,
+            shared: Arc::clone(&shared),
+        };
+        let mut parser = StreamParser::new(0);
+        MergedInput::lock(&shared).close_port(port);
+        sink.deliver(&[0x90, 60, 100, 0xF8], &mut parser);
+        let mut seen = 0;
+        receiver.read(FRAMES, RATE, |_, _| seen += 1);
+        assert_eq!(seen, 0);
     }
 
     #[test]
