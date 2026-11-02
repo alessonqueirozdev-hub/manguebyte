@@ -1,6 +1,7 @@
 # ADR 0015: Rendering on several cores inside one audio callback
 
-Status: accepted, 2026-10-30
+Status: accepted, 2026-10-30; the flag of decisions 4 and 5 replaced on
+2026-11-02 (see the note at the end)
 
 ## Context
 
@@ -175,3 +176,78 @@ loaded laptop and say nothing about other machines.
 3. [x] A benchmark (`examples/pool_speed.rs`)
 4. [ ] The CLAP wrapper's `thread-pool` extension through `run_with`
 5. [ ] macOS audio workgroups and the time-constraint policy for workers
+
+## Note, 2026-11-02: one claim word instead of a flag
+
+Decisions 4 and 5 are as they were written on 2026-10-30; this is what
+replaced them in the code, and why.
+
+A thread took a job's flag with a swap and only then looked whether the
+block was closed. A worker waking after the block closed held the flag for a
+moment before giving it back, and if the system stopped it there, `job` and
+`job_mut` refused a job nothing was rendering, after a block that had missed
+nothing. It failed a CI run on macOS (`pool.job(index).unwrap()` in
+`output_matches_one_thread_bit_for_bit`). The same moment could also make a
+later block's sweep wait for that flag and count a job missed for nothing.
+
+Each job now has one atomic word, in place of the flag and of the number of
+the last block it was rendered for: a state, and the block it is about.
+
+- `run` opens a block by storing `OPEN` and the block's number in the slots
+  it renders, before it tells any thread to look. A slot a late worker still
+  has is left alone.
+- A thread claims a job with a compare-and-swap from that `OPEN` word to
+  `RENDERING`. A thread that loses, or comes late, or read the word in an
+  earlier block, fails and has written nothing, so there is no moment to be
+  stopped in. A block's number never comes back, so an old word cannot
+  match. Having no block number to be stale about, `try_render` claims for
+  whichever block the slot says, and `take_jobs` no longer looks at a
+  `closed` counter, which is gone.
+- The thread leaves `RENDERED` and the block's number, or `FREE` if the job
+  panicked. `job` and `job_mut` refuse only `RENDERING`.
+- A slot that frees during a block is opened by `run`'s sweep and rendered
+  like the others, as before.
+
+The block number stays in the `RENDERED` word because a bare mark would be
+wrong: a late worker finishing during a later block would look like a job
+rendered for that block, and last block's sound would be mixed into this one,
+which decision 5 rejects.
+
+The sweep renders every job still open before it can leave, so a normal
+`run` has nothing to take back when it ends. Taking back by compare-and-swap
+is kept for a `run` that a panicking job or `request` ends: a guard closes
+the block as the panic passes, so a job is never lent while a thread can
+claim it. The earlier code left the block open in that case.
+
+The ordering no longer pairs two locations with sequential consistency. It
+takes one word at a time, and every thread sees one atomic's writes in one
+order. Exclusion: a claim, and the audio thread's taking back of a slot, are
+read-modify-writes of one word, so exactly one of them finds it `OPEN`.
+Visibility: `OPEN` is stored with Release and claimed with Acquire, which
+carries `job_mut`'s writes to the rendering thread; a rendering thread leaves
+with Release and the audio thread reads with Acquire before it lends the job
+or opens the slot again, which carries the rendering's writes to the audio
+thread and on to the next claim. That includes the load in `run` that opens
+the block, which may be the first the audio thread hears of a late worker
+finishing.
+
+One sentence of decision 5 was not true of the code, then or now: "later
+blocks count it missed rather than wait for it again". A later block does
+wait, up to the limit, and renders the job if its worker lets go in time.
+
+Cost, measured with the old and the new binary in turn on the machine of
+*Measured*, with other work running on it. With `pool_speed` no difference
+shows above the noise: six turns of 64 voices of one partial, 1 000 blocks,
+give a mean of 0.222 ms before and 0.219 ms after on one thread, 0.134 ms and
+0.138 ms on four; 32 partials give means within the spread of the runs; the
+median wake latency stays between 21 and 43 µs in both. The cost alone,
+with no work and no other thread (a pool of no workers, 64 empty jobs, three
+turns of 300 000 blocks), is 1.53 µs a block before and 1.68 µs after, about
+2 ns per job more.
+
+Before, 69 refusals in 900 000 blocks of 16 small jobs on seven workers and
+eight cores; after, none in 600 000. See `tests/pool.rs` and the tests of the
+module. The module's tests make the failure's order of events with no thread
+and no timing. The old code had no point to stop at from outside, so a
+temporary copy of it was given one, after the swap, and it refused the job
+there; that copy was not kept.

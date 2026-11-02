@@ -366,6 +366,46 @@ fn a_stalled_worker_costs_the_audio_thread_at_most_the_wait_limit() {
     assert_eq!((stats.blocks, stats.overruns, stats.missed_jobs), (3, 2, 2));
 }
 
+struct Tally(u64);
+
+impl Job for Tally {
+    fn render(&mut self) {
+        self.0 += 1;
+    }
+}
+
+/// `job` and `job_mut` refuse only a job a block missed. A worker that wakes
+/// after its block closed, which many blocks of small jobs on more threads
+/// than cores make common, must not get in the way. The determinate proof is
+/// in the module's own tests; this one is the failure as CI saw it.
+#[test]
+fn every_job_is_lent_after_a_block_that_missed_none() {
+    let cores = thread::available_parallelism().map_or(1, usize::from);
+    let (counts, blocks): (Vec<usize>, u64) = if cfg!(miri) {
+        (vec![2], 20)
+    } else {
+        (vec![cores.saturating_sub(1).max(1), 2 * cores + 1], 10_000)
+    };
+    for workers in counts {
+        let mut pool = RenderPool::new(
+            (0..16).map(|_| Tally(0)).collect(),
+            PoolConfig::with_workers(workers)
+                .real_time(false)
+                .wait_limit(Duration::from_secs(30)),
+        );
+        for block in 1..=blocks {
+            assert!(pool.run(16).is_complete());
+            for index in 0..16 {
+                assert!(
+                    pool.job(index).is_some(),
+                    "{workers} workers: job {index} refused after block {block}"
+                );
+                assert_eq!(pool.job_mut(index).unwrap().0, block);
+            }
+        }
+    }
+}
+
 /// Holds a token, so that the test sees when the pool's jobs are freed.
 struct Token(#[allow(dead_code)] Arc<()>);
 
