@@ -1582,6 +1582,72 @@ fn a_partial_bank_does_not_use_the_heap() {
     assert!(left.iter().all(|x| x.is_finite()));
 }
 
+#[test]
+fn a_voiced_partial_bank_does_not_use_the_heap() {
+    use manguebyte_core::vector::Backend;
+    use manguebyte_dsp::{Partial, PartialAir, PartialAttack, PartialBank, WindJitter};
+
+    let mut bank = PartialBank::new(3_000);
+    bank.set_sample_rate(48_000.0);
+    bank.set_len(3_000);
+    let (mut left, mut right) = (vec![0.0f32; 4_096], vec![0.0f32; 4_096]);
+    let backends: Vec<Backend> = Backend::available().collect();
+    let attack = PartialAttack {
+        delay_frames: 24,
+        rise_frames: 480,
+        overshoot: 0.2,
+        settle_frames: 480,
+        breath: 0.2,
+        breath_frames: 960,
+        breath_bandwidth_hz: 300.0,
+        pitch_cents: -8.0,
+        pitch_frames: 960,
+    };
+    assert_no_heap_use("voiced partial bank", || {
+        for (round, &backend) in backends.iter().cycle().take(8).enumerate() {
+            bank.set_backend(backend);
+            bank.set_voicing_seed(round as u64);
+            bank.set_wind_jitter(WindJitter {
+                cents: 1.0 + round as f32,
+                db: 0.2,
+                rate_hz: 4.0,
+            });
+            for i in 0..bank.len() {
+                bank.set(
+                    i,
+                    Partial {
+                        freq_hz: 30.0 * (i % 700 + 1) as f64,
+                        gain: 1e-3,
+                        pan: (i % 3) as f32 - 1.0,
+                    },
+                );
+                bank.set_air(
+                    i,
+                    PartialAir {
+                        depth: 0.02,
+                        bandwidth_hz: 10.0 + (round + i % 7) as f32,
+                    },
+                );
+                bank.start_attack(i, &attack);
+                bank.ramp_to(i, 2e-3, 64 + i % 7);
+                bank.set_air_depth(i, 0.03);
+            }
+            for frames in [64, 1, 4_096, 255, 0, 17] {
+                bank.render_add(&mut left[..frames], &mut right[..frames]);
+            }
+            // The ending of it all, and back to the plain kernel.
+            for i in 0..bank.len() {
+                bank.set_air_depth(i, 0.0);
+            }
+            bank.set_wind_jitter(WindJitter::OFF);
+            bank.render_add(&mut left, &mut right);
+            assert!(!bank.is_voiced());
+            bank.set_len(if round % 2 == 0 { 17 } else { 3_000 });
+        }
+    });
+    assert!(left.iter().all(|x| x.is_finite()));
+}
+
 /// The effects a synth workstation needs, at their heaviest settings.
 #[test]
 fn the_workstation_effects_do_not_use_the_heap() {

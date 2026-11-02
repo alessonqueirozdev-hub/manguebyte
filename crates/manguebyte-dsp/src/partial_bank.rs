@@ -1,6 +1,8 @@
 //! A bank of sine partials for additive synthesis.
 
-use manguebyte_core::vector::{Backend, Partials};
+use manguebyte_core::vector::{Backend, PartialModulators, Partials};
+
+use crate::partial_voicing::{PartialAir, PartialAttack, VOICE_FRAMES, Voicing, WindJitter};
 
 /// Partials are stored in groups of this many, so that the vector backends
 /// run every one of them in registers (see
@@ -52,6 +54,60 @@ pub struct Partial {
 /// for as long as the bank runs. Ten minutes at 48 kHz, measured, stay
 /// within 3 · 10^-6.
 ///
+/// # Voicing
+///
+/// By themselves the partials are perfectly clean and perfectly steady. Three
+/// things, none of which a bank has until it is asked, make them sound
+/// blown (ADR 0026):
+///
+/// - **Air** ([`set_air`](Self::set_air)): each partial's phasor is
+///   multiplied, on its way to the output, by `1 + depth · n(t)`, with
+///   `n(t)` complex low-pass noise of its own. The sine grows a skirt of
+///   noise, and its amplitude and phase wander a little and come back. The
+///   oscillator is not touched, and the partial's level stays where it was.
+/// - **An attack** ([`start_attack`](Self::start_attack)): a delay, a rise,
+///   an overshoot that settles, a breath of extra air and a pitch that
+///   settles, partial by partial. A release needs nothing new:
+///   [`ramp_to`](Self::ramp_to) already has a length for each partial.
+/// - **Wind jitter** ([`set_wind_jitter`](Self::set_wind_jitter)): one slow
+///   wander for the whole bank, moving every partial's gain and frequency
+///   by the same ratio.
+///
+/// All of them multiply what the caller sets. [`gain`](Self::gain) and
+/// [`rotation`](Self::rotation) go on saying what the caller set, and
+/// [`set_rotation`](Self::set_rotation), [`set_frequency`](Self::set_frequency)
+/// and [`ramp_to`](Self::ramp_to) mean what they always did: the jitter and
+/// the attack's pitch are shifts on top of the rotation, so a bellows model
+/// that sets rotations adds to them.
+///
+/// The voicing updates every [`VOICE_FRAMES`](Self::VOICE_FRAMES) frames
+/// rendered, counted across calls: the modulators then move in straight lines
+/// and the shifted rotations hold until the next update. While a shift is
+/// in force a new rotation takes effect at the next update, at most 31
+/// frames later; otherwise, as always, on the next frame. An attack is
+/// worked out at the updates and joined by straight lines too, so its
+/// level is right to within what a straight line of that length misses.
+///
+/// A bank with no air, no attack in progress and no jitter runs the plain
+/// kernel, and renders the same bits as if voicing did not exist, for the
+/// price of checking a flag. With any of them on it runs a kernel a little
+/// dearer for every partial it has, whichever of them are voiced, until
+/// they have all ended, when it goes back by itself (see
+/// [`is_voiced`](Self::is_voiced)).
+///
+/// Everything is the same bit for bit on every backend and however the
+/// caller cuts its blocks, as long as settings arrive on the same frames.
+/// The noise comes from a generator for each partial and one for the wind,
+/// all from [`set_voicing_seed`](Self::set_voicing_seed), so a render can
+/// be repeated; none of the update's arithmetic uses a platform's sines
+/// or powers, so it is the same on every machine, given rotations that
+/// are (a [`set_frequency`](Self::set_frequency) works out a platform's
+/// sine). A generator does not restart on a new note: only the seed
+/// restarts it, so that one note does not repeat another.
+///
+/// The arrays of the voicing come with [`new`](Self::new), used or not:
+/// 128 bytes a partial, on top of the bank's own 40.
+///
 /// # Real time
 ///
 /// [`new`](Self::new) allocates, once; nothing else does. Every setter and
@@ -96,6 +152,8 @@ pub struct PartialBank {
     /// Frames rendered since the phasors were last normalised.
     since_normalised: usize,
     backend: Backend,
+    /// Air, attacks and wind.
+    voice: Voicing,
 }
 
 /// The pan gains of the centre, `cos(π/4)`.
@@ -105,6 +163,10 @@ impl PartialBank {
     /// How often the phasors are brought back to the unit circle, in frames
     /// rendered.
     pub const NORMALISE_FRAMES: usize = 64;
+
+    /// How often the voicing updates, in frames rendered. See
+    /// [Voicing](Self#voicing).
+    pub const VOICE_FRAMES: usize = VOICE_FRAMES;
 
     /// A bank with room for `max` partials, none of them in use. Until
     /// [`set_sample_rate`](Self::set_sample_rate) is called it assumes
@@ -128,6 +190,7 @@ impl PartialBank {
             next_ramp_end: usize::MAX,
             since_normalised: 0,
             backend: Backend::detect(),
+            voice: Voicing::new(room, 44_100.0),
         }
     }
 
@@ -177,14 +240,17 @@ impl PartialBank {
         self.sin_step[i] = 0.0;
         self.left_gain[i] = CENTRE;
         self.right_gain[i] = CENTRE;
+        self.voice.forget(i);
     }
 
     /// Sets the sample rate in hertz, which [`set_frequency`](Self::set_frequency)
     /// works from. Rotations already set keep their angle per frame, so
-    /// set the frequencies again after a change.
+    /// set the frequencies again after a change. Bandwidths of air and the
+    /// jitter's rate stay in hertz; an attack, in frames, keeps its frames.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
+            self.voice.set_sample_rate(sample_rate);
         }
     }
 
@@ -252,7 +318,8 @@ impl PartialBank {
         self.sin_step[i] = sin_step;
     }
 
-    /// Partial `i`'s rotation each frame, `(cos w, sin w)`.
+    /// Partial `i`'s rotation each frame, `(cos w, sin w)`, as the caller set
+    /// it: without the jitter's shift or an attack's.
     #[track_caller]
     pub fn rotation(&self, i: usize) -> (f32, f32) {
         self.check(i);
@@ -372,13 +439,171 @@ impl PartialBank {
         (self.cos[i], self.sin[i])
     }
 
+    /// Gives partial `i` air: narrow-band noise around it, at a depth that
+    /// moves there over 512 frames so that nothing clicks. See
+    /// [`PartialAir`] for what the numbers mean. Works out a square root
+    /// or two if the bandwidth changed; none if it did not. A depth of 0 on
+    /// a partial without air does nothing at all.
+    ///
+    /// ```
+    /// use manguebyte_dsp::{Partial, PartialAir, PartialBank};
+    ///
+    /// let mut bank = PartialBank::new(16);
+    /// bank.set_sample_rate(48_000.0);
+    /// bank.set_len(1);
+    /// bank.set(0, Partial { freq_hz: 440.0, gain: 0.5, pan: 0.0 });
+    /// // The skirt 34 dB below the partial, half of it within 15 Hz.
+    /// bank.set_air(0, PartialAir { depth: 0.02, bandwidth_hz: 30.0 });
+    /// assert!(bank.is_voiced());
+    ///
+    /// let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    /// bank.render_add(&mut left, &mut right);
+    ///
+    /// // Without air again, the bank goes back to the plain kernel by itself.
+    /// bank.set_air(0, PartialAir::OFF);
+    /// let (mut left, mut right) = (vec![0.0f32; 1_024], vec![0.0f32; 1_024]);
+    /// bank.render_add(&mut left, &mut right);
+    /// assert!(!bank.is_voiced());
+    /// ```
+    #[track_caller]
+    pub fn set_air(&mut self, i: usize, air: PartialAir) {
+        self.check(i);
+        self.voice.set_bandwidth(i, air.bandwidth_hz);
+        self.voice.set_depth(i, air.depth);
+    }
+
+    /// Moves partial `i`'s air to `depth` over 512 frames, leaving its
+    /// bandwidth: [`PartialAir::depth`] for a few stores.
+    #[track_caller]
+    pub fn set_air_depth(&mut self, i: usize, depth: f32) {
+        self.check(i);
+        self.voice.set_depth(i, depth);
+    }
+
+    /// The air partial `i` is set to, or moving to.
+    #[track_caller]
+    pub fn air(&self, i: usize) -> PartialAir {
+        self.check(i);
+        self.voice.air_of(i)
+    }
+
+    /// Starts partial `i` speaking, from silence, on the next frame: from
+    /// here on the [`PartialAttack`] multiplies its gain.
+    ///
+    /// The level drops to 0 at once, so a partial already sounding clicks:
+    /// start attacks when the gain is 0, as a new note does, or bring the
+    /// gain down first. An attack replaces one in progress. One with nothing
+    /// in it, [`PartialAttack::default`], ends one in progress and on a
+    /// partial without one does nothing at all.
+    ///
+    /// ```
+    /// use manguebyte_dsp::{Partial, PartialAttack, PartialBank};
+    ///
+    /// let mut bank = PartialBank::new(16);
+    /// bank.set_sample_rate(48_000.0);
+    /// bank.set_len(2);
+    /// // The upper partial speaks first, and a little too loud.
+    /// bank.set(0, Partial { freq_hz: 261.6, gain: 0.5, pan: 0.0 });
+    /// bank.set(1, Partial { freq_hz: 1_046.5, gain: 0.1, pan: 0.0 });
+    /// bank.start_attack(0, &PartialAttack {
+    ///     delay_frames: 144,
+    ///     rise_frames: 1_440,
+    ///     ..PartialAttack::default()
+    /// });
+    /// bank.start_attack(1, &PartialAttack {
+    ///     rise_frames: 480,
+    ///     overshoot: 0.2,
+    ///     settle_frames: 960,
+    ///     ..PartialAttack::default()
+    /// });
+    /// let (mut left, mut right) = (vec![0.0f32; 4_800], vec![0.0f32; 4_800]);
+    /// bank.render_add(&mut left, &mut right);
+    /// assert!(!bank.is_attacking(0) && !bank.is_attacking(1));
+    /// ```
+    #[track_caller]
+    pub fn start_attack(&mut self, i: usize, attack: &PartialAttack) {
+        self.check(i);
+        let within = self.since_normalised % VOICE_FRAMES;
+        self.voice
+            .start_attack(i, attack, (VOICE_FRAMES - within) % VOICE_FRAMES);
+    }
+
+    /// Whether partial `i` has an attack in progress.
+    #[track_caller]
+    pub fn is_attacking(&self, i: usize) -> bool {
+        self.check(i);
+        self.voice.is_attacking(i)
+    }
+
+    /// Sets the wind's unsteadiness for the whole bank. Its depths move
+    /// there over 512 frames, so that nothing clicks; [`WindJitter::OFF`]
+    /// ends it. It multiplies what the caller sets, so it adds, in cents
+    /// and in decibels, to whatever a bellows model sets with
+    /// [`set_rotation`](Self::set_rotation) and [`ramp_to`](Self::ramp_to).
+    /// Every partial's frequency moves by the same ratio, so harmonics stay
+    /// harmonics.
+    ///
+    /// ```
+    /// use manguebyte_dsp::{Partial, PartialBank, WindJitter};
+    ///
+    /// let mut bank = PartialBank::new(16);
+    /// bank.set_sample_rate(48_000.0);
+    /// bank.set_len(1);
+    /// bank.set(0, Partial { freq_hz: 440.0, gain: 0.5, pan: 0.0 });
+    /// bank.set_wind_jitter(WindJitter { cents: 0.5, db: 0.1, rate_hz: 4.0 });
+    /// let (mut left, mut right) = (vec![0.0f32; 4_800], vec![0.0f32; 4_800]);
+    /// bank.render_add(&mut left, &mut right);
+    /// // What the caller set has not moved.
+    /// assert_eq!(bank.gain(0), 0.5);
+    /// ```
+    pub fn set_wind_jitter(&mut self, jitter: WindJitter) {
+        self.voice.set_wind(jitter);
+    }
+
+    /// The wind's unsteadiness as set.
+    pub fn wind_jitter(&self) -> WindJitter {
+        self.voice.wind()
+    }
+
+    /// Starts every generator of the voicing over from `seed`. A seed gives
+    /// the same noise and the same wander each time. Banks with the same
+    /// seed have the same noise on the same partials, which sums into a
+    /// comb when they sound together, so give each pipe its own. Until
+    /// this is called the seed is 1. The noise under way carries on without
+    /// a jump.
+    ///
+    /// ```
+    /// use manguebyte_dsp::{PartialAir, PartialBank};
+    ///
+    /// let mut bank = PartialBank::new(16);
+    /// bank.set_voicing_seed(0x1234);
+    /// assert_eq!(bank.voicing_seed(), 0x1234);
+    /// ```
+    pub fn set_voicing_seed(&mut self, seed: u64) {
+        self.voice.set_seed(seed);
+    }
+
+    /// The seed last given to [`set_voicing_seed`](Self::set_voicing_seed).
+    pub fn voicing_seed(&self) -> u64 {
+        self.voice.seed()
+    }
+
+    /// Whether the bank is running its voicing: from the moment it has air,
+    /// an attack or jitter until they have all ended and their last
+    /// modulator has come home, some 64 frames later. While this is false
+    /// the bank renders with the plain kernel.
+    pub fn is_voiced(&self) -> bool {
+        self.voice.on
+    }
+
     /// Renders the partials in use for `left.len()` frames and adds them to
     /// `left` and `right`.
     ///
-    /// The render is split where a ramp ends and where the phasors are
-    /// normalised, and nowhere else; how the caller splits its blocks does
-    /// not change the output, except that a ramp or a setting given
-    /// between two calls starts on a frame of the caller's choosing.
+    /// The render is split where a ramp ends, where the phasors are
+    /// normalised and where the voicing updates, and nowhere else; how the
+    /// caller splits its blocks does not change the output, except that a
+    /// ramp or a setting given between two calls starts on a frame of the
+    /// caller's choosing.
     ///
     /// # Panics
     ///
@@ -402,20 +627,55 @@ impl PartialBank {
             if self.ramping > 0 {
                 n = n.min(self.next_ramp_end);
             }
-            self.backend.add_partials(
-                &mut left[at..at + n],
-                &mut right[at..at + n],
-                &mut Partials {
-                    cos: &mut self.cos[..used],
-                    sin: &mut self.sin[..used],
-                    gain: &mut self.gain[..used],
-                    cos_step: &self.cos_step[..used],
-                    sin_step: &self.sin_step[..used],
-                    gain_step: &self.gain_step[..used],
-                    left_gain: &self.left_gain[..used],
-                    right_gain: &self.right_gain[..used],
-                },
-            );
+            let within = self.since_normalised % VOICE_FRAMES;
+            if self.voice.on && within == 0 {
+                self.voice
+                    .update(used, &self.cos_step[..used], &self.sin_step[..used]);
+            }
+            if self.voice.on {
+                n = n.min(VOICE_FRAMES - within);
+                let voice = &mut self.voice;
+                let (cos_step, sin_step) = if voice.shifting {
+                    (&voice.cos_turn[..used], &voice.sin_turn[..used])
+                } else {
+                    (&self.cos_step[..used], &self.sin_step[..used])
+                };
+                self.backend.add_modulated_partials(
+                    &mut left[at..at + n],
+                    &mut right[at..at + n],
+                    &mut Partials {
+                        cos: &mut self.cos[..used],
+                        sin: &mut self.sin[..used],
+                        gain: &mut self.gain[..used],
+                        cos_step,
+                        sin_step,
+                        gain_step: &self.gain_step[..used],
+                        left_gain: &self.left_gain[..used],
+                        right_gain: &self.right_gain[..used],
+                    },
+                    &mut PartialModulators {
+                        re: &mut voice.mod_re[..used],
+                        im: &mut voice.mod_im[..used],
+                        re_step: &voice.mod_re_step[..used],
+                        im_step: &voice.mod_im_step[..used],
+                    },
+                );
+            } else {
+                self.backend.add_partials(
+                    &mut left[at..at + n],
+                    &mut right[at..at + n],
+                    &mut Partials {
+                        cos: &mut self.cos[..used],
+                        sin: &mut self.sin[..used],
+                        gain: &mut self.gain[..used],
+                        cos_step: &self.cos_step[..used],
+                        sin_step: &self.sin_step[..used],
+                        gain_step: &self.gain_step[..used],
+                        left_gain: &self.left_gain[..used],
+                        right_gain: &self.right_gain[..used],
+                    },
+                );
+            }
             if self.ramping > 0 {
                 self.advance_ramps(n);
             }
