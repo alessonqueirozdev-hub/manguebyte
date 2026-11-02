@@ -33,7 +33,10 @@
 
 use std::sync::Arc;
 
-use manguebyte::plugin::editor::{EditorSpec, HostSize};
+use manguebyte::plugin::{
+    Tail,
+    editor::{EditorSpec, HostSize},
+};
 use manguebyte::prelude::*;
 use manguebyte_gui::Editor;
 use manguebyte_ui::{IntoView, ParamHandle, column, knob, label, row};
@@ -76,6 +79,13 @@ const DECAY: ParamId = ParamId::from_name("decay");
 const RELEASE: ParamId = ParamId::from_name("release");
 const REVERB: ParamId = ParamId::from_name("reverb");
 const LEVEL: ParamId = ParamId::from_name("level");
+
+/// The longest a note takes to fade after the key is released, in seconds.
+pub const MAX_RELEASE_SECONDS: f64 = 5.0;
+/// The shortest a note takes to fade after the key is released, in seconds.
+pub const MIN_RELEASE_SECONDS: f64 = 0.01;
+/// How long the reverb rings, in seconds.
+pub const REVERB_DECAY_SECONDS: f64 = 2.2;
 
 /// The level no output sample exceeds, in decibels relative to full scale.
 pub const OUTPUT_CEILING_DB: f64 = -1.0;
@@ -121,7 +131,9 @@ pub const DEFAULT_LEVEL_DB: f32 = -4.0;
 
 impl PluckParams {
     fn new() -> Self {
-        let time = || FloatRange::skewed_around(0.01, 5.0, 0.5);
+        let time = || {
+            FloatRange::skewed_around(MIN_RELEASE_SECONDS as f32, MAX_RELEASE_SECONDS as f32, 0.5)
+        };
         Self {
             cutoff: FloatParam::new(
                 "cutoff",
@@ -491,7 +503,7 @@ impl Effects {
         Self {
             // The reverb gives its wet sound alone; `mix` blends it.
             reverb: Reverb::new()
-                .with_decay_seconds(2.2)
+                .with_decay_seconds(REVERB_DECAY_SECONDS)
                 .with_damping(0.45)
                 .with_mix(1.0),
             wet: AudioBuffer::new(0, 0),
@@ -611,6 +623,7 @@ pub struct Pluck {
     params: Arc<PluckParams>,
     synth: Synth<PluckVoice>,
     effects: Effects,
+    sample_rate: f64,
 }
 
 impl Pluck {
@@ -671,6 +684,7 @@ impl Plugin for Pluck {
             synth: Synth::with_voices(16, || PluckVoice::new(&params)),
             effects: Effects::new(&params),
             params,
+            sample_rate: 0.0,
         }
     }
 
@@ -679,6 +693,7 @@ impl Plugin for Pluck {
     }
 
     fn prepare(&mut self, spec: &ProcessSpec) {
+        self.sample_rate = spec.sample_rate;
         self.synth.prepare(spec);
         self.effects.prepare(spec, &self.params);
     }
@@ -705,6 +720,17 @@ impl Plugin for Pluck {
 
     fn latency_samples(&self) -> usize {
         self.effects.limiter.latency_samples()
+    }
+
+    fn tail_samples(&self) -> Tail {
+        // Follows the default to infinite fallback when tail is not prepared.
+        if self.sample_rate <= 0.0 {
+            return Tail::Infinite;
+        }
+        // The tail uses the maximum release because the user can change the knob after the plugin has been activated
+        let tail_seconds = MAX_RELEASE_SECONDS + REVERB_DECAY_SECONDS; // release + reverb decay
+        let tail_samples = (tail_seconds * self.sample_rate).ceil() as usize;
+        Tail::Samples(tail_samples)
     }
 
     fn editor(&self) -> Option<Box<dyn EditorSpec>> {

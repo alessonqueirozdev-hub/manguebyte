@@ -393,7 +393,10 @@ fn what_cannot_be_asked_is_refused() {
         Err(AuError::ProcessorAlive)
     ));
     assert_eq!(plugin.latency(), 0);
-    assert_eq!(plugin.tail_seconds(), 0.0);
+    // Pluck states its longest release (5 s) plus its reverb's decay (2.2 s),
+    // in whole frames at the test's rate; AU reports it in seconds.
+    let frames = (7.2 * RATE).ceil();
+    assert_eq!(plugin.tail_seconds(), frames / RATE);
     finish(&mut plugin, processor);
     assert!(!plugin.is_active());
 }

@@ -40,7 +40,7 @@ use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
-use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind};
+use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind, Tail};
 
 // --- Watching the heap ---------------------------------------------------
 //
@@ -194,6 +194,10 @@ impl Plugin for Level {
 
     fn latency_samples(&self) -> usize {
         7
+    }
+
+    fn tail_samples(&self) -> Tail {
+        Tail::Samples(480)
     }
 }
 

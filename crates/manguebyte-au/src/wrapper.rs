@@ -42,14 +42,14 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use manguebyte_core::{AudioBuffer, NoDenormals, ParamId};
+use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{
-    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts,
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, Tail, load_state, offered_layouts,
     plugin_info, save_state,
 };
 
@@ -77,6 +77,13 @@ pub const EVENTS_PER_BLOCK: usize = 4_096;
 /// Largest state accepted from a host.
 const MAX_STATE_BYTES: usize = 64 << 20;
 
+/// What AU hosts are told for an infinite tail. `TailTime` is in seconds and has
+/// no infinite value; a host may multiply it by the sample rate and convert the
+/// result to an integer, so it stays finite: 2,000 s is about 1.5 × 10⁹ frames
+/// at 768 kHz, inside an `i32`. auval accepted 0, 2,000, larger values and
+/// `f64::INFINITY` alike; GarageBand loaded, played and exported the units.
+pub const INFINITE_TAIL_SECONDS: f64 = 2000.0;
+
 /// Most property listeners and render notifications kept.
 const MAX_LISTENERS: usize = 1_024;
 const MAX_RENDER_NOTIFICATIONS: usize = 64;
@@ -88,6 +95,14 @@ const RAMP_STEP: i64 = 32;
 /// words. A render that sends more hands the host several lists.
 const MIDI_LIST_WORDS: usize = 16_384;
 
+/// Getter to return audio unit tail time in seconds, given a Tail and sample rate. Returns INFINITE_TAIL_SECONDS if the tail is infinite or if the sample rate is zero.
+fn au_tail_seconds(tail: Tail, sample_rate: f64) -> f64 {
+    match tail {
+        Tail::None => 0.0,
+        Tail::Samples(frames) => (frames as f64 / sample_rate).min(INFINITE_TAIL_SECONDS),
+        Tail::Infinite => INFINITE_TAIL_SECONDS,
+    }
+}
 /// Runs `work`, turning a panic into `fallback`: a panic must not unwind
 /// into the host.
 fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
@@ -271,6 +286,7 @@ pub(crate) struct Instance<P: Plugin> {
     layouts: Vec<AudioLayout>,
     initialized: AtomicBool,
     latency: AtomicU32,
+    tail: AtomicF64,
     last_error: AtomicI32,
     /// Events dropped on the audio thread, for the tests.
     dropped: AtomicU64,
@@ -324,6 +340,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             layouts: offered_layouts::<P>(),
             initialized: AtomicBool::new(false),
             latency: AtomicU32::new(0),
+            tail: AtomicF64::new(INFINITE_TAIL_SECONDS),
             last_error: AtomicI32::new(noErr),
             dropped: AtomicU64::new(0),
             labels_told: AtomicU64::new(params.labels_version()),
@@ -597,7 +614,7 @@ impl<P: Plugin> Instance<P> {
             (config.sample_rate, config.max_frames, config.layout)
         };
         let frames = max_frames as usize;
-        let latency = {
+        let (latency, tail) = {
             let mut audio = self.audio.take();
             audio.plugin.set_layout(layout);
             audio.plugin.prepare(&ProcessSpec {
@@ -627,11 +644,17 @@ impl<P: Plugin> Instance<P> {
             });
             audio.pending.clear();
             audio.translator.reset();
-            audio.plugin.latency_samples()
+            (audio.plugin.latency_samples(), audio.plugin.tail_samples())
         };
         let latency = u32::try_from(latency).unwrap_or(u32::MAX);
         if self.latency.swap(latency, Ordering::Relaxed) != latency {
             self.changed(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
+        }
+        // Hosts are told when initialization changes the tail; changes while
+        // running are TECH_DEBT 22.
+        let tail = au_tail_seconds(tail, sample_rate);
+        if self.tail.swap(tail, Ordering::Relaxed) != tail {
+            self.changed(kAudioUnitProperty_TailTime, kAudioUnitScope_Global, 0);
         }
     }
 
@@ -2243,7 +2266,7 @@ impl<P: Plugin> Instance<P> {
                     let frames = f64::from(self.latency.load(Ordering::Relaxed));
                     put(out, size, frames / config().sample_rate)
                 }
-                kAudioUnitProperty_TailTime => put(out, size, 0.0f64),
+                kAudioUnitProperty_TailTime => put(out, size, self.tail.load(Ordering::Relaxed)),
                 kAudioUnitProperty_SupportedNumChannels => {
                     put_all(out, size, &self.channel_infos())
                 }
@@ -2695,5 +2718,33 @@ mod tests {
         let mut short = [1 as c_char; 3];
         copy_name("éé", &mut short);
         assert_eq!(short.map(|c| c as u8), [0xC3, 0xA9, 0]);
+    }
+
+    #[test]
+    fn au_tail_seconds_is_the_number_of_seconds_in_the_tail() {
+        assert_eq!(
+            au_tail_seconds(Tail::None, 48_000.0),
+            0.0,
+            "No reported tail returns 0.0 seconds"
+        );
+        assert_eq!(
+            au_tail_seconds(Tail::Samples(48_000), 48_000.0),
+            1.0,
+            "48,000 samples at 48,000 Hz equals 1.0 seconds"
+        );
+        assert_eq!(
+            au_tail_seconds(Tail::Samples(44_100), 48_000.0),
+            0.91875,
+            "44,100 samples at 48,000 Hz equals 0.91875 seconds"
+        );
+        assert_eq!(
+            au_tail_seconds(Tail::Samples(96_000), 48_000.0),
+            2.0,
+            "96,000 samples at 48,000 Hz equals 2.0 seconds"
+        );
+        assert_eq!(
+            au_tail_seconds(Tail::Infinite, 48_000.0),
+            INFINITE_TAIL_SECONDS
+        );
     }
 }

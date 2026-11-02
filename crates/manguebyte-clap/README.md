@@ -7,8 +7,8 @@ Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hu
 under one name; depend on this crate directly to use only this part.
 
 `export_clap!(MyPlugin)` exports a `Plugin` as a CLAP with the extensions
-`audio-ports`, `note-ports`, `params`, `state`, `latency`, and for a
-plugin with an editor `gui`, `timer-support` and `posix-fd-support`; and,
+`audio-ports`, `note-ports`, `params`, `state`, `latency`, `tail`
+(`Plugin::tail_samples`), and for a plugin with an editor `gui`, `timer-support` and `posix-fd-support`; and,
 when the plugin declares what they need, per-note automation and
 modulation (`ParamFlags::per_note`), `voice-info` (`Plugin::voice_info`),
 `note-name` (`Plugin::NOTE_NAMES`), `audio-ports-config` and
@@ -17,7 +17,7 @@ modulation (`ParamFlags::per_note`), `voice-info` (`Plugin::voice_info`),
 name and width, switched by `audio-ports-activation`; every port starts
 active, as CLAP says. Every port takes 64-bit
 audio through the plugin's 32-bit path, and transport events inside a
-block cut it on their frames. Not there yet: note-end events, `tail`,
+block cut it on their frames. Not there yet: note-end events,
 presets, remote controls.
 
 `get_info` gives each parameter's current display name. When a plugin

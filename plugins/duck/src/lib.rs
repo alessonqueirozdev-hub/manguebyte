@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use manguebyte::decibels::{db_to_gain, gain_to_db};
-use manguebyte::plugin::editor::EditorSpec;
+use manguebyte::plugin::{Tail, editor::EditorSpec};
 use manguebyte::prelude::*;
 
 mod editor;
@@ -405,6 +405,10 @@ impl Plugin for Duck {
 
     fn editor(&self) -> Option<Box<dyn EditorSpec>> {
         Some(Box::new(self.editor_spec()))
+    }
+
+    fn tail_samples(&self) -> Tail {
+        Tail::None
     }
 }
 

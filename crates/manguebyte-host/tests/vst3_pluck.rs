@@ -330,7 +330,10 @@ fn buses_follow_the_layout_the_plugin_declares() {
     let mut plugin = plugin;
     let processor = plugin.activate(RATE, 256).unwrap();
     assert!(plugin.audio_outputs()[0].active && plugin.event_inputs()[0].active);
-    assert_eq!(processor.tail(), Tail::Infinite);
+    // Pluck's own tail is the maximum release plus the reverb decay, which is 7.2 seconds.
+    let seconds = mangue_pluck::MAX_RELEASE_SECONDS + mangue_pluck::REVERB_DECAY_SECONDS;
+    let frames = (seconds * RATE).ceil() as u32;
+    assert_eq!(processor.tail(), Tail::Frames(frames));
     drop(processor);
     plugin.deactivate().unwrap();
     assert!(plugin.audio_outputs()[0].active && plugin.event_inputs()[0].active);

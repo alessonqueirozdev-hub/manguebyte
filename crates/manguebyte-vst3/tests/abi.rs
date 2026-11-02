@@ -20,9 +20,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_void};
 use std::marker::PhantomData;
-use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{assert_eq, ptr};
 
 use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
@@ -187,6 +187,10 @@ impl Plugin for Level {
 
     fn latency_samples(&self) -> usize {
         7
+    }
+
+    fn tail_samples(&self) -> manguebyte_plugin::Tail {
+        manguebyte_plugin::Tail::Samples(480)
     }
 }
 
@@ -2989,4 +2993,62 @@ fn switching_the_sidechain_bus_picks_the_layout_without_it() {
     let mut audio = stereo(1.0, 8);
     let processed = host.process(&mut audio, 8, Some(&mut side), vec![], vec![], None);
     assert_eq!(processed.output, stereo(1_001.5, 8));
+}
+
+#[test]
+fn tail_is_infinite_until_plugin_is_activated() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let host = Host::new::<Level>(plugin_factory::<Level>());
+    unsafe {
+        assert_eq!(
+            host.processor.getTailSamples(),
+            vst::kInfiniteTail,
+            "before activation the host must not assume silence"
+        );
+    }
+}
+
+#[test]
+fn the_tail_a_plugin_states_is_reported_to_host_post_activation() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let host = Host::new::<Level>(plugin_factory::<Level>());
+
+    unsafe {
+        // Initial value is infinite
+        assert_eq!(
+            host.processor.getTailSamples(),
+            vst::kInfiniteTail,
+            "before activation the host must not assume silence"
+        );
+
+        host.activate(48_000.0, 64);
+        // getTailSamples should return the override value after activation
+        assert_eq!(
+            host.processor.getTailSamples(),
+            480,
+            "after activation the host sees the tail the plugin stated"
+        )
+    }
+}
+
+#[test]
+fn a_plugin_that_states_no_tail_reports_an_infinite_one() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let host = Host::new::<Keys>(plugin_factory::<Keys>());
+
+    host.activate(48_000.0, 64);
+    unsafe {
+        // a plugin that states no tail keeps the infinite default
+        assert_eq!(
+            host.processor.getTailSamples(),
+            vst::kInfiniteTail,
+            "after activation the host sees the tail the plugin stated"
+        )
+    }
 }
