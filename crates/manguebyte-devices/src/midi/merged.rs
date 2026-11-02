@@ -26,6 +26,8 @@ use super::{MidiError, MidiInputMessage, MidiSink, Timed};
 /// bytes, which have none.
 const GROUP: u8 = 0;
 
+/// The high-resolution velocity prefix (MIDI CA-031).
+const VELOCITY_PREFIX: u8 = 88;
 const ALL_SOUND_OFF: u8 = 120;
 const RESET_ALL_CONTROLLERS: u8 = 121;
 /// Controllers 123 to 127: all notes off, and the four mode messages that
@@ -37,10 +39,19 @@ struct InputPort {
     key: u64,
     held: HeldNotes,
     /// Notes a channel message of the port ended while their keys were
-    /// down, per channel. Closing the port owes them nothing, but their
-    /// note-offs still pass: a plugin reading MPE ignores that message on
-    /// a member channel, and the note goes on until its note-off.
+    /// down, per channel. Another port's note-off for them passes, but
+    /// whether they did end only the plugin knows: it may not read that
+    /// message at all, and one reading MPE ignores it on a member channel.
+    /// So they still get a note-off of their own, once, which is harmless
+    /// to a plugin that has ended them.
     ended: [u128; 16],
+    /// Channels whose pedal a reset of the controllers let up while it was
+    /// down. The same goes for them.
+    reset_pedals: u16,
+    /// Velocity prefixes waiting for their note, per channel. They wait
+    /// here, not in the queue, so that nothing can come between them and
+    /// their note there, and they go away with a note-off that is dropped.
+    prefixes: [Option<u8>; 16],
 }
 
 impl InputPort {
@@ -51,6 +62,9 @@ impl InputPort {
                 self.ended[usize::from(channel & 0x0F)] |= self.held.take_channel((GROUP, channel));
             }
             RESET_ALL_CONTROLLERS => {
+                if self.held.pedal_down((GROUP, channel)) {
+                    self.reset_pedals |= 1 << (channel & 0x0F);
+                }
                 self.held.follow(NoteChange::Pedal {
                     group: GROUP,
                     channel,
@@ -124,6 +138,8 @@ impl MergedInput {
             key,
             held: HeldNotes::NONE,
             ended: [0; 16],
+            reset_pedals: 0,
+            prefixes: [None; 16],
         });
         key
     }
@@ -146,6 +162,8 @@ impl MergedInput {
             return;
         };
         timed.at = self.stamp(timed.at);
+        // Whatever becomes of this message, what is owed goes first.
+        self.settle(timed.at);
         let MidiInputMessage::Channel(message) = timed.message else {
             self.send(timed);
             return;
@@ -157,17 +175,26 @@ impl MergedInput {
                 channel,
                 key,
             } => {
+                let at = timed.at;
                 // Struck again: the note it replaces ends first, so that
-                // every note-on the plugin gets has one note-off.
-                if self.held((group, channel, key)) && !self.send(note_off(timed.at, channel, key))
-                {
-                    self.owed.follow(change);
+                // every note-on the plugin gets has one note-off. All of it
+                // goes or none does, in which case the note goes on as if
+                // this had not been played, and its note-off is still to
+                // come.
+                let strike = self.held((group, channel, key));
+                let prefix = self.ports[index].prefixes[usize::from(channel & 0x0F)].take();
+                let room = 1 + usize::from(strike) + usize::from(prefix.is_some());
+                if !self.has_room(room) {
+                    return;
                 }
-                if self.send(timed) {
-                    let open = &mut self.ports[index];
-                    open.held.follow(change);
-                    open.ended[usize::from(channel & 0x0F)] &= !(1 << (key & 0x7F));
+                if strike {
+                    self.push(note_off(at, channel, key));
                 }
+                self.push_prefix(at, channel, prefix);
+                self.push(timed);
+                let open = &mut self.ports[index];
+                open.held.follow(change);
+                open.ended[usize::from(channel & 0x0F)] &= !(1 << (key & 0x7F));
             }
             NoteChange::Off {
                 group,
@@ -175,6 +202,7 @@ impl MergedInput {
                 key,
             } => {
                 let open = &mut self.ports[index];
+                let prefix = open.prefixes[usize::from(channel & 0x0F)].take();
                 let held = open.held.follow(change);
                 let ended = &mut open.ended[usize::from(channel & 0x0F)];
                 let bit = 1 << (key & 0x7F);
@@ -183,7 +211,13 @@ impl MergedInput {
                 // A note the port does not hold has had its note-off, such
                 // as one its closing ended. A note another port holds goes
                 // on until that port lets go.
-                if (held || told_to_end) && !self.held((group, channel, key)) && !self.send(timed) {
+                if !(held || told_to_end) || self.held((group, channel, key)) {
+                    return;
+                }
+                if self.has_room(1 + usize::from(prefix.is_some())) {
+                    self.push_prefix(timed.at, channel, prefix);
+                    self.push(timed);
+                } else {
                     self.owed.follow(NoteChange::On {
                         group,
                         channel,
@@ -191,9 +225,15 @@ impl MergedInput {
                     });
                 }
             }
-            NoteChange::Pedal { down: true, .. } => {
+            NoteChange::Pedal {
+                channel,
+                down: true,
+                ..
+            } => {
                 if self.send(timed) {
-                    self.ports[index].held.follow(change);
+                    let open = &mut self.ports[index];
+                    open.held.follow(change);
+                    open.reset_pedals &= !(1 << (channel & 0x0F));
                 }
             }
             NoteChange::Pedal {
@@ -201,7 +241,9 @@ impl MergedInput {
                 channel,
                 down: false,
             } => {
-                self.ports[index].held.follow(change);
+                let open = &mut self.ports[index];
+                open.held.follow(change);
+                open.reset_pedals &= !(1 << (channel & 0x0F));
                 if !self.pedal_held((group, channel)) && !self.send(timed) {
                     self.owed.follow(NoteChange::Pedal {
                         group,
@@ -211,27 +253,42 @@ impl MergedInput {
                 }
             }
             NoteChange::Other => {
-                if let MidiMessage::ControlChange {
+                let MidiMessage::ControlChange {
                     channel,
                     controller,
-                    ..
+                    value,
                 } = message
-                {
+                else {
+                    self.send(timed);
+                    return;
+                };
+                if controller == VELOCITY_PREFIX {
+                    self.ports[index].prefixes[usize::from(channel & 0x0F)] = Some(value);
+                } else if self.send(timed) {
+                    // Only what reached the plugin: if this did not, the
+                    // notes and the pedals it speaks of are all still there.
                     self.ports[index].channel_message(channel, controller);
                 }
-                self.send(timed);
             }
         }
     }
 
     /// Takes a port out, once its connection is gone: every note it holds
     /// that no other port does gets a note-off, then every pedal it holds
-    /// down that no other port does is lifted.
+    /// down that no other port does is lifted, and the same for those a
+    /// channel message of the port ended, which the plugin may not have
+    /// taken up.
     pub(super) fn close_port(&mut self, port: u64) {
         let Some(index) = self.ports.iter().position(|open| open.key == port) else {
             return;
         };
-        let (notes, pedals) = self.ports.remove(index).held.drain();
+        let InputPort {
+            mut held,
+            ended,
+            reset_pedals,
+            ..
+        } = self.ports.remove(index);
+        let (notes, pedals) = held.drain();
         for (group, channel, key) in notes {
             if !self.held((group, channel, key)) {
                 self.owed.follow(NoteChange::On {
@@ -241,7 +298,21 @@ impl MergedInput {
                 });
             }
         }
-        for (group, channel) in pedals {
+        for (channel, keys) in (0..16u8).zip(ended) {
+            for key in (0..128u8).filter(|&key| keys & (1u128 << key) != 0) {
+                if !self.held((GROUP, channel, key)) {
+                    self.owed.follow(NoteChange::On {
+                        group: GROUP,
+                        channel,
+                        key,
+                    });
+                }
+            }
+        }
+        let reset = (0..16u8)
+            .filter(|&channel| reset_pedals & (1 << channel) != 0)
+            .map(|channel| (GROUP, channel));
+        for (group, channel) in pedals.into_iter().chain(reset) {
             if !self.pedal_held((group, channel)) {
                 self.owed.follow(NoteChange::Pedal {
                     group,
@@ -272,6 +343,36 @@ impl MergedInput {
     /// whether `timed` was queued.
     fn send(&mut self, timed: Timed) -> bool {
         self.settle(timed.at) && self.queue.push(timed).is_ok()
+    }
+
+    /// Whether nothing is owed and `count` messages fit in the queue. Only
+    /// the thread that holds this lock adds to the queue, and the audio
+    /// thread only makes more room, so that many [`push`](Self::push)es
+    /// then cannot fail.
+    fn has_room(&self, count: usize) -> bool {
+        self.owed.first_note().is_none()
+            && self.owed.first_pedal().is_none()
+            && self.queue.free_len() >= count
+    }
+
+    /// Queues a message [`has_room`](Self::has_room) has made room for.
+    fn push(&mut self, timed: Timed) {
+        let _ = self.queue.push(timed);
+    }
+
+    /// Queues a velocity prefix, if there is one, that
+    /// [`has_room`](Self::has_room) has made room for.
+    fn push_prefix(&mut self, at: Instant, channel: u8, prefix: Option<u8>) {
+        if let Some(value) = prefix {
+            self.push(channel_message(
+                at,
+                MidiMessage::ControlChange {
+                    channel,
+                    controller: VELOCITY_PREFIX,
+                    value,
+                },
+            ));
+        }
     }
 
     /// Queues what is owed, the note-offs first, as far as there is room.

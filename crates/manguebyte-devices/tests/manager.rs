@@ -932,6 +932,154 @@ mod midi {
         );
     }
 
+    /// Fills the queue to the callback, with no block read.
+    fn fill_the_queue(mock: &MockBackend, port: &str) {
+        for _ in 0..5_000 {
+            assert!(mock.send_midi(port, &[0xB0, 7, 100]));
+        }
+    }
+
+    fn strike(channel: u8, note: u8) -> MidiMessage {
+        MidiMessage::NoteOn {
+            channel,
+            note,
+            velocity: 100,
+        }
+    }
+
+    #[test]
+    fn a_channel_message_the_queue_had_no_room_for_is_not_followed() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB1, 64, 127]));
+        assert_eq!(heard(&mock, &received).len(), 2);
+
+        // All notes off and a reset of the controllers go nowhere, so the
+        // plugin still has the note and the pedal.
+        fill_the_queue(&mock, "pads");
+        assert!(mock.send_midi("keys", &[0xB0, 123, 0, 0xB1, 121, 0]));
+        heard(&mock, &received);
+
+        // As far as the other port goes, the first still holds them.
+        assert!(mock.send_midi("pads", &[0x90, 60, 100]));
+        assert_eq!(heard(&mock, &received), [off(0, 60), strike(0, 60)]);
+        assert!(mock.send_midi("pads", &[0x80, 60, 0, 0xB1, 64, 127, 0xB1, 64, 0]));
+        assert_eq!(
+            heard(&mock, &received),
+            [MidiMessage::ControlChange {
+                channel: 1,
+                controller: 64,
+                value: 127
+            }],
+        );
+
+        manager.disable_midi_input("keys");
+        assert_eq!(heard(&mock, &received), [off(0, 60), lift(1)]);
+    }
+
+    #[test]
+    fn a_key_struck_again_on_a_full_queue_is_lost_whole() {
+        // By the port that holds it: its one note-off is still to come.
+        let mock = studio();
+        let (manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert_eq!(heard(&mock, &received), [strike(0, 60)]);
+        fill_the_queue(&mock, "pads");
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        heard(&mock, &received);
+        assert!(mock.send_midi("keys", &[0x80, 60, 0]));
+        assert_eq!(heard(&mock, &received), [off(0, 60)]);
+        assert_eq!(heard(&mock, &received), []);
+        drop(manager);
+
+        // By another port: the note goes on with the first port's key down.
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert_eq!(heard(&mock, &received), [strike(0, 60)]);
+        fill_the_queue(&mock, "keys");
+        assert!(mock.send_midi("pads", &[0x90, 60, 100]));
+        heard(&mock, &received);
+        assert_eq!(manager.poll_devices(), []);
+        assert_eq!(heard(&mock, &received), [], "not cut");
+        assert!(mock.send_midi("pads", &[0x80, 60, 0]));
+        assert_eq!(heard(&mock, &received), [], "that port held nothing");
+        assert!(mock.send_midi("keys", &[0x80, 60, 0]));
+        assert_eq!(heard(&mock, &received), [off(0, 60)]);
+    }
+
+    #[test]
+    fn a_velocity_prefix_stays_with_its_note() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        let prefix = |value| MidiMessage::ControlChange {
+            channel: 0,
+            controller: 88,
+            value,
+        };
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert_eq!(heard(&mock, &received), [strike(0, 60)]);
+
+        // A second strike: the note-off, then the prefix and its note, even
+        // with another message in between.
+        assert!(mock.send_midi("keys", &[0xB0, 88, 5, 0xB0, 7, 9, 0x90, 60, 100]));
+        assert_eq!(
+            heard(&mock, &received),
+            [
+                MidiMessage::ControlChange {
+                    channel: 0,
+                    controller: 7,
+                    value: 9
+                },
+                off(0, 60),
+                prefix(5),
+                strike(0, 60),
+            ]
+        );
+        // A note-off that passes takes its prefix along.
+        assert!(mock.send_midi("keys", &[0xB0, 88, 6, 0x80, 60, 0]));
+        assert_eq!(heard(&mock, &received), [prefix(6), off(0, 60)]);
+        // A note-off that is dropped, or a port that closes, takes it away.
+        assert!(mock.send_midi("keys", &[0xB0, 88, 7, 0x80, 60, 0, 0xB0, 88, 8]));
+        assert_eq!(heard(&mock, &received), []);
+        manager.disable_midi_input("keys");
+        assert_eq!(heard(&mock, &received), []);
+    }
+
+    #[test]
+    fn what_is_owed_goes_with_any_message_of_any_port() {
+        // Messages that themselves go nowhere: a note-off for nothing, and
+        // a lift another port holds down.
+        for (setup, message) in [
+            (&[][..], &[0x80, 61, 0][..]),
+            (&[0xB0, 64, 127][..], &[0xB0, 64, 0][..]),
+        ] {
+            let mock = studio();
+            let (mut manager, received) = listening(&mock, &both_ports());
+            assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB0, 64, 127]));
+            assert!(mock.send_midi("pads", setup));
+            assert!(mock.send_midi("pads", &[0xB5, 64, 127]));
+            heard(&mock, &received);
+            fill_the_queue(&mock, "pads");
+            manager.disable_midi_input("keys");
+            heard(&mock, &received);
+            assert!(mock.send_midi("pads", message));
+            let ended = heard(&mock, &received);
+            assert_eq!(ended.first(), Some(&off(0, 60)), "{ended:?}");
+        }
+    }
+
+    #[test]
+    fn closing_an_input_port_leaves_its_other_controllers_as_they_were() {
+        let mock = studio();
+        let (mut manager, received) = listening(&mock, &both_ports());
+        // The wheel, sostenuto, and the mod wheel.
+        assert!(mock.send_midi("keys", &[0xE0, 0x7F, 0x7F, 0xB0, 66, 127, 0xB0, 1, 90]));
+        assert_eq!(heard(&mock, &received).len(), 3);
+        manager.disable_midi_input("keys");
+        assert_eq!(heard(&mock, &received), []);
+    }
+
     fn note_on(note: u8) -> Packet {
         Packet::from_midi1(
             0,

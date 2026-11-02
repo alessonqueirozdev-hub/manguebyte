@@ -66,18 +66,37 @@
 //!   that of a key held down while its port was closed and opened again.
 //! - **A note or a pedal two ports hold** lasts until the last of them lets
 //!   go: only then does the plugin get the note-off or the lift, whether
-//!   that port let go or was closed. A lift from a port whose pedal is not
-//!   down passes unless another port's is, since it changes nothing.
+//!   that port let go or was closed, unless a channel message has ended it
+//!   for all of them, as below. A lift from a port whose pedal is not down
+//!   passes unless another port's is, since it changes nothing.
 //! - **A key struck again while it is held**, by the same port or another,
 //!   reaches the plugin as a note-off and a note-on on the same frame, so
 //!   the second strike is heard and every note-on has one note-off, also
-//!   for a plugin that counts them.
-//! - **Controllers 120 and 123 to 127** end the port's notes on that
-//!   channel, so closing the port owes them nothing, and controller 121
-//!   its pedal there.
+//!   for a plugin that counts them. With no room for both, neither goes,
+//!   and the note goes on.
+//! - **Controllers 120 and 123 to 127, and 121,** speak for a whole channel
+//!   and pass as they are, so one port's reach the notes and the pedal of
+//!   every port there, wherever the plugin takes them up. They do not count
+//!   as the port letting go: the plugin may not read them, and one reading
+//!   MPE ignores them on a member channel. So a note of the port's that
+//!   they ended, and its pedal, still get their note-off and their lift
+//!   when the port lets go or closes, once, which is one more for a plugin
+//!   that did take them up, and harmless to it. Lost to a full queue, they
+//!   count for nothing.
+//! - **A velocity prefix** (controller 88) waits, per port and channel, for
+//!   the next note-on or note-off there, and goes right before it, after
+//!   the note-off of a second strike. So a plugin does not hear it until
+//!   then, it goes away with a note that is lost or a note-off that is
+//!   dropped, and it never lands on another note.
 //! - **A note-off or a lift that finds the queue full** waits, and goes
 //!   first when there is room: at the next message of any port, or at the
 //!   next [`DeviceManager::poll_devices`](crate::DeviceManager::poll_devices).
+//!
+//! Only notes and the sustain pedal are followed. A port that closes leaves
+//! the pitch bend, the sostenuto pedal (controller 66), pressure and every
+//! other controller as it last sent them: a plugin that reads sostenuto
+//! keeps a note that was under it, and one that keeps the bend per channel
+//! plays later notes there bent, until something sets them again.
 //!
 //! MPE member channels are channels like any other here. The input path
 //! carries MIDI 1.0 bytes, from the system's MIDI 1.0 API, so no MIDI 2.0
@@ -928,6 +947,59 @@ mod tests {
             })
         };
         assert_eq!(seen, [on(64, 100), on(60, 100), on(62, 90)]);
+    }
+
+    /// A port on a queue with room for four messages, and the queue's end.
+    fn small_queue() -> (MidiSink, MidiReceiver) {
+        let (sender, receiver) = receiver_pair(4);
+        let shared = Arc::new(Mutex::new(MergedInput::new(sender)));
+        let port = MergedInput::lock(&shared).add_port();
+        (MidiSink::Merged { port, shared }, receiver)
+    }
+
+    fn read_all(receiver: &mut MidiReceiver) -> Vec<MidiMessage> {
+        let mut seen = Vec::new();
+        receiver.read(FRAMES, RATE, |_, message| {
+            if let MidiInputMessage::Channel(message) = message {
+                seen.push(message);
+            }
+        });
+        seen
+    }
+
+    #[test]
+    fn a_strike_goes_whole_or_not_at_all() {
+        let (mut sink, mut receiver) = small_queue();
+        let mut parser = StreamParser::new(0);
+        let off = MidiMessage::NoteOff {
+            channel: 0,
+            note: 60,
+            velocity: 0,
+        };
+        let volume = MidiMessage::ControlChange {
+            channel: 0,
+            controller: 7,
+            value: 1,
+        };
+        sink.deliver(&[0x90, 60, 100], &mut parser);
+        assert_eq!(read_all(&mut receiver).len(), 1);
+
+        // One free slot, and it needs two.
+        sink.deliver(&[0xB0, 7, 1, 0xB0, 7, 1, 0xB0, 7, 1], &mut parser);
+        sink.deliver(&[0x90, 60, 100], &mut parser);
+        assert_eq!(read_all(&mut receiver), [volume, volume, volume]);
+        // So the port's one note-off is all that is left to come.
+        sink.deliver(&[0x80, 60, 0], &mut parser);
+        assert_eq!(read_all(&mut receiver), [off]);
+
+        // Two free slots, and with a prefix it needs three.
+        sink.deliver(&[0x90, 60, 100], &mut parser);
+        assert_eq!(read_all(&mut receiver).len(), 1);
+        sink.deliver(&[0xB0, 7, 1, 0xB0, 7, 1], &mut parser);
+        sink.deliver(&[0xB0, 88, 5, 0x90, 60, 100], &mut parser);
+        assert_eq!(read_all(&mut receiver), [volume, volume]);
+        sink.deliver(&[0x80, 60, 0], &mut parser);
+        assert_eq!(read_all(&mut receiver), [off]);
     }
 
     #[test]

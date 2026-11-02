@@ -29,10 +29,14 @@ enum Heard {
 use Heard::{Down, Off, On, Up};
 
 /// Everything a plugin heard, counted as a plugin that counts note-ons
-/// would.
+/// would. It implements no channel message, so only note-offs and lifts end
+/// anything for it: what a plugin may well do, since nothing obliges one to
+/// read controllers 120 to 127.
 #[derive(Default)]
 struct Ears {
     log: Vec<Heard>,
+    /// The velocity of the last note-on.
+    velocity: f32,
     /// How many note-ons each note has had that no note-off has ended.
     sounding: BTreeMap<(u8, u8, Option<u32>), u32>,
     pedals: BTreeSet<u8>,
@@ -43,8 +47,9 @@ struct Ears {
 impl Ears {
     fn hear(&mut self, kind: EventKind) {
         match kind {
-            EventKind::NoteOn { note, .. } => {
+            EventKind::NoteOn { note, velocity } => {
                 self.log.push(On(note.channel, note.key));
+                self.velocity = velocity;
                 *self
                     .sounding
                     .entry((note.channel, note.key, note.id))
@@ -73,18 +78,6 @@ impl Ears {
                     self.log.push(Up(channel));
                     self.pedals.remove(&channel);
                 }
-            }
-            EventKind::Midi(MidiMessage::ControlChange {
-                channel,
-                controller: 120 | 123..=127,
-                ..
-            }) => self.sounding.retain(|note, _| note.0 != channel),
-            EventKind::Midi(MidiMessage::ControlChange {
-                channel,
-                controller: 121,
-                ..
-            }) => {
-                self.pedals.remove(&channel);
             }
             _ => {}
         }
@@ -165,13 +158,14 @@ impl Voice for Tone {
     fn render(&mut self, _: &mut AudioBuffer<f32>) {}
 }
 
-/// A real synth, which says how many of its voices sound.
-struct Keys {
+/// A real synth, which says how many of its voices sound, reading MPE in
+/// a lower zone if asked.
+struct Keys<const LOWER_ZONE: bool = false> {
     synth: Synth<Tone>,
     params: Arc<Params>,
 }
 
-impl Plugin for Keys {
+impl<const LOWER_ZONE: bool> Plugin for Keys<LOWER_ZONE> {
     const INFO: PluginInfo = PluginInfo {
         id: "org.manguebyte.test.standalone-keys",
         name: "Keys",
@@ -181,6 +175,11 @@ impl Plugin for Keys {
         kind: PluginKind::Instrument,
     };
     const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    const MPE: Mpe = if LOWER_ZONE {
+        Mpe::LOWER_ZONE
+    } else {
+        Mpe::Follow
+    };
     type Params = Params;
 
     fn new() -> Self {
@@ -389,19 +388,76 @@ fn a_note_the_port_already_ended_gets_nothing_more() {
         "keys",
         &[
             // A note-off, a note-on of velocity zero.
-            0x90, 60, 100, 0x80, 60, 40, 0x90, 62, 100, 0x90, 62, 0,
-            // A pedal let up, and one a reset of the controllers let up.
-            0xB0, 64, 127, 0xB0, 64, 0, 0xB1, 64, 127, 0xB1, 121, 0,
-            // All notes off, all sound off, and a mode message.
-            0x92, 64, 100, 0xB2, 123, 0, 0x93, 65, 100, 0xB3, 120, 0, 0x94, 66, 100, 0xB4, 124, 0,
+            0x90, 60, 100, 0x80, 60, 40, 0x90, 62, 100, 0x90, 62, 0, // A pedal let up.
+            0xB0, 64, 127, 0xB0, 64, 0,
         ],
     ));
-    assert_eq!(heard(&app, &mock).len(), 10);
+    assert_eq!(heard(&app, &mock).len(), 6);
     assert_silent(&app);
 
     app.set_midi_input("keys", false);
     assert_eq!(heard(&app, &mock), []);
     assert_silent(&app);
+}
+
+#[test]
+fn a_plugin_that_reads_no_channel_messages_hears_the_end_on_closing() {
+    // Only the plugin knows whether these ended anything, and a note-off
+    // or a lift more does no harm.
+    for controller in [120, 123, 124, 125, 126, 127] {
+        let mock = studio();
+        let mut app = start::<Plain>(&mock);
+        assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB0, controller, 0]));
+        assert_eq!(heard(&app, &mock), [On(0, 60)]);
+        app.set_midi_input("keys", false);
+        assert_eq!(heard(&app, &mock), [Off(0, 60)], "controller {controller}");
+        assert_silent(&app);
+        assert_eq!(heard(&app, &mock), [], "once");
+    }
+
+    let mock = studio();
+    let mut app = start::<Plain>(&mock);
+    assert!(mock.send_midi("keys", &[0xB1, 64, 127, 0xB1, 121, 0]));
+    assert_eq!(heard(&app, &mock), [Down(1)]);
+    app.set_midi_input("keys", false);
+    assert_eq!(heard(&app, &mock), [Up(1)]);
+    assert_silent(&app);
+    assert_eq!(heard(&app, &mock), [], "once");
+}
+
+#[test]
+fn a_note_ended_by_a_channel_message_and_let_go_gets_nothing_more() {
+    let mock = studio();
+    let mut app = start::<Plain>(&mock);
+    assert!(mock.send_midi("keys", &[0x90, 60, 100, 0xB0, 123, 0, 0x80, 60, 0]));
+    assert!(mock.send_midi("keys", &[0xB1, 64, 127, 0xB1, 121, 0, 0xB1, 64, 0]));
+    assert_eq!(heard(&app, &mock), [On(0, 60), Off(0, 60), Down(1), Up(1)]);
+    app.set_midi_input("keys", false);
+    assert_eq!(heard(&app, &mock), []);
+    assert_silent(&app);
+}
+
+#[test]
+fn a_real_synth_lets_go_at_every_channel_message_and_port_closing() {
+    let mock = studio();
+    let mut app = start::<Keys>(&mock);
+    let params = app.params_arc();
+    let voices = |mock: &MockBackend| {
+        let mut block = [0.0f32; 2 * 64];
+        assert!(mock.render(&mut block));
+        params.voices.load(Ordering::Relaxed)
+    };
+    // Omni off, omni on, mono, poly and all notes off release; all sound
+    // off cuts.
+    for controller in [120, 123, 124, 125, 126, 127] {
+        assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+        assert_eq!(voices(&mock), 1);
+        assert!(mock.send_midi("keys", &[0xB0, controller, 0]));
+        assert_eq!(voices(&mock), 0, "controller {controller}");
+    }
+    // A key still down, and the port closes: nothing comes back.
+    app.set_midi_input("keys", false);
+    assert_eq!(voices(&mock), 0);
 }
 
 #[test]
@@ -421,27 +477,98 @@ fn a_note_off_after_all_notes_off_still_passes() {
 }
 
 #[test]
-fn all_notes_off_on_the_master_channel_ends_a_member_channels_note() {
-    let mock = studio();
-    let mut app = start::<Listener<true>>(&mock);
-    assert!(mock.send_midi("keys", &[0x91, 60, 100, 0xB1, 123, 0, 0xB0, 123, 0]));
-    assert_eq!(heard(&app, &mock), [On(0, 60)]);
-    assert_silent(&app);
-    app.set_midi_input("keys", false);
-    assert_eq!(heard(&app, &mock), []);
+fn a_channel_message_on_the_master_channel_ends_a_member_channels_note() {
+    for controller in [120, 123, 126] {
+        let mock = studio();
+        let mut app = start::<Keys<true>>(&mock);
+        let params = app.params_arc();
+        let voices = |mock: &MockBackend| {
+            let mut block = [0.0f32; 2 * 64];
+            assert!(mock.render(&mut block));
+            params.voices.load(Ordering::Relaxed)
+        };
+        assert!(mock.send_midi("keys", &[0x91, 60, 100, 0x92, 64, 100]));
+        assert_eq!(voices(&mock), 2);
+        assert!(mock.send_midi("keys", &[0xB0, controller, 0]));
+        assert_eq!(voices(&mock), 0, "controller {controller}");
+        app.set_midi_input("keys", false);
+        assert_eq!(voices(&mock), 0);
+    }
 }
 
-/// The limit in TECH_DEBT item 120, written down so that it is known: the
-/// tracker cannot see that a plugin reading MPE ignored the message.
 #[test]
-fn all_notes_off_on_a_member_channel_alone_leaves_its_note_to_its_note_off() {
+fn all_notes_off_on_a_member_channel_alone_leaves_nothing_hanging() {
+    // `NoteInput` ignores it there, so the note goes on, and the port's
+    // closing ends it.
     let mock = studio();
     let mut app = start::<Listener<true>>(&mock);
     assert!(mock.send_midi("keys", &[0x91, 60, 100, 0xB1, 123, 0]));
     assert_eq!(heard(&app, &mock), [On(0, 60)]);
     app.set_midi_input("keys", false);
+    assert_eq!(heard(&app, &mock), [Off(0, 60)]);
+    assert_silent(&app);
+}
+
+#[test]
+fn a_ports_channel_message_reaches_the_notes_of_every_port() {
+    // These speak for a channel, and the plugin hears no ports, so the
+    // rule that a note lasts until the last port lets go stops here.
+    let mock = studio();
+    let app = start::<Keys>(&mock);
+    let params = app.params_arc();
+    let voices = |mock: &MockBackend| {
+        let mut block = [0.0f32; 2 * 64];
+        assert!(mock.render(&mut block));
+        params.voices.load(Ordering::Relaxed)
+    };
+    assert!(mock.send_midi("keys", &[0x90, 60, 100]));
+    assert!(mock.send_midi("pads", &[0x90, 64, 100]));
+    assert_eq!(voices(&mock), 2);
+    assert!(mock.send_midi("keys", &[0xB0, 123, 0]));
+    assert_eq!(voices(&mock), 0, "the other port's key is still down");
+    assert!(mock.send_midi("pads", &[0x80, 64, 0]));
+    assert_eq!(voices(&mock), 0);
+
+    // A reset of the controllers lifts the pedal another port holds down.
+    assert!(mock.send_midi("pads", &[0xB0, 64, 127, 0x90, 64, 100, 0x80, 64, 0]));
+    assert_eq!(voices(&mock), 1);
+    assert!(mock.send_midi("keys", &[0xB0, 121, 0]));
+    assert_eq!(voices(&mock), 0);
+}
+
+#[test]
+fn a_velocity_prefix_reaches_the_note_it_came_with() {
+    let mock = studio();
+    let app = start::<Plain>(&mock);
+    let velocity = |low: u16| f32::from((0x40u16 << 7) | low) / 16_383.0;
+    let last = || app.params().ears.lock().unwrap().velocity;
+
+    assert!(mock.send_midi("keys", &[0xB0, 88, 0x55, 0x90, 60, 0x40]));
+    assert_eq!(heard(&app, &mock), [On(0, 60)]);
+    assert_eq!(last(), velocity(0x55));
+
+    // The note-off of a second strike goes before the prefix, not between
+    // it and its note.
+    assert!(mock.send_midi("keys", &[0xB0, 88, 0x2A, 0x90, 60, 0x40]));
+    assert_eq!(heard(&app, &mock), [Off(0, 60), On(0, 60)]);
+    assert_eq!(last(), velocity(0x2A));
+
+    // A prefix goes with a note-off that is dropped, and the next note,
+    // of any port, has none.
+    assert!(mock.send_midi("keys", &[0xB0, 88, 0x11, 0x80, 61, 0x40]));
     assert_eq!(heard(&app, &mock), []);
-    assert_eq!(app.params().ears.lock().unwrap().sounding.len(), 1);
+    assert!(mock.send_midi("pads", &[0x90, 62, 0x40]));
+    assert_eq!(heard(&app, &mock), [On(0, 62)]);
+    assert_eq!(last(), 0x40 as f32 / 127.0);
+
+    // Two ports' prefixes do not mix.
+    assert!(mock.send_midi("keys", &[0xB0, 88, 0x33]));
+    assert!(mock.send_midi("pads", &[0xB0, 88, 0x22, 0x90, 63, 0x40]));
+    assert_eq!(heard(&app, &mock), [On(0, 63)]);
+    assert_eq!(last(), velocity(0x22));
+    assert!(mock.send_midi("keys", &[0x90, 64, 0x40]));
+    assert_eq!(heard(&app, &mock), [On(0, 64)]);
+    assert_eq!(last(), velocity(0x33));
 }
 
 #[test]
@@ -460,7 +587,9 @@ fn what_the_program_plays_is_not_told_apart_from_a_port() {
     assert_eq!(heard(&app, &mock), [Off(0, 60)]);
 }
 
-/// Also in TECH_DEBT item 120: the port never left the list.
+/// Also in TECH_DEBT item 120: the port never left the list, so nothing
+/// closes it and nothing ends its note. What the connection then does on a
+/// real device is not known; the mock's goes on delivering.
 #[test]
 fn a_port_gone_and_back_between_two_polls_is_not_seen_to_go() {
     let mock = studio();
@@ -471,9 +600,7 @@ fn a_port_gone_and_back_between_two_polls_is_not_seen_to_go() {
     mock.add_midi_port(Direction::Input, "keys", "Keys");
     assert!(app.poll_devices().is_none());
     assert_eq!(heard(&app, &mock), []);
-    assert!(mock.send_midi("keys", &[0x80, 60, 0]));
-    assert_eq!(heard(&app, &mock), [Off(0, 60)]);
-    assert_silent(&app);
+    assert_eq!(app.params().ears.lock().unwrap().sounding.len(), 1);
 }
 
 #[test]

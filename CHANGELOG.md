@@ -655,9 +655,20 @@ break the API.
   two ports hold ends when the last lets go, and a key struck again while
   held, by any port, is a note-off and a note-on on one frame, so every
   note-on has one note-off. A note-off for a note the port does not hold is
-  dropped, and one that finds the queue full waits for room. Limits are in
-  `manguebyte_devices::midi` and TECH_DEBT item 120. Tested on the headless
-  backend, with no heap use on the audio path or the delivering thread.
+  dropped, and one that finds the queue full waits for room. Controllers
+  120, 121 and 123 to 127 pass as they are, and a note or pedal they ended
+  still gets its note-off or lift from its port, since only the plugin knows
+  whether it took them up. A velocity prefix (controller 88) now waits, per
+  port and channel, and reaches the plugin right before its note. Limits are
+  in `manguebyte_devices::midi` and TECH_DEBT item 120. Tested on the
+  headless backend, with no heap use on the audio path or the delivering
+  thread.
+- `Synth` ignored controllers 124 to 127, though MIDI makes each of them
+  include all notes off, as `manguebyte_midi`'s trackers read them, and
+  `NoteInput` forgot the notes on an MPE zone's master channel when it read
+  one: the note-off that followed went out with no identifier, on the member
+  channel, and missed the voice, which then sounded for ever. They now
+  release the channel as controller 123 does.
 
 - Tests that write files under `CARGO_TARGET_TMPDIR` used fixed folder
   names, so two runs of them sharing a target directory (parallel agents,
