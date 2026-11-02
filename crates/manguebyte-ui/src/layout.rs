@@ -134,6 +134,11 @@ pub enum Arrange {
     Column,
     /// On top of each other, each placed in the whole area.
     Stack,
+    /// As a stack, with the node's content size ([`LayoutNode::content`]) a
+    /// floor under its natural size, whatever children it shows: what
+    /// [`responsive`](crate::responsive) is laid out as, so that the room a
+    /// parent gives it does not depend on the child it is showing.
+    Adaptive,
     /// Through a viewport that scrolls on the axes set to `true`, as a
     /// [`scroll_view`](crate::scroll_view) does. The node's content size
     /// ([`LayoutNode::content`]) is the room kept for its scroll bars: its
@@ -569,7 +574,7 @@ fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) 
                 width = width.max(size.width);
                 height += size.height;
             }
-            Arrange::Stack | Arrange::Scroll { .. } => {
+            Arrange::Stack | Arrange::Adaptive | Arrange::Scroll { .. } => {
                 width = width.max(size.width);
                 height = height.max(size.height);
             }
@@ -593,6 +598,10 @@ fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) 
         Arrange::Stack => (
             width + padding.left + padding.right,
             height + padding.top + padding.bottom,
+        ),
+        Arrange::Adaptive => (
+            width.max(length(node.content.width)) + padding.left + padding.right,
+            height.max(length(node.content.height)) + padding.top + padding.bottom,
         ),
         Arrange::Scroll { x, y } => {
             let (bar_x, bar_y) = bars(node, x, y);
@@ -656,7 +665,7 @@ fn arrange(
                 rects[child] = Rect::new(viewport.x, viewport.y, width, height);
             }
         }
-        Arrange::Stack => {
+        Arrange::Stack | Arrange::Adaptive => {
             for child in children() {
                 let child_style = &nodes[child].style;
                 let align = child_style.align_self.unwrap_or(style.align);

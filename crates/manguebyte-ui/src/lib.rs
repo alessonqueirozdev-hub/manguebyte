@@ -236,3 +236,4 @@ pub use widgets::{
     piano_keyboard_named, zone_map, zone_map_named,
 };
 pub use widgets::{FloatingPanel, TITLE_BAR_HEIGHT, floating_panel};
+pub use widgets::{RESPONSIVE_MARGIN, Responsive, responsive};

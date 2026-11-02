@@ -215,6 +215,24 @@ pub trait Widget: 'static {
         let _ = (cx, items);
     }
 
+    /// For a widget laid out as
+    /// [`Arrange::Adaptive`](crate::layout::Arrange::Adaptive): which of its
+    /// children to show in `room`, the logical pixels layout has just given
+    /// them (its rectangle less its padding), or `None` to leave them as
+    /// they are. Asked after every layout, while the widget is not hidden,
+    /// before anything is drawn. A different answer hides and shows the
+    /// children as [`UpdateCx::show`] does, polls what came into sight and
+    /// lays out again, all within the frame, so no frame is drawn with the
+    /// children of the room before. The children change at most once a
+    /// frame. `room` has its edges on device pixels at [`MeasureCx::scale`], so
+    /// a comparison with a length should allow for half a device pixel.
+    /// Nothing unless overridden. [`responsive`](crate::responsive) is built
+    /// on this.
+    fn adapt(&mut self, cx: &MeasureCx<'_>, room: Size) -> Option<Shown> {
+        let _ = (cx, room);
+        None
+    }
+
     /// Carries out `action` on the item with `key` (see
     /// [`access_items`](Widget::access_items)), which the item's node
     /// allows (the root checks), and returns whether it did. For
@@ -439,8 +457,9 @@ impl UpdateCx<'_> {
     }
 
     /// Shows only some of the widget's children from this frame on (see
-    /// [`Shown`]); the others, and everything inside them, are kept with
-    /// their state but cost nothing until they are shown again. The
+    /// [`Shown`]; to choose by the room layout gives them, see
+    /// [`Widget::adapt`]); the others, and everything inside them, are kept
+    /// with their state but cost nothing until they are shown again. The
     /// window is not built again: the root lays out again, draws what the
     /// change uncovered and what it hid, and nothing else.
     ///

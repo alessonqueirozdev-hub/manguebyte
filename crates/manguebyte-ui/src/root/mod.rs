@@ -150,6 +150,9 @@ pub struct Root {
     theme: Theme,
     size: Size,
     scale: f32,
+    /// Where the back buffer's top-left pixel is in the window, in device
+    /// pixels (see [`Root::set_origin`]).
+    origin: (i32, i32),
     context: EditorContext,
     renderer: Renderer,
     pixels: Pixmap,
@@ -216,6 +219,15 @@ pub struct Root {
 /// The furthest a widget may draw beyond its rectangle (see
 /// `Widget::overflow`), in logical pixels.
 const MAX_OVERFLOW: f32 = 128.0;
+
+/// What polling the widgets gathers for after it.
+#[derive(Default)]
+struct Polled {
+    animating: bool,
+    focus_wanted: Option<NodeId>,
+    focus_within: Option<usize>,
+    theme_wanted: Option<Theme>,
+}
 
 /// The most keys remembered as held after the interface used their press:
 /// more than hands hold at once. A key held beyond these is forgotten,
@@ -319,6 +331,7 @@ impl Root {
             theme: Theme::default(),
             size,
             scale,
+            origin: (0, 0),
             context,
             renderer: Renderer::new(),
             pixels: buffer(size, scale),
@@ -418,6 +431,35 @@ impl Root {
         self.scale
     }
 
+    /// Says where the back buffer's top-left pixel is in the window, in
+    /// device pixels, for a window layer that shows the buffer with bars
+    /// around it. What assistive technology is told is where a widget is
+    /// on the screen, so [`AccessEntry::device`] counts from the window's
+    /// corner and includes this. Nothing else changes: the scene, the back
+    /// buffer, [`bounds`](Root::bounds) and the frame's damage all count
+    /// from the buffer's corner, and input comes in logical pixels of the
+    /// interface. No frame is needed. 0, 0 unless set.
+    pub fn set_origin(&mut self, x: i32, y: i32) {
+        self.origin = (x, y);
+    }
+
+    /// Where the back buffer's top-left pixel is in the window, in device
+    /// pixels (see [`set_origin`](Root::set_origin)).
+    pub fn origin(&self) -> (i32, i32) {
+        self.origin
+    }
+
+    /// `rect`, device pixels of the back buffer, in device pixels of the
+    /// window.
+    fn in_window(&self, rect: IRect) -> IRect {
+        IRect::new(
+            rect.x.saturating_add(self.origin.0),
+            rect.y.saturating_add(self.origin.1),
+            rect.width,
+            rect.height,
+        )
+    }
+
     /// How the editor reaches its host.
     pub fn context(&self) -> &EditorContext {
         &self.context
@@ -489,6 +531,12 @@ impl Root {
         }
         self.needs_layout = true;
         self.full = true;
+    }
+
+    /// The rectangles of the back buffer the last frame drew again (see
+    /// [`Frame::damage`]).
+    pub fn last_damage(&self) -> &[IRect] {
+        &self.damage
     }
 
     /// The back buffer, as the last frame left it.
@@ -564,7 +612,7 @@ impl Root {
             parent: node.parent,
             node: access,
             bounds: node.rect,
-            device: node.device,
+            device: self.in_window(node.device),
         })
     }
 
@@ -590,7 +638,7 @@ impl Root {
                 parent: Some(id),
                 node: item.node,
                 bounds: item.bounds,
-                device: item.bounds.to_device(self.scale),
+                device: self.in_window(item.bounds.to_device(self.scale)),
             }));
         }
         entries
@@ -1265,15 +1313,46 @@ impl Root {
         self.last_frame = Some(now);
         self.now = now;
 
-        let mut animating = false;
         self.access_updates.clear();
+        let mut polled = Polled::default();
+        self.poll(0, usize::MAX, elapsed, &mut polled);
+        self.apply_polled(&mut polled);
+        // A tooltip waiting for the pointer to rest long enough wants the
+        // frames that measure it.
+        polled.animating |= self.tick_tooltip();
+        // A drag scrolls views near their edges and wants frames to do it.
+        polled.animating |= self.tick_drag(elapsed);
+
+        let laid_out = self.needs_layout;
+        if self.needs_layout {
+            self.layout(elapsed, &mut polled);
+        } else if self.drag.as_ref().is_some_and(|drag| drag.moved) {
+            self.place_ghost();
+        }
+        let animating = polled.animating;
+        let painted = self.paint();
+        if !self.damage.is_empty() {
+            self.render();
+        }
+        self.animating = animating;
+        Frame {
+            damage: &self.damage,
+            pixels: &self.pixels,
+            animating,
+            painted,
+            laid_out,
+            access: &self.access_updates,
+        }
+    }
+
+    /// Calls [`Widget::update`] on the widgets from `start` up to `end` or
+    /// the last, passing over the children containers hide.
+    fn poll(&mut self, start: usize, end: usize, elapsed: Duration, polled: &mut Polled) {
+        let now = self.now;
         let motion = self.motion();
         let (hover, pressed_on) = (self.hover, self.pressed_on);
-        let mut focus_wanted = None;
-        let mut focus_within = None;
-        let mut theme_wanted = None;
-        let mut index = 0;
-        while index < self.tree.nodes.len() {
+        let mut index = start;
+        while index < end.min(self.tree.nodes.len()) {
             let focus = self.focus.filter(|_| self.focus_visible);
             let node = &mut self.tree.nodes[index];
             if node.hidden {
@@ -1293,7 +1372,7 @@ impl Root {
             if moved {
                 node.paint = true;
             }
-            animating |= running;
+            polled.animating |= running;
             let mut requests = Requests::default();
             let mut cx = UpdateCx {
                 theme: &self.theme,
@@ -1326,9 +1405,9 @@ impl Root {
                     self.needs_layout = true;
                 }
             }
-            animating |= requests.frame;
+            polled.animating |= requests.frame;
             if requests.focus {
-                focus_wanted = Some(NodeId::from_index(index));
+                polled.focus_wanted = Some(NodeId::from_index(index));
             }
             // What it hides is hidden before the loop reaches it.
             if let Some(shown) = requests.shown {
@@ -1344,17 +1423,23 @@ impl Root {
                 self.raise(NodeId::from_index(index));
             }
             if requests.focus_within {
-                focus_within = Some(index);
+                polled.focus_within = Some(index);
             }
             if requests.theme.is_some() {
-                theme_wanted = requests.theme;
+                polled.theme_wanted = requests.theme;
             }
             index += 1;
         }
-        if let Some(theme) = theme_wanted.filter(|theme| *theme != self.theme) {
+    }
+
+    /// Does what the widgets asked for while they were polled that waits
+    /// until all of them have been: the theme and the focus.
+    fn apply_polled(&mut self, polled: &mut Polled) {
+        if let Some(theme) = polled.theme_wanted.take().filter(|t| *t != self.theme) {
             self.set_theme(theme);
         }
-        if let Some(index) = focus_within {
+        let mut focus_wanted = polled.focus_wanted.take();
+        if let Some(index) = polled.focus_within.take() {
             focus_wanted = self.focus_within(index).or(focus_wanted);
         }
         if let Some(id) = focus_wanted {
@@ -1363,6 +1448,8 @@ impl Root {
                 self.set_focus(Some(id));
                 self.reveal(id);
                 // Their rings follow in this frame, not the next.
+                let (now, motion) = (self.now, self.motion());
+                let (hover, pressed_on) = (self.hover, self.pressed_on);
                 let shown = self.focus.filter(|_| self.focus_visible);
                 for changed in [old, Some(id)].into_iter().flatten() {
                     if let Some(node) = self.tree.nodes.get_mut(changed.index()) {
@@ -1373,40 +1460,16 @@ impl Root {
                         );
                         let (moved, running) = node.motion.follow(states, now, &motion);
                         node.paint |= moved;
-                        animating |= running;
+                        polled.animating |= running;
                     }
                 }
             }
         }
-        // A tooltip waiting for the pointer to rest long enough wants the
-        // frames that measure it.
-        animating |= self.tick_tooltip();
-        // A drag scrolls views near their edges and wants frames to do it.
-        animating |= self.tick_drag(elapsed);
-
-        let laid_out = self.needs_layout;
-        if self.needs_layout {
-            self.layout();
-        } else if self.drag.as_ref().is_some_and(|drag| drag.moved) {
-            self.place_ghost();
-        }
-        let painted = self.paint();
-        if !self.damage.is_empty() {
-            self.render();
-        }
-        self.animating = animating;
-        Frame {
-            damage: &self.damage,
-            pixels: &self.pixels,
-            animating,
-            painted,
-            laid_out,
-            access: &self.access_updates,
-        }
     }
 
-    fn layout(&mut self) {
-        self.needs_layout = false;
+    /// Measures what asked to be, and has every widget outside a hidden
+    /// child say how far it draws past its rectangle.
+    fn measure_widgets(&mut self) {
         let cx = MeasureCx {
             theme: &self.theme,
             scale: self.scale,
@@ -1431,13 +1494,93 @@ impl Root {
                 node.paint = true;
             }
         }
+    }
+
+    /// Lays the interface out. Layout comes before anything is drawn, so
+    /// this is where a widget that chooses its children by its room (see
+    /// [`Widget::adapt`]) can choose without a frame showing the wrong
+    /// ones: after a change of children, what came into sight is polled,
+    /// and the layout is worked out again before anything is put in place.
+    fn layout(&mut self, elapsed: Duration, polled: &mut Polled) {
+        let mut adapted = Vec::new();
         let area = Rect::new(0.0, 0.0, self.size.width, self.size.height);
-        let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
+        let placed = loop {
+            self.needs_layout = false;
+            self.measure_widgets();
+            let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
+            if !self.adapt_children(&placed, &mut adapted, elapsed, polled) {
+                break placed;
+            }
+        };
         // The interface's own widgets; what is over them is placed after.
         self.place_main(&placed);
         self.place_menus();
         self.place_tooltip();
         self.place_ghost();
+        // What is under the pointer may be something else now.
+        if !adapted.is_empty() && !self.pressed {
+            self.hover_to(self.pointer);
+        }
+    }
+
+    /// Asks the widgets laid out as
+    /// [`Arrange::Adaptive`](layout::Arrange::Adaptive) which children to
+    /// show in the room `placed` gives them, outermost first, and acts on
+    /// the first different answer from a widget not yet in `adapted`, those
+    /// that changed in this frame. Returns whether one did: the rooms in
+    /// `placed` then no longer hold.
+    fn adapt_children(
+        &mut self,
+        placed: &[Placement],
+        adapted: &mut Vec<usize>,
+        elapsed: Duration,
+        polled: &mut Polled,
+    ) -> bool {
+        let cx = MeasureCx {
+            theme: &self.theme,
+            scale: self.scale,
+        };
+        let main = self.tree.main.min(placed.len());
+        let mut change = None;
+        for (index, node) in self.tree.nodes[..main].iter_mut().enumerate() {
+            let style = &self.tree.layout[index].style;
+            if node.hidden || style.arrange != layout::Arrange::Adaptive {
+                continue;
+            }
+            if adapted.contains(&index) {
+                continue;
+            }
+            let room = placed[index].inset(style.padding, self.scale).rect.size();
+            if let Some(shown) = node.widget.adapt(&cx, room).filter(|&s| s != node.shown) {
+                change = Some((index, shown));
+                break;
+            }
+        }
+        let Some((index, shown)) = change else {
+            return false;
+        };
+        adapted.push(index);
+        // What hangs from the layout that is going does not stay over the
+        // one that comes.
+        if self.menus.is_some() {
+            self.close_menus(MenuEvent::Closed);
+        }
+        self.hide_tooltip();
+        let before = self.tree.nodes[index].shown;
+        self.show_children(index, shown);
+        let came: Vec<usize> = self.tree.nodes[index]
+            .kids
+            .iter()
+            .enumerate()
+            .filter(|&(at, _)| shown.includes(at) && !before.includes(at))
+            .map(|(_, &kid)| kid)
+            .collect();
+        for kid in came {
+            let end = self.tree.nodes[kid].end;
+            self.poll(kid, end, elapsed, polled);
+        }
+        self.apply_polled(polled);
+        true
     }
 
     /// Puts the interface's own widgets where layout placed them, moved by

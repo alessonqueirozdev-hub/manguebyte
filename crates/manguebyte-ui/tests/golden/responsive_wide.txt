@@ -1,0 +1,16 @@
+fill rect(0 0 400 120) solid(#101116ff)
+shadow rounded_rect(8 8 123 104 radii 18 18 18 18) offset 0 18 blur 40 spread -24 solid(#000000b3)
+fill rounded_rect(8 8 123 104 radii 18 18 18 18) linear(0 8, 0 112, pad [0 #1c1f28ff, 1 #16181fff])
+stroke rounded_rect(8.5 8.5 122 103 radii 17.5 17.5 17.5 17.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+fill path(evenodd M 8 27 L 8 26 C 8 16.058874 16.058874 8 26 8 L 113 8 C 122.941124 8 131 16.058874 131 26 L 131 27 Z M 8 27 L 8 27 C 8 17.058874 16.058874 9 26 9 L 113 9 C 122.941124 9 131 17.058874 131 27 L 131 27 Z) solid(#ffffff0a)
+text "Great" size 12 weight 500 opsz 14 solid(#989eafff) [32 22 64.365234, 200 30.970703 64.365234, 137 35.382813 64.365234, 115 42.54883 64.365234, 211 49.36328 64.365234]
+shadow rounded_rect(139 8 122 104 radii 18 18 18 18) offset 0 18 blur 40 spread -24 solid(#000000b3)
+fill rounded_rect(139 8 122 104 radii 18 18 18 18) linear(0 8, 0 112, pad [0 #1c1f28ff, 1 #16181fff])
+stroke rounded_rect(139.5 8.5 121 103 radii 17.5 17.5 17.5 17.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+fill path(evenodd M 139 27 L 139 26 C 139 16.058874 147.05887 8 157 8 L 243 8 C 252.94113 8 261 16.058874 261 26 L 261 27 Z M 139 27 L 139 27 C 139 17.058874 147.05887 9 157 9 L 243 9 C 252.94113 9 261 17.058874 261 27 L 261 27 Z) solid(#ffffff0a)
+text "Swell" size 12 weight 500 opsz 14 solid(#989eafff) [83 153 64.365234, 229 160.75195 64.365234, 137 170.50195 64.365234, 174 177.55078 64.365234, 174 180.57422 64.365234]
+shadow rounded_rect(269 8 123 104 radii 18 18 18 18) offset 0 18 blur 40 spread -24 solid(#000000b3)
+fill rounded_rect(269 8 123 104 radii 18 18 18 18) linear(0 8, 0 112, pad [0 #1c1f28ff, 1 #16181fff])
+stroke rounded_rect(269.5 8.5 122 103 radii 17.5 17.5 17.5 17.5) width 1 cap butt join miter 4 solid(#ffffff0f)
+fill path(evenodd M 269 27 L 269 26 C 269 16.058874 277.05887 8 287 8 L 374 8 C 383.94113 8 392 16.058874 392 26 L 392 27 Z M 269 27 L 269 27 C 269 17.058874 277.05887 9 287 9 L 374 9 C 383.94113 9 392 17.058874 392 27 L 392 27 Z) solid(#ffffff0a)
+text "Pedal" size 12 weight 500 opsz 14 solid(#989eafff) [77 283 64.365234, 137 290.62305 64.365234, 134 297.67188 64.365234, 115 305.08984 64.365234, 174 311.9043 64.365234]

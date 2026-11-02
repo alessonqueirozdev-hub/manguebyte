@@ -60,6 +60,13 @@ Documentation: <https://docs.rs/manguebyte-ui>
   where it is are states the application keeps (a `State<bool>` and a
   `State<Point>`), so a project reopens them where they were; closed
   ones cost nothing (`UpdateCx::float_at`, ADR 0019).
+- Layouts by the room they get: `responsive((wide, compact)).below(size)`
+  shows the first child that fits the room layout gives it, in a window, a
+  panel or another `responsive`. Every child is built once and kept, the
+  choice is made during layout so that no frame shows the wrong one, and a
+  margin keeps it from flickering at the boundary. With
+  `manguebyte_gui::Editor::with_zoom_to_fit`, a full layout zooms and a
+  compact one has its real size (`Widget::adapt`, ADR 0027).
 - Audio widgets: `waveform_view` (a sample drawn from a multi-resolution
   `Waveform` summary, with zoom, markers, a selection and a playhead),
   `piano_keyboard` (notes from the pointer and the computer's letters,

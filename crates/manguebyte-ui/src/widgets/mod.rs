@@ -26,7 +26,8 @@
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
 //! [`stack`](crate::stack), [`panel`](crate::panel)) are
-//! [`Container`]s with the role [`Group`](crate::Role::Group).
+//! [`Container`]s with the role [`Group`](crate::Role::Group), and so is
+//! [`responsive`], which shows the first of its children that fits.
 //!
 //! Given at least their natural size, knobs, sliders, switches and meters
 //! draw inside their own rectangles, with a margin, and canvases clip what
@@ -59,6 +60,7 @@ mod list;
 mod meter;
 mod nav;
 mod pill;
+mod responsive;
 mod scroll_view;
 mod slider;
 mod text_edit;
@@ -90,6 +92,7 @@ pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view, list_
 pub use meter::{Meter, meter};
 pub use nav::{Pages, sidebar, tabs};
 pub use pill::{Pill, pill};
+pub use responsive::{RESPONSIVE_MARGIN, Responsive, responsive};
 pub use scroll_view::{ScrollView, ScrollViewBuilder, scroll_view};
 pub use slider::{Slider, slider};
 pub use text_field::{TextField, text_field};

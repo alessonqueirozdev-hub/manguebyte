@@ -332,7 +332,8 @@ pub struct AccessEntry {
     pub node: AccessNode,
     /// Where it is, in logical pixels.
     pub bounds: Rect,
-    /// Where it is, in device pixels.
+    /// Where it is, in device pixels of the window: it counts from the
+    /// window's corner (see [`Root::set_origin`](crate::Root::set_origin)).
     pub device: IRect,
 }
 

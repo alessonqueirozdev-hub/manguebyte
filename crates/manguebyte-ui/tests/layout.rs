@@ -6,7 +6,9 @@ use std::rc::Rc;
 use manguebyte_gfx::{IRect, Rect, Size};
 use manguebyte_plugin::editor::EditorContext;
 use manguebyte_plugin::editor::testing::RecordingEditorHost;
-use manguebyte_ui::layout::{Align, Arrange, Insets, Justify, LayoutNode, Style, UNBOUNDED, solve};
+use manguebyte_ui::layout::{
+    Align, Arrange, Insets, Justify, LayoutNode, Style, UNBOUNDED, natural_size, solve,
+};
 use manguebyte_ui::{IntoView, Root, canvas, column, row, stack};
 
 /// The tree the exact tests use:
@@ -473,11 +475,47 @@ fn every_layout_keeps_children_inside_in_order_and_on_device_pixels() {
                         Arrange::Column => {
                             assert!(before.bottom() <= i64::from(device.y), "case {case}")
                         }
-                        Arrange::Stack | Arrange::Leaf | Arrange::Scroll { .. } => {}
+                        Arrange::Stack
+                        | Arrange::Adaptive
+                        | Arrange::Leaf
+                        | Arrange::Scroll { .. } => {}
                     }
                 }
                 previous = Some(device);
             }
         }
     }
+}
+
+#[test]
+fn an_adaptive_node_places_as_a_stack_with_its_content_a_floor_under_its_natural_size() {
+    let adaptive = |content: Size| {
+        vec![
+            LayoutNode::new(
+                Style {
+                    arrange: Arrange::Adaptive,
+                    padding: Insets::all(2.0),
+                    ..Style::leaf()
+                },
+                content,
+                vec![1],
+            ),
+            LayoutNode::leaf(Style::leaf(), Size::new(40.0, 20.0)),
+        ]
+    };
+    // The larger of the two on each axis, padding on top. A stack ignores
+    // its content.
+    assert_eq!(
+        natural_size(&adaptive(Size::new(100.0, 10.0)), 0),
+        Size::new(104.0, 24.0)
+    );
+    let mut stack = adaptive(Size::new(100.0, 10.0));
+    stack[0].style.arrange = Arrange::Stack;
+    assert_eq!(natural_size(&stack, 0), Size::new(44.0, 24.0));
+    // Placed the same.
+    let area = Rect::new(0.0, 0.0, 300.0, 200.0);
+    assert_eq!(
+        solve(&adaptive(Size::new(100.0, 10.0)), 0, area, 1.0)[1],
+        solve(&stack, 0, area, 1.0)[1]
+    );
 }
