@@ -1628,7 +1628,11 @@ fn a_voiced_partial_bank_does_not_use_the_heap() {
                         bandwidth_hz: 10.0 + (round + i % 7) as f32,
                     },
                 );
-                bank.start_attack(i, &attack);
+                if i % 2 == 0 {
+                    bank.start_attack(i, &attack);
+                } else {
+                    bank.restart_attack(i, &attack);
+                }
                 bank.ramp_to(i, 2e-3, 64 + i % 7);
                 bank.set_air_depth(i, 0.03);
             }

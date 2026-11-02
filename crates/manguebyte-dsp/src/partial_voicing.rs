@@ -30,6 +30,11 @@ const MAX_JITTER_DB: f32 = 3.0;
 const MAX_WANDER: f32 = 4.0;
 /// Longest time an attack counts, so that frames stay exact in an `f32`.
 const MAX_ATTACK_FRAMES: u32 = 1 << 23;
+/// The largest pole, the last `f32` below 1: a filter with a pole of 1 would
+/// never move again, and its gain would have no finite scale.
+const LARGEST_POLE: f32 = 1.0 - f32::EPSILON / 2.0;
+/// The largest level an attack starts from, more than any modulator holds.
+const MAX_START_LEVEL: f32 = 8.0;
 
 /// The noise around one partial, for
 /// [`PartialBank::set_air`](crate::PartialBank::set_air).
@@ -48,7 +53,8 @@ pub struct PartialAir {
     /// partial or so, where it falls away faster. Between 0.1 Hz and a
     /// sixty-fourth of the sample rate (750 Hz at 48 kHz), where the straight
     /// lines between updates make it a quarter narrower than asked; within
-    /// 20 % up to half of that.
+    /// 20 % up to half of that. At a sample rate that cannot hold what is
+    /// asked the top is used, and what was asked stays for the next rate.
     pub bandwidth_hz: f32,
 }
 
@@ -96,7 +102,11 @@ pub struct PartialAttack {
     /// this does not wait for the delay or the rise: the air comes first.
     /// It falls as `(1 - p)²`.
     pub breath: f32,
-    /// Frames the breath takes to die away, from the start.
+    /// Frames the breath takes to die away, counted from the first update
+    /// after the start, at most 31 frames later, so that what is heard of it
+    /// does not depend on where the attack falls against the updates. It is
+    /// read at the updates, so one shorter than an update still sounds, for
+    /// two updates at most: its first value is the whole of it.
     pub breath_frames: u32,
     /// The noise's bandwidth at the very start, in hertz: it narrows to the
     /// partial's own as the breath dies away. 0 leaves the partial's own
@@ -106,7 +116,8 @@ pub struct PartialAttack {
     /// to 100; negative is flat.
     pub pitch_cents: f32,
     /// Frames the pitch takes to settle, from the end of the delay. A
-    /// smoothstep.
+    /// smoothstep, read at the updates: one over before the first update
+    /// is not heard.
     pub pitch_frames: u32,
 }
 
@@ -125,7 +136,8 @@ pub struct WindJitter {
     pub db: f32,
     /// How fast it wanders: the corner, in hertz, of two one-pole low-passes
     /// in a row over white noise, so 12 dB an octave above it. From 0.01 Hz
-    /// to a 256th of the sample rate.
+    /// to a 256th of the sample rate; a change neither moves the wander
+    /// nor deepens it.
     pub rate_hz: f32,
 }
 
@@ -215,22 +227,27 @@ impl PipeVoicing {
     /// - The whole attack: 26, 45 and 160 ms in one pipe measured for three
     ///   speeds of the pallet (proceedings of ISMA 2004, Nara), a dependence
     ///   on the rise of the pressure that Nolle and Finch (JASA 91, 1992)
-    ///   study at length. 30 ms for the slowest partial, 90 ms with its
-    ///   settling, sits at the quick end of that.
-    /// - Harmonics do not start together, and the fundamental is the last to
-    ///   settle (Fletcher, Acustica 34, 1976, for the theory; Fletcher and
-    ///   Rossing, "The Physics of Musical Instruments", chapter 17). How
-    ///   much is a judgement: 3 ms here, because in Caecilia's listening
-    ///   a longer stagger sweeps the brightness upwards, an artificial wah.
+    ///   study at length. 33 ms for the first harmonic to arrive, and 70 ms
+    ///   for the second to arrive and come back from its overshoot, sit at
+    ///   the quick end of that.
+    /// - Harmonics do not start together (Fletcher, Acustica 34, 1976, for the
+    ///   theory; Fletcher and Rossing, "The Physics of Musical Instruments",
+    ///   chapter 17). Here the first harmonic is the last to reach its level,
+    ///   at 33 ms against 25 ms for the second and 18 ms for the fourth, as
+    ///   Pykett reports (below); it has no overshoot, so the upper ones are
+    ///   the last to finish, at 70 and 52 ms. How much stagger is a judgement:
+    ///   3 ms, because in Caecilia's listening a longer one sweeps the
+    ///   brightness upwards, an artificial wah.
     /// - Overshoot, delay and stability are how Keeler (IEEE Transactions
     ///   on Audio and Electroacoustics 20, 1972) describes attacks. The 25 %
     ///   here is a judgement.
     /// - A chiff is noise close to the pipe's harmonics (Castellengo, Acta
     ///   Acustica 85, 1999), which is why the breath sits on each partial.
     ///   Its level, length and bandwidth here are judgements.
-    /// - That the lower harmonics start a little flat is reported in Colin
-    ///   Pykett's measurements ("A Second in the Life of a Violone"), an
-    ///   essay and not a paper; the 6 cents here is a judgement.
+    /// - That the fundamental takes longest to appear, and that the lower
+    ///   harmonics start a little flat, is reported in Colin Pykett's
+    ///   measurements ("A Second in the Life of a Violone"), an essay and not
+    ///   a paper; the 6 cents here is a judgement.
     /// - The air's bandwidth follows the resonator the noise drives, whose
     ///   width is frequency over Q; the floor and the Q of 60 are judgements,
     ///   and so are the air's levels and the jitter's, which have no
@@ -311,12 +328,13 @@ fn cos_series(w: f64) -> f64 {
 
 /// The pole of the one-pole low-pass whose power is half at `corner_hz`,
 /// updating at `update_rate` hertz. Exact, not the usual `exp(-w)`, because
-/// the corners here go up to a quarter of the update rate.
+/// the corners here go up to a quarter of the update rate. Always above 0 and
+/// below 1, whatever the rates.
 fn pole_for(corner_hz: f64, update_rate: f64) -> f32 {
     let w = (core::f64::consts::TAU * corner_hz / update_rate).min(core::f64::consts::FRAC_PI_2);
     let a = cos_series(w);
     let b = 2.0 - a;
-    (b - ((1.0 - a) * (3.0 - a)).sqrt()) as f32
+    ((b - ((1.0 - a) * (3.0 - a)).sqrt()) as f32).min(LARGEST_POLE)
 }
 
 /// What scales uniform noise from -1 to 1, in two parts, into a one-pole
@@ -327,7 +345,7 @@ fn pole_for(corner_hz: f64, update_rate: f64) -> f32 {
 /// `2/3 + pole/3`.
 #[inline]
 fn drive_for(pole: f32) -> f32 {
-    (1.5 * (1.0 - pole * pole) / (2.0 / 3.0 + pole / 3.0)).sqrt()
+    (1.5 * (1.0 - pole * pole).max(0.0) / (2.0 / 3.0 + pole / 3.0)).sqrt()
 }
 
 /// The next value of a generator of 32-bit states, never 0.
@@ -388,10 +406,17 @@ struct Attacks {
     per_rise: Vec<f32>,
     per_settle: Vec<f32>,
     peak: Vec<f32>,
+    /// The level before the rise: 0, or where a restarted attack found it.
+    from: Vec<f32>,
     breath: Vec<f32>,
+    /// The age at the first update of the attack, where the breath starts.
+    breath_start: Vec<f32>,
     per_breath: Vec<f32>,
-    /// Where the pole of the noise starts, against where it settles.
-    pole_offset: Vec<f32>,
+    /// The pole of the noise at the start of the breath, and how much of
+    /// it counts: 1, or 0 for the partial's own pole throughout. A pole
+    /// and not a distance from the partial's, which can change meanwhile.
+    breath_pole: Vec<f32>,
+    breath_share: Vec<f32>,
     /// The natural logarithm of the starting pitch ratio.
     pitch_log: Vec<f32>,
     per_pitch: Vec<f32>,
@@ -408,9 +433,12 @@ impl Attacks {
             per_rise: vec![1.0; room],
             per_settle: vec![1.0; room],
             peak: vec![1.0; room],
+            from: vec![0.0; room],
             breath: vec![0.0; room],
+            breath_start: vec![0.0; room],
             per_breath: vec![1.0; room],
-            pole_offset: vec![0.0; room],
+            breath_pole: vec![0.0; room],
+            breath_share: vec![0.0; room],
             pitch_log: vec![0.0; room],
             per_pitch: vec![1.0; room],
             ends: vec![f32::INFINITY; room],
@@ -428,9 +456,12 @@ impl Attacks {
         self.per_rise[i] = 1.0;
         self.per_settle[i] = 1.0;
         self.peak[i] = 1.0;
+        self.from[i] = 0.0;
         self.breath[i] = 0.0;
+        self.breath_start[i] = 0.0;
         self.per_breath[i] = 1.0;
-        self.pole_offset[i] = 0.0;
+        self.breath_pole[i] = 0.0;
+        self.breath_share[i] = 0.0;
         self.pitch_log[i] = 0.0;
         self.per_pitch[i] = 1.0;
         self.ends[i] = f32::INFINITY;
@@ -445,6 +476,7 @@ impl Attacks {
             self.per_rise[i],
             self.per_settle[i],
             self.peak[i],
+            self.from[i],
         )
     }
 
@@ -459,14 +491,22 @@ impl Attacks {
     }
 }
 
-/// An attack's level at `age` frames, without a branch: the rise up to the
-/// peak, less the settling down from there.
+/// An attack's level at `age` frames, without a branch: the rise from `from`
+/// up to the peak, less the settling down from there.
 #[inline(always)]
-fn attack_level(age: f32, delay: f32, rise: f32, per_rise: f32, per_settle: f32, peak: f32) -> f32 {
+fn attack_level(
+    age: f32,
+    delay: f32,
+    rise: f32,
+    per_rise: f32,
+    per_settle: f32,
+    peak: f32,
+    from: f32,
+) -> f32 {
     let after = age - delay;
     let rising = (after * per_rise).clamp(0.0, 1.0);
     let settling = ((after - rise) * per_settle).clamp(0.0, 1.0);
-    peak * smooth(rising) - (peak - 1.0) * smooth(settling)
+    from + (peak - from) * smooth(rising) - (peak - 1.0) * smooth(settling)
 }
 
 /// An attack's pitch at `age` frames, as a ratio less 1.
@@ -513,10 +553,12 @@ impl Wind {
 
     /// The filter for the rate set. Two one-poles in a row with
     /// `y += (1 - p)(x - y)`: the output's power is the input's times
-    /// `(1 - p)(1 + p²) / (1 + p)³`, and the input's is 1/3.
+    /// `(1 - p)(1 + p²) / (1 + p)³`, and uniform noise's is 1/3. The scale is
+    /// on the input, so that the output, which is the wander, has a standard
+    /// deviation of 1 at any rate, and a new rate does not move it.
     fn set_filter(&mut self, update_rate: f64) {
         let top = (update_rate / 8.0) as f32;
-        let rate = self.settings.rate_hz.clamp(MIN_WIND_RATE_HZ, top);
+        let rate = self.settings.rate_hz.max(MIN_WIND_RATE_HZ).min(top);
         let pole = pole_for(f64::from(rate), update_rate);
         let p = f64::from(pole);
         let power = (1.0 - p) * (1.0 + p * p) / ((1.0 + p) * (1.0 + p) * (1.0 + p)) / 3.0;
@@ -572,9 +614,13 @@ impl Wind {
         }
         self.rng = xorshift(self.rng);
         let noise = (self.rng as i32) as f32 * (1.0 / 2_147_483_648.0);
-        self.first += (1.0 - self.pole) * (noise - self.first);
+        self.first += (1.0 - self.pole) * (noise * self.scale - self.first);
         self.second += (1.0 - self.pole) * (self.first - self.second);
-        let wander = (self.second * self.scale).clamp(-MAX_WANDER, MAX_WANDER);
+        if !self.second.is_finite() {
+            self.first = 0.0;
+            self.second = 0.0;
+        }
+        let wander = self.second.clamp(-MAX_WANDER, MAX_WANDER);
         let gain_log = self.db * wander * (LN_10 / 20.0);
         let pitch_log = self.cents * wander * (LN_2 / 1_200.0);
         (1.0 + exp_minus_one(gain_log), exp_minus_one(pitch_log))
@@ -721,21 +767,30 @@ impl Voicing {
         self.mod_im[i] = 0.0;
         self.mod_re_step[i] = 0.0;
         self.mod_im_step[i] = 0.0;
+        self.cos_turn[i] = 1.0;
+        self.sin_turn[i] = 0.0;
     }
 
+    /// The highest bandwidth this sample rate holds.
+    fn top_bandwidth(&self) -> f32 {
+        (self.update_rate / 2.0) as f32
+    }
+
+    /// Puts partial `i`'s noise at the bandwidth asked for, or as near as
+    /// this sample rate holds. What was asked stays, in hertz, for the next.
     fn apply_bandwidth(&mut self, i: usize) {
-        let pole = pole_for(f64::from(self.bandwidth[i]) / 2.0, self.update_rate);
+        let used = self.bandwidth[i].min(self.top_bandwidth());
+        let pole = pole_for(f64::from(used) / 2.0, self.update_rate);
         self.rest_pole[i] = pole;
         self.pole[i] = pole;
         self.drive[i] = drive_for(pole);
     }
 
     pub(crate) fn set_bandwidth(&mut self, i: usize, bandwidth_hz: f32) {
-        let top = (self.update_rate / 2.0) as f32;
         let bandwidth = if bandwidth_hz.is_nan() {
             DEFAULT_AIR_BANDWIDTH_HZ
         } else {
-            bandwidth_hz.clamp(MIN_BANDWIDTH_HZ, top)
+            bandwidth_hz.max(MIN_BANDWIDTH_HZ)
         };
         if bandwidth != self.bandwidth[i] {
             self.bandwidth[i] = bandwidth;
@@ -797,8 +852,15 @@ impl Voicing {
     }
 
     /// Starts an attack on partial `i`, `to_update` frames before the next
-    /// update (0 if the next frame has one).
-    pub(crate) fn start_attack(&mut self, i: usize, attack: &PartialAttack, to_update: usize) {
+    /// update (0 if the next frame has one): from silence, or, if `from_here`,
+    /// from the level the partial has now.
+    pub(crate) fn start_attack(
+        &mut self,
+        i: usize,
+        attack: &PartialAttack,
+        to_update: usize,
+        from_here: bool,
+    ) {
         let frames = |x: u32| x.min(MAX_ATTACK_FRAMES);
         let overshoot = clean(attack.overshoot, 1.0);
         let breath = clean(attack.breath, 1.0);
@@ -839,16 +901,32 @@ impl Voicing {
                 1.0 / frames as f32
             }
         };
-        let pole_offset = if breath_frames != 0 && attack.breath_bandwidth_hz > 0.0 {
-            let top = (self.update_rate / 2.0) as f32;
-            let bandwidth = attack.breath_bandwidth_hz.clamp(MIN_BANDWIDTH_HZ, top);
-            pole_for(f64::from(bandwidth) / 2.0, self.update_rate) - self.rest_pole[i]
+        let (breath_pole, breath_share) = if breath_frames != 0 && attack.breath_bandwidth_hz > 0.0
+        {
+            let bandwidth = attack
+                .breath_bandwidth_hz
+                .max(MIN_BANDWIDTH_HZ)
+                .min(self.top_bandwidth());
+            (pole_for(f64::from(bandwidth) / 2.0, self.update_rate), 1.0)
+        } else {
+            (0.0, 0.0)
+        };
+        // The breath counts from the first update, so that what is heard of
+        // it does not depend on how far off that was.
+        let breath_start = to_update as u32 + VOICE_FRAMES as u32;
+        let breath_ends = if breath_frames == 0 {
+            0
+        } else {
+            breath_start + breath_frames
+        };
+        let ends = (delay + rise + settle)
+            .max(breath_ends)
+            .max(delay + pitch_frames);
+        let from = if from_here {
+            clean(self.mod_re[i], MAX_START_LEVEL)
         } else {
             0.0
         };
-        let ends = (delay + rise + settle)
-            .max(breath_frames)
-            .max(delay + pitch_frames);
         let attacks = &mut self.attacks;
         attacks.age[i] = to_update as f32;
         attacks.delay[i] = delay as f32;
@@ -856,9 +934,12 @@ impl Voicing {
         attacks.per_rise[i] = per(rise);
         attacks.per_settle[i] = per(settle);
         attacks.peak[i] = 1.0 + if settle == 0 { 0.0 } else { overshoot };
+        attacks.from[i] = from;
         attacks.breath[i] = if breath_frames == 0 { 0.0 } else { breath };
+        attacks.breath_start[i] = breath_start as f32;
         attacks.per_breath[i] = per(breath_frames);
-        attacks.pole_offset[i] = pole_offset;
+        attacks.breath_pole[i] = breath_pole;
+        attacks.breath_share[i] = breath_share;
         attacks.pitch_log[i] = if pitch_frames == 0 {
             0.0
         } else {
@@ -879,12 +960,17 @@ impl Voicing {
             self.updates_to_attack_end.min(updates)
         };
         self.wake();
-        // The partial is silent from this frame, and the frames up to the
-        // next update bring it to where that update takes over.
         let level = self.attacks.level_now(i);
         self.level[i] = level;
         self.breath[i] = 0.0;
         self.pitch[i] = self.attacks.shift_now(i);
+        if from_here {
+            // The modulator goes on where it was going until the next update
+            // takes over, and that one starts from where it has got to.
+            return;
+        }
+        // The partial is silent from this frame, and the frames up to the
+        // next update bring it to where that update takes over.
         self.mod_re[i] = 0.0;
         self.mod_im[i] = 0.0;
         self.mod_re_step[i] = if to_update == 0 {
@@ -953,8 +1039,8 @@ impl Voicing {
             &self.air[..used],
             &self.level[..used],
             &self.breath[..used],
-            &self.mod_re[..used],
-            &self.mod_im[..used],
+            &mut self.mod_re[..used],
+            &mut self.mod_im[..used],
             &mut self.mod_re_step[..used],
             &mut self.mod_im_step[..used],
             wind_gain,
@@ -1010,9 +1096,12 @@ impl Voicing {
             &attacks.per_rise[..used],
             &attacks.per_settle[..used],
             &attacks.peak[..used],
+            &attacks.from[..used],
             &attacks.breath[..used],
+            &attacks.breath_start[..used],
             &attacks.per_breath[..used],
-            &attacks.pole_offset[..used],
+            &attacks.breath_pole[..used],
+            &attacks.breath_share[..used],
             &attacks.pitch_log[..used],
             &attacks.per_pitch[..used],
             &self.rest_pole[..used],
@@ -1061,9 +1150,12 @@ fn update_attacks(
     per_rise: &[f32],
     per_settle: &[f32],
     peak: &[f32],
+    from: &[f32],
     breath_depth: &[f32],
+    breath_start: &[f32],
     per_breath: &[f32],
-    pole_offset: &[f32],
+    breath_pole: &[f32],
+    breath_share: &[f32],
     pitch_log: &[f32],
     per_pitch: &[f32],
     rest_pole: &[f32],
@@ -1074,15 +1166,21 @@ fn update_attacks(
     drive: &mut [f32],
 ) {
     let n = age.len();
-    let (delay, rise, per_rise, per_settle, peak) = (
+    let (delay, rise, per_rise, per_settle, peak, from) = (
         &delay[..n],
         &rise[..n],
         &per_rise[..n],
         &per_settle[..n],
         &peak[..n],
+        &from[..n],
     );
-    let (breath_depth, per_breath, pole_offset) =
-        (&breath_depth[..n], &per_breath[..n], &pole_offset[..n]);
+    let (breath_depth, breath_start, per_breath, breath_pole, breath_share) = (
+        &breath_depth[..n],
+        &breath_start[..n],
+        &per_breath[..n],
+        &breath_pole[..n],
+        &breath_share[..n],
+    );
     let (pitch_log, per_pitch, rest_pole) = (&pitch_log[..n], &per_pitch[..n], &rest_pole[..n]);
     let (level, breath, pitch, pole, drive) = (
         &mut level[..n],
@@ -1094,19 +1192,31 @@ fn update_attacks(
     for i in 0..n {
         let now = age[i] + VOICE_FRAMES as f32;
         age[i] = now;
-        level[i] = attack_level(now, delay[i], rise[i], per_rise[i], per_settle[i], peak[i]);
-        let left = (1.0 - now * per_breath[i]).max(0.0);
+        level[i] = attack_level(
+            now,
+            delay[i],
+            rise[i],
+            per_rise[i],
+            per_settle[i],
+            peak[i],
+            from[i],
+        );
+        let left = (1.0 - (now - breath_start[i]) * per_breath[i]).clamp(0.0, 1.0);
         breath[i] = breath_depth[i] * (left * left);
         pitch[i] = attack_shift(now, delay[i], pitch_log[i], per_pitch[i]);
-        let moved = rest_pole[i] + pole_offset[i] * left;
+        // Between two poles, so inside what a pole may be, whatever either
+        // of them has become since the attack began.
+        let rest = rest_pole[i];
+        let moved = rest + (breath_pole[i] - rest) * (left * breath_share[i]);
         pole[i] = moved;
         drive[i] = drive_for(moved);
     }
 }
 
-/// Moves every partial's noise on one update and aims its modulator at
-/// `wind (level + (level air + breath) n)`, for the complex noise `n`.
-/// Written as one loop over slices the compiler knows are apart, so that
+/// Moves on one update the noise of every partial that has any, so that a
+/// partial's stream depends on its own settings and on no other's, and aims
+/// every modulator at `wind (level + (level air + breath) n)`, for the
+/// complex noise `n`. Nothing that is not finite stays in the state. Written as one loop over slices the compiler knows are apart, so that
 /// it vectorises on the baseline instruction set; every operation is exact
 /// IEEE arithmetic, so the result does not depend on how it was compiled.
 #[allow(clippy::too_many_arguments)]
@@ -1120,8 +1230,8 @@ fn add_noise(
     air: &[f32],
     level: &[f32],
     breath: &[f32],
-    mod_re: &[f32],
-    mod_im: &[f32],
+    mod_re: &mut [f32],
+    mod_im: &mut [f32],
     mod_re_step: &mut [f32],
     mod_im_step: &mut [f32],
     wind_gain: f32,
@@ -1136,24 +1246,41 @@ fn add_noise(
         &level[..n],
         &breath[..n],
     );
-    let (mod_re, mod_im) = (&mod_re[..n], &mod_im[..n]);
+    let (mod_re, mod_im) = (&mut mod_re[..n], &mut mod_im[..n]);
     let (mod_re_step, mod_im_step) = (&mut mod_re_step[..n], &mut mod_im_step[..n]);
     for i in 0..n {
-        let state = xorshift(rng[i]);
+        let amount = level[i] * air[i] + breath[i];
+        let has_air = amount != 0.0;
+        let state = if has_air { xorshift(rng[i]) } else { rng[i] };
         rng[i] = state;
         // Two numbers from one state: its high and low halves, each uniform
         // from -1 to 1, and each pair of them occurs once in the period.
         let high = ((state as i32) >> 16) as f32 * SCALE;
         let low = (((state << 16) as i32) >> 16) as f32 * SCALE;
-        let re = pole[i] * noise_re[i] + drive[i] * high;
-        let im = pole[i] * noise_im[i] + drive[i] * low;
+        let next_re = pole[i] * noise_re[i] + drive[i] * high;
+        let next_im = pole[i] * noise_im[i] + drive[i] * low;
+        let re = if has_air { next_re } else { noise_re[i] };
+        let im = if has_air { next_im } else { noise_im[i] };
+        let re = if re.is_finite() { re } else { 0.0 };
+        let im = if im.is_finite() { im } else { 0.0 };
         noise_re[i] = re;
         noise_im[i] = im;
-        let amount = level[i] * air[i] + breath[i];
         let aim_re = wind_gain * (level[i] + amount * re);
         let aim_im = wind_gain * (amount * im);
-        mod_re_step[i] = (aim_re - mod_re[i]) * PER_VOICE_FRAME;
-        mod_im_step[i] = (aim_im - mod_im[i]) * PER_VOICE_FRAME;
+        let now_re = if mod_re[i].is_finite() {
+            mod_re[i]
+        } else {
+            aim_re
+        };
+        let now_im = if mod_im[i].is_finite() {
+            mod_im[i]
+        } else {
+            aim_im
+        };
+        mod_re[i] = now_re;
+        mod_im[i] = now_im;
+        mod_re_step[i] = (aim_re - now_re) * PER_VOICE_FRAME;
+        mod_im_step[i] = (aim_im - now_im) * PER_VOICE_FRAME;
     }
 }
 
@@ -1237,6 +1364,85 @@ mod tests {
             let x = k as f32 / 100.0 * 0.1;
             let exact = f64::from(x).exp_m1();
             assert!((f64::from(exp_minus_one(x)) - exact).abs() < 5e-6, "{x}");
+        }
+    }
+
+    fn poles_of(voicing: &Voicing, used: usize) -> Vec<f32> {
+        voicing.pole[..used].to_vec()
+    }
+
+    #[test]
+    fn the_noises_pole_stays_inside_the_circle_as_settings_change_under_it() {
+        let attack = |bandwidth: f32| PartialAttack {
+            rise_frames: 480,
+            breath: 0.2,
+            breath_frames: 1_920,
+            breath_bandwidth_hz: bandwidth,
+            ..PartialAttack::default()
+        };
+        let (cos_step, sin_step) = ([1.0f32; 16], [0.0f32; 16]);
+        for (first, breath, then) in [
+            // The new pole less the old distance went past 1.
+            (300.0, 50.0, 10.0),
+            // And below 0.
+            (10.0, 700.0, 750.0),
+        ] {
+            let mut voicing = Voicing::new(16, 48_000.0);
+            voicing.set_bandwidth(0, first);
+            voicing.set_depth(0, 0.02);
+            voicing.start_attack(0, &attack(breath), 0, false);
+            voicing.update(16, &cos_step, &sin_step);
+            voicing.set_bandwidth(0, then);
+            for _ in 0..80 {
+                voicing.update(16, &cos_step, &sin_step);
+                for pole in poles_of(&voicing, 16) {
+                    assert!(pole > 0.0 && pole < 1.0, "{first} {breath} {then}: {pole}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_that_is_not_finite_stays_in_the_state() {
+        let (cos_step, sin_step) = ([1.0f32; 16], [0.0f32; 16]);
+        let mut voicing = Voicing::new(16, 48_000.0);
+        voicing.set_depth(0, 0.1);
+        voicing.set_wind(WindJitter {
+            cents: 1.0,
+            db: 0.1,
+            rate_hz: 4.0,
+        });
+        voicing.update(16, &cos_step, &sin_step);
+        voicing.noise_re[0] = f32::NAN;
+        voicing.noise_im[0] = f32::INFINITY;
+        voicing.mod_re[0] = f32::NAN;
+        voicing.mod_im[0] = f32::NEG_INFINITY;
+        voicing.wind.first = f32::NAN;
+        voicing.wind.second = f32::NAN;
+        voicing.update(16, &cos_step, &sin_step);
+        for x in [
+            voicing.noise_re[0],
+            voicing.noise_im[0],
+            voicing.mod_re[0],
+            voicing.mod_im[0],
+            voicing.mod_re_step[0],
+            voicing.mod_im_step[0],
+            voicing.wind.first,
+            voicing.wind.second,
+        ] {
+            assert!(x.is_finite(), "{x}");
+        }
+    }
+
+    #[test]
+    fn a_pole_is_below_one_at_any_rate_and_the_wind_has_a_finite_scale() {
+        for rate in [1e-300, 1.0, 48_000.0, 2.2e9, 1e300] {
+            for corner in [0.0, 0.01, 1.0, 1e6] {
+                let pole = pole_for(corner, rate);
+                assert!(pole > 0.0 && pole < 1.0, "{corner} at {rate}: {pole}");
+            }
+            let wind = Wind::new(rate, 1);
+            assert!(wind.scale.is_finite(), "at {rate}");
         }
     }
 

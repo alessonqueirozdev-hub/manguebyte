@@ -170,7 +170,8 @@ them sound blown instead, three ways, all multiplying what the caller sets, so
   where it was.
 - `start_attack` makes a partial speak: a delay, a rise, an overshoot that
   settles, a breath of extra air that starts wide and narrows, a pitch that
-  settles. Upper partials can speak first.
+  settles. Upper partials can speak first. `restart_attack` does so from the
+  level a sounding partial has now, for a key struck again during a release.
 - `set_wind_jitter` wanders the whole bank's gain and frequency, by the same
   ratio for every partial, on top of what a bellows model sets.
 
@@ -179,12 +180,14 @@ starting point: most of its numbers are judgements, and say so.
 `set_voicing_seed` picks the noise: give every pipe its own. Everything
 updates every 32 frames, with straight lines between. A bank with none of it
 on runs the plain kernel and gives the same bits as if it did not exist; with
-it, the output is the same on every backend and whatever the blocks. 2 000
-partials at 48 kHz cost 1.3 to 1.7 times the plain kernel with air, and 1.8
-to 2.9 with every partial always in an attack and the jitter on (0.05 to 0.17
-of a core on AVX2; `examples/partial_voicing_speed.rs`, one logical processor
-of a busy Intel Core i3-1215U). `examples/organ_pipe_wavs.rs` writes a pipe and a
-chord, plain and voiced, to compare by ear.
+it, the output is the same whatever the blocks and on the backends run (scalar,
+SSE2, AVX and AVX2 on one x86-64 machine; NEON and WebAssembly SIMD have not
+been run). 2 000 partials at 48 kHz cost 1.4 to 1.6 times the plain kernel with
+air (0.05 to 0.11 of a core on AVX2), 1.6 to 2.1 with air and jitter (0.07 to
+0.13), and 1.8 to 2.5 with all three and every partial always in an attack
+(0.08 to 0.15; `examples/partial_voicing_speed.rs`, one logical processor of an
+Intel Core i3-1215U). `examples/organ_pipe_wavs.rs` writes a pipe and a chord,
+plain and voiced, to compare by ear.
 
 ```rust
 use manguebyte_dsp::{Partial, PartialBank, PipeVoicing};

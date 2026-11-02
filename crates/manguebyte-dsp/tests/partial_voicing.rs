@@ -205,6 +205,7 @@ enum Event {
     Air(usize, PartialAir),
     Depth(usize, f32),
     Attack(usize, PartialAttack),
+    Restart(usize, PartialAttack),
     Jitter(WindJitter),
     Frequency(usize, f64),
     Rotation(usize, f32, f32),
@@ -218,6 +219,7 @@ fn apply(bank: &mut PartialBank, event: Event) {
         Event::Air(i, air) => bank.set_air(i, air),
         Event::Depth(i, depth) => bank.set_air_depth(i, depth),
         Event::Attack(i, attack) => bank.start_attack(i, &attack),
+        Event::Restart(i, attack) => bank.restart_attack(i, &attack),
         Event::Jitter(jitter) => bank.set_wind_jitter(jitter),
         Event::Frequency(i, hz) => bank.set_frequency(i, hz),
         Event::Rotation(i, c, s) => bank.set_rotation(i, c, s),
@@ -270,6 +272,10 @@ fn script(seed: u64, count: usize, frames: usize) -> Vec<(usize, Event)> {
                 pitch_frames: rng.below(1_500) as u32,
             };
             at(frame + rng.below(300), Event::Attack(i, attack));
+            at(
+                frame + rng.below(300),
+                Event::Restart(rng.below(count), attack),
+            );
             at(
                 frame + rng.below(300),
                 Event::Depth(i, (rng.unit() * 0.2) as f32),
@@ -382,9 +388,9 @@ fn voiced_renders_are_pinned_too() {
     // With rotations made from f32 products, nothing in the render uses a
     // platform's maths, so this holds on any machine.
     const WANT: [(usize, u64); 3] = [
-        (3, 0xCADC_7903_23A3_1869),
-        (23, 0x114A_9066_DAFA_8EC0),
-        (64, 0xFF93_913A_6575_0E2C),
+        (3, 0x4D1D_89F1_8795_4A09),
+        (23, 0xB38D_5E0E_6FF7_E1C9),
+        (64, 0x0264_D285_16FD_781F),
     ];
     for backend in Backend::available() {
         for (count, want) in WANT {
@@ -1105,8 +1111,8 @@ fn upper_partials_reach_their_level_first_when_asked() {
 #[test]
 fn the_breath_starts_at_once_and_dies_as_it_should() {
     // A partial at 0 Hz with its phasor at (1, 0) outputs the imaginary part
-    // of its modulator: for a breath, `breath (1 - t / T)² n(t)`, whose power
-    // is half of `n`'s 1. Averaged over many seeds, in eight slices of T,
+    // of its modulator: for a breath, `breath (1 - t / T)² n(t)` from the first
+    // update on, whose power is half of `n`'s 1. Averaged over many seeds, in eight slices of T,
     // against that, to 10 %; and the delay does not hold it back.
     const T: usize = 2_400;
     const SLICES: usize = 8;
@@ -1141,7 +1147,8 @@ fn the_breath_starts_at_once_and_dies_as_it_should() {
         let fine: f64 = (0..100)
             .map(|k| {
                 let t = (slice as f64 + (k as f64 + 0.5) / 100.0) / SLICES as f64;
-                (1.0 - t).powi(4)
+                // It counts from the first update, one update in.
+                (1.0 - (t - UPDATE as f64 / T as f64).max(0.0)).powi(4)
             })
             .sum::<f64>()
             / 100.0;
@@ -1614,11 +1621,12 @@ fn changing_the_jitter_while_playing_does_not_click() {
         bank.set_wind_jitter(setting);
     }
     worst = worst.max(largest_step(&left_only(&mut bank, 48_000)));
-    eprintln!("the gain's largest step {worst:.6}");
-    assert!(worst < 5e-4, "{worst}");
     // Off for good: the bank is plain again, and at its level exactly.
     bank.set_wind_jitter(WindJitter::OFF);
     let out = left_only(&mut bank, 9_600);
+    worst = worst.max(largest_step(&out));
+    eprintln!("the gain's largest step {worst:.6}");
+    assert!(worst < 5e-4, "{worst}");
     assert!(!bank.is_voiced());
     assert_eq!(out[9_599], 1.0);
 }
@@ -1647,6 +1655,21 @@ fn the_flue_principal_voices_a_rank_as_its_comments_say() {
     assert_eq!(voicing.attack(1.0, RATE).delay_frames, 144);
     assert_eq!(voicing.attack(16.0, RATE).delay_frames, 0);
     assert_eq!(voicing.attack(1.0, RATE).overshoot, 0.0);
+    // What the preset's comments say of it, in milliseconds: when each
+    // arrives at its level or peak, and when it has finished.
+    for (h, arrives, finishes) in [(1.0f32, 33.0, 33.0), (2.0, 24.75, 69.75), (4.0, 18.4, 52.2)] {
+        let attack = voicing.attack(h, RATE);
+        let ms = |frames: u32| f64::from(frames) / RATE * 1_000.0;
+        let peak = ms(attack.delay_frames + attack.rise_frames);
+        let end = peak
+            + if attack.overshoot > 0.0 {
+                ms(attack.settle_frames)
+            } else {
+                0.0
+            };
+        assert!((peak - arrives).abs() < 0.1, "harmonic {h}: {peak} ms");
+        assert!((end - finishes).abs() < 0.1, "harmonic {h}: {end} ms");
+    }
 
     // A pipe of 16 partials speaks, and settles back at its plain level.
     let build = |voiced: bool| {
@@ -1689,4 +1712,377 @@ fn the_flue_principal_voices_a_rank_as_its_comments_say() {
     let change = db(power_of(&a) / power_of(&b));
     eprintln!("the voiced sustain against the plain: {change:+.3} dB");
     assert!(change.abs() < 0.2, "{change}");
+}
+
+#[test]
+fn settings_changed_during_an_attack_leave_the_output_finite() {
+    // The noise's pole goes from the breath's towards the partial's own, and
+    // either can change under it while the attack runs.
+    let voicing = PipeVoicing::FLUE_PRINCIPAL;
+    let attack = |bandwidth: f32| PartialAttack {
+        rise_frames: 480,
+        breath: 0.2,
+        breath_frames: 1_920,
+        breath_bandwidth_hz: bandwidth,
+        ..PartialAttack::default()
+    };
+    type Scene = (f64, f32, PartialAttack, f64, f32);
+    let scenes: [Scene; 5] = [
+        // A narrow breath on wide air, narrowed under it.
+        (48_000.0, 300.0, attack(50.0), 48_000.0, 10.0),
+        // The preset's breath on air narrowed to its floor.
+        (
+            48_000.0,
+            300.0,
+            voicing.attack(1.0, 48_000.0),
+            48_000.0,
+            voicing.air_base_hz,
+        ),
+        // A rate change: the same hertz are another pole.
+        (48_000.0, 750.0, attack(100.0), 192_000.0, 750.0),
+        // A wide breath on narrow air, widened under it.
+        (48_000.0, 10.0, attack(700.0), 48_000.0, 750.0),
+        (192_000.0, 2.0, attack(700.0), 8_000.0, 750.0),
+    ];
+    for (k, &(rate, bandwidth_hz, attack, new_rate, new_bandwidth_hz)) in scenes.iter().enumerate()
+    {
+        let mut bank = lone_partial(Backend::detect(), rate, 440.0, 0.5);
+        bank.set_air(
+            0,
+            PartialAir {
+                depth: 0.02,
+                bandwidth_hz,
+            },
+        );
+        bank.start_attack(0, &attack);
+        render(&mut bank, 64);
+        bank.set_sample_rate(new_rate);
+        bank.set_air(
+            0,
+            PartialAir {
+                depth: 0.02,
+                bandwidth_hz: new_bandwidth_hz,
+            },
+        );
+        let (l, r) = render(&mut bank, 9_600);
+        assert!(
+            l.iter().chain(&r).all(|x| x.is_finite()),
+            "scene {k}: not finite"
+        );
+        // Not a level anyone asked for either.
+        let peak = l.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak < 1.0, "scene {k}: peak {peak}");
+        // And a later voicing has nothing left to catch.
+        bank.set_voicing_seed(3);
+        bank.start_attack(0, &attack);
+        let (l, r) = render(&mut bank, 4_800);
+        assert!(
+            l.iter().chain(&r).all(|x| x.is_finite()),
+            "scene {k}: later"
+        );
+    }
+}
+
+#[test]
+fn changing_the_jitters_rate_does_not_click_or_deepen_it() {
+    // The wander is the filter's state, and a new filter does not move it.
+    // A partial at 0 Hz shows the gain alone. With the deepest jitter, the
+    // largest step from sample to sample after each change is no more than
+    // 1.5 times that of the same jitter played steadily at its faster rate.
+    let deep = |rate_hz: f32| WindJitter {
+        cents: 25.0,
+        db: 3.0,
+        rate_hz,
+    };
+    let start = || {
+        let mut bank = envelope_partial();
+        bank.set_voicing_seed(21);
+        bank.set_wind_jitter(deep(40.0));
+        render(&mut bank, 24_000);
+        bank
+    };
+    let steady = largest_step(&left_only(&mut start(), 48_000));
+    for (name, setting) in [
+        ("a hundredth of the rate", deep(0.4)),
+        ("off, with its own rate", WindJitter::OFF),
+        (
+            "off, at a crawl",
+            WindJitter {
+                rate_hz: 0.01,
+                ..WindJitter::OFF
+            },
+        ),
+    ] {
+        let mut bank = start();
+        let before = left_only(&mut bank, 1_003);
+        let last = before[before.len() - 1];
+        bank.set_wind_jitter(setting);
+        let after = left_only(&mut bank, 4_800);
+        let step = largest_step(&after).max(f64::from((after[0] - last).abs()));
+        eprintln!("{name}: largest step {step:.6}, steadily {steady:.6}");
+        assert!(step < 1.5 * steady, "{name}: {step} against {steady}");
+    }
+    // The depth stays what it says when a rate changes mid-way.
+    let (cents, db_depth) = (2.0f32, 0.4f32);
+    let jitter = |rate_hz: f32| WindJitter {
+        cents,
+        db: db_depth,
+        rate_hz,
+    };
+    let mut bank = envelope_partial();
+    bank.set_wind_jitter(jitter(40.0));
+    render(&mut bank, 24_000);
+    bank.set_wind_jitter(jitter(4.0));
+    // Long enough for the slower filter to have taken over.
+    render(&mut bank, 48_000);
+    let out = left_only(&mut bank, 48_000 * 20);
+    let level: Vec<f64> = out.iter().map(|&x| 20.0 * f64::from(x).log10()).collect();
+    let got = rms(&level);
+    assert!((got / f64::from(db_depth) - 1.0).abs() < 0.2, "{got} dB");
+}
+
+#[test]
+fn no_setter_panics_or_makes_a_nan_at_any_sample_rate() {
+    for rate in [
+        1e-300,
+        1e-6,
+        2.0,
+        100.0,
+        8_000.0,
+        384_000.0,
+        6.7e7,
+        1e9,
+        1e300,
+        f64::MAX,
+    ] {
+        let mut bank = PartialBank::new(16);
+        bank.set_len(2);
+        bank.set_sample_rate(rate);
+        bank.set_rotation(0, 0.99, 0.141_067);
+        bank.set_gain(0, 0.5);
+        for bandwidth_hz in [0.0, 0.01, 1.0, 6.0, 1e4, 1e30, f32::INFINITY] {
+            bank.set_air(
+                0,
+                PartialAir {
+                    depth: 0.1,
+                    bandwidth_hz,
+                },
+            );
+            bank.start_attack(
+                0,
+                &PartialAttack {
+                    rise_frames: 100,
+                    breath: 0.5,
+                    breath_frames: 300,
+                    breath_bandwidth_hz: bandwidth_hz,
+                    pitch_cents: 10.0,
+                    pitch_frames: 300,
+                    ..PartialAttack::default()
+                },
+            );
+            bank.set_wind_jitter(WindJitter {
+                cents: 2.0,
+                db: 0.5,
+                rate_hz: if bandwidth_hz > 0.0 {
+                    bandwidth_hz
+                } else {
+                    0.01
+                },
+            });
+            let (l, r) = render(&mut bank, 600);
+            assert!(
+                l.iter().chain(&r).all(|x| x.is_finite()),
+                "{rate} Hz, {bandwidth_hz} Hz"
+            );
+        }
+        let voicing = PipeVoicing::FLUE_PRINCIPAL;
+        bank.set_air(0, voicing.air(3.0, 800.0));
+        bank.start_attack(0, &voicing.attack(3.0, rate));
+        let (l, r) = render(&mut bank, 256);
+        assert!(
+            l.iter().chain(&r).all(|x| x.is_finite()),
+            "{rate} Hz preset"
+        );
+    }
+}
+
+#[test]
+fn a_partial_that_leaves_use_comes_back_at_phase_zero_under_a_shift() {
+    let mut bank = PartialBank::new(16);
+    bank.set_sample_rate(RATE);
+    bank.set_len(5);
+    for i in 0..5 {
+        bank.set(
+            i,
+            Partial {
+                freq_hz: 1_000.0 * (i + 1) as f64,
+                gain: 0.1,
+                pan: 0.0,
+            },
+        );
+    }
+    bank.set_wind_jitter(WindJitter {
+        cents: 5.0,
+        db: 0.0,
+        rate_hz: 20.0,
+    });
+    // Mid-way between two updates, with a shift in force.
+    render(&mut bank, 1_000 / UPDATE * UPDATE + 8);
+    bank.set_len(3);
+    render(&mut bank, 8);
+    bank.set_len(5);
+    assert_eq!(bank.phasor(3), (1.0, 0.0));
+    assert_eq!(bank.rotation(3), (1.0, 0.0));
+}
+
+#[test]
+fn a_short_breath_sounds_the_same_wherever_it_starts() {
+    // A partial at 0 Hz with its phasor at (1, 0) outputs the imaginary part
+    // of its modulator, which holds only the breath.
+    for breath_frames in [1u32, 20, 31, 32, 64, 100] {
+        let scene = |start: usize| {
+            let mut bank = envelope_partial();
+            bank.set_phasor(0, 1.0, 0.0);
+            bank.set_voicing_seed(7);
+            render(&mut bank, start);
+            bank.start_attack(
+                0,
+                &PartialAttack {
+                    breath: 0.5,
+                    breath_frames,
+                    breath_bandwidth_hz: 300.0,
+                    ..PartialAttack::default()
+                },
+            );
+            left_only(&mut bank, 512 - start)
+        };
+        // Before the first update there is nothing to hear; from it on, all
+        // the same, wherever in the update before it the attack began.
+        let want = scene(1);
+        let power = want.iter().map(|&x| f64::from(x * x)).sum::<f64>();
+        assert!(power > 1e-4, "{breath_frames} frames: {power}");
+        for start in 2..UPDATE {
+            let got = scene(start);
+            assert!(
+                same_bits(&got[UPDATE - start..], &want[UPDATE - 1..]),
+                "{breath_frames} frames from {start}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bandwidth_stays_in_hertz_across_a_rate_that_cannot_hold_it() {
+    let air = PartialAir {
+        depth: 0.05,
+        bandwidth_hz: 300.0,
+    };
+    let scene = |first_rate: f64| {
+        let mut bank = lone_partial(Backend::detect(), first_rate, 440.0, 0.5);
+        bank.set_air(0, air);
+        assert_eq!(bank.air(0), air, "as asked, at {first_rate} Hz");
+        bank.set_sample_rate(RATE);
+        bank.set_frequency(0, 440.0);
+        assert_eq!(bank.air(0), air);
+        left_only(&mut bank, 4_800)
+    };
+    // 8 kHz holds no more than 125 Hz, and its limit is not what stays.
+    assert!(same_bits(&scene(8_000.0), &scene(RATE)));
+}
+
+#[test]
+fn a_partials_noise_does_not_depend_on_when_the_others_start() {
+    let air = PartialAir {
+        depth: 0.1,
+        bandwidth_hz: 100.0,
+    };
+    let scene = |other_first: bool| {
+        let mut bank = PartialBank::new(16);
+        bank.set_sample_rate(RATE);
+        bank.set_len(2);
+        bank.set(
+            0,
+            Partial {
+                freq_hz: 500.0,
+                gain: 0.5,
+                pan: -1.0,
+            },
+        );
+        bank.set(
+            1,
+            Partial {
+                freq_hz: 700.0,
+                gain: 0.5,
+                pan: 1.0,
+            },
+        );
+        // Exactly nothing on the left: the equal-power law leaves 6e-17.
+        bank.set_pan_gains(1, 0.0, 1.0);
+        if other_first {
+            bank.set_air(1, air);
+        }
+        let mut out = left_only(&mut bank, 3_200);
+        bank.set_air(0, air);
+        out.extend(left_only(&mut bank, 4_800));
+        out
+    };
+    // Exact to the sign of a zero: the left sums only hold this partial.
+    for (a, b) in scene(false).iter().zip(&scene(true)) {
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn a_restarted_attack_does_not_step_from_a_partial_that_is_sounding() {
+    // A partial at 0 Hz outputs its level. Restarted anywhere against the
+    // updates, from anywhere in its life, the level has no step larger than
+    // the attack's own slope: at most 1.5 (peak - from) / rise a frame, and
+    // a line's start towards it.
+    let attack = PartialAttack {
+        delay_frames: 40,
+        rise_frames: 480,
+        overshoot: 0.2,
+        settle_frames: 480,
+        ..PartialAttack::default()
+    };
+    let slope = 1.5 * 1.2 / 480.0;
+    for lead in [1_000usize, 1_007, 1_024, 1_055] {
+        // Settled at 1; then half way up an earlier attack.
+        for earlier in [false, true] {
+            let mut bank = envelope_partial();
+            if earlier {
+                bank.start_attack(
+                    0,
+                    &PartialAttack {
+                        rise_frames: 2_000,
+                        ..PartialAttack::default()
+                    },
+                );
+            }
+            let before = left_only(&mut bank, lead);
+            let last = f64::from(before[lead - 1]);
+            bank.restart_attack(0, &attack);
+            let after = left_only(&mut bank, 2_000);
+            let first = (f64::from(after[0]) - last).abs();
+            let step = largest_step(&after).max(first);
+            let what = format!("from frame {lead}, earlier attack {earlier}");
+            assert!(step <= slope + 1e-3, "{what}: {step}");
+            // It holds through the delay, near where it was.
+            assert!((f64::from(after[20]) - last).abs() < 0.03, "{what}");
+            // It reaches the peak and settles at 1.
+            let peak = after.iter().fold(0.0f32, |m, &x| m.max(x));
+            assert!((peak - 1.2).abs() < 0.01, "{what}: peak {peak}");
+            assert!(
+                (after[1_999] - 1.0).abs() < 1e-5,
+                "{what}: {}",
+                after[1_999]
+            );
+        }
+    }
+    // Where start_attack steps, for the record of why this exists.
+    let mut bank = envelope_partial();
+    let last = left_only(&mut bank, 1_024)[1_023];
+    bank.start_attack(0, &attack);
+    assert_eq!(last, 1.0);
+    assert_eq!(left_only(&mut bank, 1)[0], 0.0);
 }

@@ -65,9 +65,10 @@ pub struct Partial {
 ///   `n(t)` complex low-pass noise of its own. The sine grows a skirt of
 ///   noise, and its amplitude and phase wander a little and come back. The
 ///   oscillator is not touched, and the partial's level stays where it was.
-/// - **An attack** ([`start_attack`](Self::start_attack)): a delay, a rise,
-///   an overshoot that settles, a breath of extra air and a pitch that
-///   settles, partial by partial. A release needs nothing new:
+/// - **An attack** ([`start_attack`](Self::start_attack), or
+///   [`restart_attack`](Self::restart_attack) for a partial that may be
+///   sounding): a delay, a rise, an overshoot that settles, a breath of extra
+///   air and a pitch that settles, partial by partial. A release needs nothing new:
 ///   [`ramp_to`](Self::ramp_to) already has a length for each partial.
 /// - **Wind jitter** ([`set_wind_jitter`](Self::set_wind_jitter)): one slow
 ///   wander for the whole bank, moving every partial's gain and frequency
@@ -95,18 +96,23 @@ pub struct Partial {
 /// they have all ended, when it goes back by itself (see
 /// [`is_voiced`](Self::is_voiced)).
 ///
-/// Everything is the same bit for bit on every backend and however the
-/// caller cuts its blocks, as long as settings arrive on the same frames.
-/// The noise comes from a generator for each partial and one for the wind,
-/// all from [`set_voicing_seed`](Self::set_voicing_seed), so a render can
-/// be repeated; none of the update's arithmetic uses a platform's sines
-/// or powers, so it is the same on every machine, given rotations that
-/// are (a [`set_frequency`](Self::set_frequency) works out a platform's
-/// sine). A generator does not restart on a new note: only the seed
-/// restarts it, so that one note does not repeat another.
+/// With them on, the output is the same bit for bit however the caller cuts
+/// its blocks, as long as settings arrive on the same frames, and on every
+/// backend the tests have run on: scalar, SSE2, AVX and AVX2, on one x86-64
+/// machine. NEON and WebAssembly SIMD share the generic kernel's code and
+/// have not been run. The noise comes from a generator for each partial and
+/// one for the wind, all from [`set_voicing_seed`](Self::set_voicing_seed), so
+/// a render can be repeated. A partial's generator moves only on updates when
+/// that partial has air or breath, so its stream depends on its own settings
+/// and on no other partial's. None of the update's arithmetic uses a
+/// platform's sines or powers, so another machine should give the same bits,
+/// given the same rotations (a [`set_frequency`](Self::set_frequency) works
+/// out a platform's sine); that has not been run either. A generator does not
+/// restart on a new note: only the seed restarts it, so that one note does
+/// not repeat another.
 ///
 /// The arrays of the voicing come with [`new`](Self::new), used or not:
-/// 128 bytes a partial, on top of the bank's own 40.
+/// 140 bytes a partial, on top of the bank's own 40.
 ///
 /// # Real time
 ///
@@ -491,10 +497,11 @@ impl PartialBank {
     /// here on the [`PartialAttack`] multiplies its gain.
     ///
     /// The level drops to 0 at once, so a partial already sounding clicks:
-    /// start attacks when the gain is 0, as a new note does, or bring the
-    /// gain down first. An attack replaces one in progress. One with nothing
-    /// in it, [`PartialAttack::default`], ends one in progress and on a
-    /// partial without one does nothing at all.
+    /// start attacks when the gain is 0, as a new note does, and use
+    /// [`restart_attack`](Self::restart_attack) for one that may be sounding.
+    /// An attack replaces one in progress. One with nothing in it,
+    /// [`PartialAttack::default`], ends one in progress and on a partial
+    /// without one does nothing at all.
     ///
     /// ```
     /// use manguebyte_dsp::{Partial, PartialAttack, PartialBank};
@@ -525,7 +532,44 @@ impl PartialBank {
         self.check(i);
         let within = self.since_normalised % VOICE_FRAMES;
         self.voice
-            .start_attack(i, attack, (VOICE_FRAMES - within) % VOICE_FRAMES);
+            .start_attack(i, attack, (VOICE_FRAMES - within) % VOICE_FRAMES, false);
+    }
+
+    /// Starts partial `i` speaking again from the level it has now, for a
+    /// partial that may be sounding: a key struck again during a release.
+    /// The level holds through the [`PartialAttack`]'s delay and rises from
+    /// there to its peak, and nothing steps; the breath and the pitch are as
+    /// in [`start_attack`](Self::start_attack). The caller's gain goes on
+    /// meaning what it did, so bring it back up with
+    /// [`ramp_to`](Self::ramp_to).
+    ///
+    /// ```
+    /// use manguebyte_dsp::{Partial, PartialAttack, PartialBank};
+    ///
+    /// let mut bank = PartialBank::new(16);
+    /// bank.set_sample_rate(48_000.0);
+    /// bank.set_len(1);
+    /// bank.set(0, Partial { freq_hz: 440.0, gain: 0.5, pan: 0.0 });
+    /// bank.ramp_to(0, 0.1, 4_800); // a release under way
+    /// let (mut left, mut right) = (vec![0.0f32; 1_000], vec![0.0f32; 1_000]);
+    /// bank.render_add(&mut left, &mut right);
+    ///
+    /// bank.restart_attack(0, &PartialAttack {
+    ///     rise_frames: 480,
+    ///     overshoot: 0.2,
+    ///     settle_frames: 960,
+    ///     ..PartialAttack::default()
+    /// });
+    /// bank.ramp_to(0, 0.5, 480);
+    /// bank.render_add(&mut left, &mut right);
+    /// assert!(bank.is_attacking(0));
+    /// ```
+    #[track_caller]
+    pub fn restart_attack(&mut self, i: usize, attack: &PartialAttack) {
+        self.check(i);
+        let within = self.since_normalised % VOICE_FRAMES;
+        self.voice
+            .start_attack(i, attack, (VOICE_FRAMES - within) % VOICE_FRAMES, true);
     }
 
     /// Whether partial `i` has an attack in progress.
