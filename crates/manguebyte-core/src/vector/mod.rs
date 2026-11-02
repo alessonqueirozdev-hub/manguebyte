@@ -61,6 +61,8 @@
 //!   order: 16 running sums, then pairs, then the rest. Its output is the
 //!   same on every backend too. The function says how far that order can
 //!   take the result from adding the partials one after another.
+//!   [`add_modulated_partials`] does the same with a complex modulator on
+//!   each partial.
 //!
 //! ```
 //! use manguebyte_core::vector;
@@ -415,6 +417,51 @@ impl Partials<'_> {
     }
 }
 
+/// What multiplies each phasor of a bank of partials, for
+/// [`Backend::add_modulated_partials`]. Every slice has one element per
+/// partial.
+///
+/// A modulator is a complex number `re + i im`, moved each frame by
+/// `(re_step, im_step)`. It multiplies the partial's phasor on the way to
+/// the output and leaves the phasor itself alone: its magnitude scales the
+/// partial and its angle moves the partial's phase, for as long as it
+/// stays there. `(1, 0)` is the plain partial.
+#[derive(Debug)]
+pub struct PartialModulators<'a> {
+    /// The real parts: advanced by each call.
+    pub re: &'a mut [f32],
+    /// The imaginary parts: advanced by each call.
+    pub im: &'a mut [f32],
+    /// What each real part grows by each frame.
+    pub re_step: &'a [f32],
+    /// What each imaginary part grows by each frame.
+    pub im_step: &'a [f32],
+}
+
+impl PartialModulators<'_> {
+    /// No modulators, for the kernel that does not read them.
+    fn none() -> PartialModulators<'static> {
+        PartialModulators {
+            re: &mut [],
+            im: &mut [],
+            re_step: &[],
+            im_step: &[],
+        }
+    }
+
+    #[track_caller]
+    fn check(&self, n: usize) {
+        for len in [
+            self.re.len(),
+            self.im.len(),
+            self.re_step.len(),
+            self.im_step.len(),
+        ] {
+            same_length(n, len);
+        }
+    }
+}
+
 impl Backend {
     /// Multiplies every element of `dst` by `gain`: `dst[i] = dst[i] * gain`.
     #[inline]
@@ -607,7 +654,53 @@ impl Backend {
     pub fn add_partials(self, left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
         same_length(left.len(), right.len());
         partials.check();
-        run!(self.usable(), add_partials(left, right, partials));
+        run!(
+            self.usable(),
+            add_partials(left, right, partials, &mut PartialModulators::none())
+        );
+    }
+
+    /// Adds a bank of sine partials to `left` and `right` as
+    /// [`add_partials`](Self::add_partials) does, with each phasor
+    /// multiplied by a modulator on the way to the output. Each frame, each
+    /// partial does exactly this, in this order:
+    ///
+    /// ```text
+    /// gain += gain_step
+    /// (re, im) = (re + re_step, im + im_step)
+    /// v = gain * (re * sin + im * cos)
+    /// (add v * left_gain to the left sum and v * right_gain to the right)
+    /// (cos, sin) = (cos * cos_step - sin * sin_step, cos * sin_step + sin * cos_step)
+    /// ```
+    ///
+    /// `re * sin + im * cos` is the imaginary part of
+    /// `(re + i im)(cos + i sin)`. Phasors and gains move exactly as in
+    /// [`add_partials`](Self::add_partials), bit for bit, whatever the
+    /// modulators hold. Every backend works these numbers out as written,
+    /// and adds the samples of a frame in the order
+    /// [`add_partials`](Self::add_partials) gives, so the output is the
+    /// same on every backend. Nothing allocates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `left` and `right` differ in length, or the slices of
+    /// `partials` and `modulators` do.
+    #[inline]
+    #[track_caller]
+    pub fn add_modulated_partials(
+        self,
+        left: &mut [f32],
+        right: &mut [f32],
+        partials: &mut Partials<'_>,
+        modulators: &mut PartialModulators<'_>,
+    ) {
+        same_length(left.len(), right.len());
+        partials.check();
+        modulators.check(partials.len());
+        run!(
+            self.usable(),
+            add_modulated_partials(left, right, partials, modulators)
+        );
     }
 
     /// The largest magnitude in `src`, zero for an empty slice. A slice
@@ -860,6 +953,19 @@ pub fn add_product<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
 #[track_caller]
 pub fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
     Backend::detect().add_partials(left, right, partials);
+}
+
+/// [`Backend::add_modulated_partials`] on the [detected](Backend::detect)
+/// backend.
+#[inline]
+#[track_caller]
+pub fn add_modulated_partials(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+    modulators: &mut PartialModulators<'_>,
+) {
+    Backend::detect().add_modulated_partials(left, right, partials, modulators);
 }
 
 /// [`Backend::peak`] on the [detected](Backend::detect) backend.

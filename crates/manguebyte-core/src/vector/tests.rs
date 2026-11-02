@@ -638,6 +638,184 @@ fn a_bank_with_slices_of_different_lengths_is_refused() {
     add_partials(&mut [0.0; 8], &mut [0.0; 8], &mut bank.view());
 }
 
+/// Modulators for a bank of `count`, each near `(1, 0)` and moving.
+#[derive(Clone)]
+struct Modulators {
+    re: Vec<f32>,
+    im: Vec<f32>,
+    re_step: Vec<f32>,
+    im_step: Vec<f32>,
+}
+
+impl Modulators {
+    fn random(rng: &mut Rng, count: usize) -> Self {
+        let mut unit = |scale: f64, centre: f64| -> Vec<f32> {
+            (0..count)
+                .map(|_| (centre + (rng.unit() * 2.0 - 1.0) * scale) as f32)
+                .collect()
+        };
+        Self {
+            re: unit(0.3, 1.0),
+            im: unit(0.3, 0.0),
+            re_step: unit(1e-3, 0.0),
+            im_step: unit(1e-3, 0.0),
+        }
+    }
+
+    fn unity(count: usize) -> Self {
+        Self {
+            re: vec![1.0; count],
+            im: vec![0.0; count],
+            re_step: vec![0.0; count],
+            im_step: vec![0.0; count],
+        }
+    }
+
+    fn view(&mut self) -> PartialModulators<'_> {
+        PartialModulators {
+            re: &mut self.re,
+            im: &mut self.im,
+            re_step: &self.re_step,
+            im_step: &self.im_step,
+        }
+    }
+}
+
+#[test]
+fn modulated_partials_are_the_same_on_every_backend_bit_for_bit() {
+    for backend in backends() {
+        for count in partial_counts() {
+            for frames in partial_frames() {
+                let mut rng = Rng::new((count * 1_000 + frames) as u64 + 5);
+                let bank = Bank::random(&mut rng, count);
+                let modulators = Modulators::random(&mut rng, count);
+                let start: Vec<f32> = (0..frames + 1)
+                    .map(|_| (rng.unit() * 2.0 - 1.0) as f32)
+                    .collect();
+                let what = format!("{} count {count} frames {frames}", backend.name());
+
+                let run = |backend: Backend| {
+                    let (mut bank, mut modulators) = (bank.clone(), modulators.clone());
+                    let (mut left, mut right) = (start[..frames].to_vec(), start[1..].to_vec());
+                    backend.add_modulated_partials(
+                        &mut left,
+                        &mut right,
+                        &mut bank.view(),
+                        &mut modulators.view(),
+                    );
+                    (bank, modulators, left, right)
+                };
+                let (want_bank, want_mod, want_left, want_right) = run(Backend::Scalar);
+                let (got_bank, got_mod, got_left, got_right) = run(backend);
+                assert_same(&got_left, &want_left, &format!("left {what}"));
+                assert_same(&got_right, &want_right, &format!("right {what}"));
+                for (got, want, name) in [
+                    (&got_bank.cos, &want_bank.cos, "cos"),
+                    (&got_bank.sin, &want_bank.sin, "sin"),
+                    (&got_bank.gain, &want_bank.gain, "gain"),
+                    (&got_mod.re, &want_mod.re, "re"),
+                    (&got_mod.im, &want_mod.im, "im"),
+                ] {
+                    assert_same(got, want, &format!("{name} {what}"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_modulated_partial_is_the_definition_bit_for_bit() {
+    for backend in backends() {
+        // One in sums of its own, and one added straight to the output.
+        for count in [1, 16] {
+            let mut rng = Rng::new(count as u64 + 40);
+            let mut bank = Bank::random(&mut rng, count);
+            let mut modulators = Modulators::random(&mut rng, count);
+            for i in 1..count {
+                bank.gain[i] = 0.0;
+                bank.gain_step[i] = 0.0;
+            }
+            let (mut x, mut y, mut g) = (bank.cos[0], bank.sin[0], bank.gain[0]);
+            let (mut re, mut im) = (modulators.re[0], modulators.im[0]);
+            let frames = if cfg!(miri) { 20 } else { 200 };
+            let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
+            let (want_c, want_s) = (bank.cos_step[0], bank.sin_step[0]);
+            let (to_left, to_right) = (bank.left_gain[0], bank.right_gain[0]);
+            let mut want_left = Vec::new();
+            let mut want_right = Vec::new();
+            for _ in 0..frames {
+                g += bank.gain_step[0];
+                re += modulators.re_step[0];
+                im += modulators.im_step[0];
+                let v = g * (re * y + im * x);
+                want_left.push(v * to_left);
+                want_right.push(v * to_right);
+                (x, y) = (x * want_c - y * want_s, x * want_s + y * want_c);
+            }
+            backend.add_modulated_partials(
+                &mut left,
+                &mut right,
+                &mut bank.view(),
+                &mut modulators.view(),
+            );
+            let what = format!("{} count {count}", backend.name());
+            // Later partials of the group have no gain: zeros add nothing.
+            assert_eq!(left, want_left, "{what}");
+            assert_eq!(right, want_right, "{what}");
+            assert_eq!((bank.cos[0], bank.sin[0]), (x, y), "{what}");
+            assert_eq!(bank.gain[0], g, "{what}");
+            assert_eq!((modulators.re[0], modulators.im[0]), (re, im), "{what}");
+        }
+    }
+}
+
+#[test]
+fn modulators_of_one_change_nothing_and_any_leave_phasors_and_gains_alone() {
+    for backend in backends() {
+        for count in [3, 16, 40] {
+            let mut rng = Rng::new(count as u64 + 90);
+            let bank = Bank::random(&mut rng, count);
+            let frames = if cfg!(miri) { 20 } else { 150 };
+
+            let (mut plain, mut unity, mut moved) = (bank.clone(), bank.clone(), bank.clone());
+            let (mut left, mut right) = (vec![0.5f32; frames], vec![-0.5f32; frames]);
+            let (mut want_left, mut want_right) = (left.clone(), right.clone());
+            backend.add_partials(&mut want_left, &mut want_right, &mut plain.view());
+            backend.add_modulated_partials(
+                &mut left,
+                &mut right,
+                &mut unity.view(),
+                &mut Modulators::unity(count).view(),
+            );
+            let what = format!("{} count {count}", backend.name());
+            assert_same(&left, &want_left, &format!("left {what}"));
+            assert_same(&right, &want_right, &format!("right {what}"));
+            assert_eq!(unity, plain, "{what}");
+
+            backend.add_modulated_partials(
+                &mut left,
+                &mut right,
+                &mut moved.view(),
+                &mut Modulators::random(&mut rng, count).view(),
+            );
+            assert_eq!(moved, plain, "{what}");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "slice lengths differ")]
+fn modulators_of_another_length_are_refused() {
+    let mut bank = Bank::random(&mut Rng::new(1), 4);
+    let mut modulators = Modulators::unity(5);
+    add_modulated_partials(
+        &mut [0.0; 8],
+        &mut [0.0; 8],
+        &mut bank.view(),
+        &mut modulators.view(),
+    );
+}
+
 #[test]
 fn integers_of_16_bits_decode_exactly_every_value() {
     let bytes: Vec<u8> = (0..=u16::MAX).flat_map(|v| v.to_le_bytes()).collect();

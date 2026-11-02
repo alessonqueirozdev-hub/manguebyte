@@ -2,7 +2,7 @@
 //! time. The vector backends also run these on the elements left over at
 //! the end of a slice.
 
-use super::{Partials, Peak};
+use super::{PartialModulators, Partials, Peak};
 use crate::Sample;
 
 /// How many running sums [`dot`] keeps for a sample type: 16 for `f32`, 8
@@ -192,7 +192,52 @@ pub(super) const PARTIAL_FRAMES: usize = 64;
 
 /// The bank of partials, in the order
 /// [`Backend::add_partials`](super::Backend::add_partials) gives.
-pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut Partials<'_>) {
+pub(super) fn add_partials(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+    none: &mut PartialModulators<'_>,
+) {
+    partials_in_groups::<false>(left, right, partials, none);
+}
+
+/// The bank of partials under its modulators, as
+/// [`Backend::add_modulated_partials`](super::Backend::add_modulated_partials)
+/// defines it.
+pub(super) fn add_modulated_partials(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+    modulators: &mut PartialModulators<'_>,
+) {
+    partials_in_groups::<true>(left, right, partials, modulators);
+}
+
+/// A partial's modulator and its steps: the plain partial's, which the
+/// kernel never reads, unless `MODULATED`.
+#[inline(always)]
+fn modulator_of<const MODULATED: bool>(
+    modulators: &PartialModulators<'_>,
+    i: usize,
+) -> (f32, f32, f32, f32) {
+    if MODULATED {
+        (
+            modulators.re[i],
+            modulators.im[i],
+            modulators.re_step[i],
+            modulators.im_step[i],
+        )
+    } else {
+        (1.0, 0.0, 0.0, 0.0)
+    }
+}
+
+fn partials_in_groups<const MODULATED: bool>(
+    left: &mut [f32],
+    right: &mut [f32],
+    partials: &mut Partials<'_>,
+    modulators: &mut PartialModulators<'_>,
+) {
     let count = partials.len();
     let body = count - count % PARTIAL_LANES;
     if body > 0 {
@@ -216,9 +261,16 @@ pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut P
                     partials.gain_step[i],
                 );
                 let (to_left, to_right) = (partials.left_gain[i], partials.right_gain[i]);
+                let (mut re, mut im, re_step, im_step) = modulator_of::<MODULATED>(modulators, i);
                 for t in 0..frames {
                     g += step;
-                    let v = g * y;
+                    let v = if MODULATED {
+                        re += re_step;
+                        im += im_step;
+                        g * (re * y + im * x)
+                    } else {
+                        g * y
+                    };
                     let at = t * PARTIAL_LANES + lane;
                     if first {
                         sums_left[at] = v * to_left;
@@ -235,6 +287,10 @@ pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut P
                 partials.cos[i] = x;
                 partials.sin[i] = y;
                 partials.gain[i] = g;
+                if MODULATED {
+                    modulators.re[i] = re;
+                    modulators.im[i] = im;
+                }
             }
             for (t, (l, r)) in out_left.iter_mut().zip(out_right.iter_mut()).enumerate() {
                 let at = t * PARTIAL_LANES;
@@ -244,16 +300,17 @@ pub(super) fn add_partials(left: &mut [f32], right: &mut [f32], partials: &mut P
         }
     }
     for i in body..count {
-        add_partial_in_order(left, right, partials, i);
+        partial_in_order::<MODULATED>(left, right, partials, modulators, i);
     }
 }
 
 /// Partial `i` added straight to the output, frame after frame: what the
 /// partials after the last whole group of [`PARTIAL_LANES`] do.
-pub(super) fn add_partial_in_order(
+pub(super) fn partial_in_order<const MODULATED: bool>(
     left: &mut [f32],
     right: &mut [f32],
     partials: &mut Partials<'_>,
+    modulators: &mut PartialModulators<'_>,
     i: usize,
 ) {
     let (mut x, mut y, mut g) = (partials.cos[i], partials.sin[i], partials.gain[i]);
@@ -263,9 +320,16 @@ pub(super) fn add_partial_in_order(
         partials.gain_step[i],
     );
     let (to_left, to_right) = (partials.left_gain[i], partials.right_gain[i]);
+    let (mut re, mut im, re_step, im_step) = modulator_of::<MODULATED>(modulators, i);
     for (l, r) in left.iter_mut().zip(right.iter_mut()) {
         g += step;
-        let v = g * y;
+        let v = if MODULATED {
+            re += re_step;
+            im += im_step;
+            g * (re * y + im * x)
+        } else {
+            g * y
+        };
         *l += v * to_left;
         *r += v * to_right;
         let next_x = x * c - y * s;
@@ -276,6 +340,10 @@ pub(super) fn add_partial_in_order(
     partials.cos[i] = x;
     partials.sin[i] = y;
     partials.gain[i] = g;
+    if MODULATED {
+        modulators.re[i] = re;
+        modulators.im[i] = im;
+    }
 }
 
 pub(super) fn i16_le_to_f32(dst: &mut [f32], src: &[u8]) {

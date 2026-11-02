@@ -10,7 +10,7 @@
 //! per lane, so they too give the definition's result.
 
 use super::scalar::{self, PARTIAL_FRAMES, PARTIAL_LANES, SQUARE_LANES};
-use super::{Partials, Peak};
+use super::{PartialModulators, Partials, Peak};
 use crate::Sample;
 use core::mem::MaybeUninit;
 
@@ -249,6 +249,12 @@ struct Bank {
     gain_step: *const f32,
     left_gain: *const f32,
     right_gain: *const f32,
+    /// The slices of [`PartialModulators`], read only if the kernel is the
+    /// modulated one.
+    re: *mut f32,
+    im: *mut f32,
+    re_step: *const f32,
+    im_step: *const f32,
 }
 
 /// The bank of partials with each lane of a register one partial: the
@@ -257,10 +263,11 @@ struct Bank {
 /// partial, operation for operation. `x * c - y * s` is worked out as
 /// `x * c + y * -s`, which is the same number.
 #[inline(always)]
-pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
+pub(super) unsafe fn add_partials<V: Vector<T = f32>, const MODULATED: bool>(
     left: &mut [f32],
     right: &mut [f32],
     partials: &mut Partials<'_>,
+    modulators: &mut PartialModulators<'_>,
 ) {
     let count = partials.len();
     let body = count - count % PARTIAL_LANES;
@@ -274,6 +281,10 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
             gain_step: partials.gain_step.as_ptr(),
             left_gain: partials.left_gain.as_ptr(),
             right_gain: partials.right_gain.as_ptr(),
+            re: modulators.re.as_mut_ptr(),
+            im: modulators.im.as_mut_ptr(),
+            re_step: modulators.re_step.as_ptr(),
+            im_step: modulators.im_step.as_ptr(),
         };
         // Not cleared: the first group writes every sum of a chunk before
         // anything reads it.
@@ -292,10 +303,10 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
             // all written by the first group before the reduction reads
             // them. The caller knows the processor has the instructions.
             unsafe {
-                partial_group::<V, true>(bank, 0, frames, sl, sr);
+                partial_group::<V, true, MODULATED>(bank, 0, frames, sl, sr);
                 let mut group = PARTIAL_LANES;
                 while group < body {
-                    partial_group::<V, false>(bank, group, frames, sl, sr);
+                    partial_group::<V, false, MODULATED>(bank, group, frames, sl, sr);
                     group += PARTIAL_LANES;
                 }
                 let regs = PARTIAL_LANES / V::LANES;
@@ -317,7 +328,7 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
         }
     }
     for i in body..count {
-        scalar::add_partial_in_order(left, right, partials, i);
+        scalar::partial_in_order::<MODULATED>(left, right, partials, modulators, i);
     }
 }
 
@@ -328,10 +339,11 @@ pub(super) unsafe fn add_partials<V: Vector<T = f32>>(
 /// # Safety
 ///
 /// The group must be inside the bank, the sums must have room for
-/// `frames * PARTIAL_LANES` elements (written already unless `FIRST`), and
-/// the processor must have the instructions.
+/// `frames * PARTIAL_LANES` elements (written already unless `FIRST`), the
+/// bank's modulators must be there if `MODULATED`, and the processor must
+/// have the instructions.
 #[inline(always)]
-unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
+unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool, const MODULATED: bool>(
     bank: Bank,
     group: usize,
     frames: usize,
@@ -353,6 +365,10 @@ unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
         let mut step = [zero; MAX_REGS];
         let mut to_left = [zero; MAX_REGS];
         let mut to_right = [zero; MAX_REGS];
+        let mut re = [zero; MAX_REGS];
+        let mut im = [zero; MAX_REGS];
+        let mut re_step = [zero; MAX_REGS];
+        let mut im_step = [zero; MAX_REGS];
         for r in 0..regs {
             let at = group + r * V::LANES;
             x[r] = V::load(bank.cos.add(at));
@@ -364,6 +380,12 @@ unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
             step[r] = V::load(bank.gain_step.add(at));
             to_left[r] = V::load(bank.left_gain.add(at));
             to_right[r] = V::load(bank.right_gain.add(at));
+            if MODULATED {
+                re[r] = V::load(bank.re.add(at));
+                im[r] = V::load(bank.im.add(at));
+                re_step[r] = V::load(bank.re_step.add(at));
+                im_step[r] = V::load(bank.im_step.add(at));
+            }
         }
         for t in 0..frames {
             let (row_left, row_right) = (
@@ -372,7 +394,14 @@ unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
             );
             for r in 0..regs {
                 g[r] = V::add(g[r], step[r]);
-                let v = V::mul(g[r], y[r]);
+                let v = if MODULATED {
+                    re[r] = V::add(re[r], re_step[r]);
+                    im[r] = V::add(im[r], im_step[r]);
+                    let turned = V::add(V::mul(re[r], y[r]), V::mul(im[r], x[r]));
+                    V::mul(g[r], turned)
+                } else {
+                    V::mul(g[r], y[r])
+                };
                 let (term_left, term_right) = (V::mul(v, to_left[r]), V::mul(v, to_right[r]));
                 let (at_left, at_right) = (row_left.add(r * V::LANES), row_right.add(r * V::LANES));
                 if FIRST {
@@ -393,6 +422,10 @@ unsafe fn partial_group<V: Vector<T = f32>, const FIRST: bool>(
             V::store(bank.cos.add(at), x[r]);
             V::store(bank.sin.add(at), y[r]);
             V::store(bank.gain.add(at), g[r]);
+            if MODULATED {
+                V::store(bank.re.add(at), re[r]);
+                V::store(bank.im.add(at), im[r]);
+            }
         }
     }
 }
@@ -644,9 +677,22 @@ macro_rules! entry_points {
             left: &mut [f32],
             right: &mut [f32],
             partials: &mut $crate::vector::Partials<'_>,
+            none: &mut $crate::vector::PartialModulators<'_>,
         ) {
             // SAFETY: the caller knows the processor has the feature.
-            unsafe { generic::add_partials::<$f32>(left, right, partials) }
+            unsafe { generic::add_partials::<$f32, false>(left, right, partials, none) }
+        }
+
+        #[target_feature(enable = $feature)]
+        pub(in $crate::vector) unsafe fn add_modulated_partials(
+            left: &mut [f32],
+            right: &mut [f32],
+            partials: &mut $crate::vector::Partials<'_>,
+            modulators: &mut $crate::vector::PartialModulators<'_>,
+        ) {
+            // SAFETY: the caller knows the processor has the feature, and
+            // has checked that the modulators are as long as the partials.
+            unsafe { generic::add_partials::<$f32, true>(left, right, partials, modulators) }
         }
 
         #[target_feature(enable = $feature)]
