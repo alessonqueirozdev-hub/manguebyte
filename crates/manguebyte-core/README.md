@@ -128,10 +128,11 @@ governor.end_block(128, allowance.spent(), allowance.limited());
 
 `cargo run --release -p manguebyte-dsp --example governor_organ` plays a
 synthetic organ of `PartialBank` pipes asked for twice what the machine
-fits, on the real clock, and prints the loads it measured. On the
-development laptop, busy with other programs, on a real-time thread, it
+fits, on the real clock, and prints the loads it measured. In one run on
+the development laptop, busy with other programs, on a real-time thread, it
 held the load's 99th percentile at the 70 % target with no block late
-(ADR 0018).
+(ADR 0018). That is a measurement of that run, which no test repeats: the
+tests in `tests/governor.rs` drive the governor with a fake clock.
 
 ## The binary's own file
 
