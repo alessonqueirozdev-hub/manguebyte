@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use manguebyte_gfx::{IRect, MAX_SIDE, Pixmap, Point, Size};
+use manguebyte_gfx::{Color, IRect, MAX_SIDE, Pixmap, Point, Size};
 use manguebyte_plugin::editor::{ParentWindow, WindowApi, checked_scale};
 
 use crate::app::{AppInner, Frame};
@@ -45,6 +45,36 @@ macro_rules! window_methods {
         /// [`WindowError::Closed`] after the window was destroyed.
         pub fn present_all(&self, pixels: &Pixmap) -> Result<(), WindowError> {
             self.inner().present(pixels, &[pixels.bounds()])
+        }
+
+        /// As [`present`](Self::present), with the top-left pixel of
+        /// `pixels` at `origin` in the window, for a pixmap smaller than the
+        /// window: `damage` counts from the pixmap's corner. Only those
+        /// rectangles, cut to the pixmap and the window, are converted and
+        /// copied.
+        ///
+        /// # Errors
+        ///
+        /// [`WindowError::Closed`] after the window was destroyed.
+        pub fn present_at(
+            &self,
+            pixels: &Pixmap,
+            damage: &[IRect],
+            origin: PhysicalPoint,
+        ) -> Result<(), WindowError> {
+            self.inner().present_at(pixels, damage, origin)
+        }
+
+        /// Shows `color` over the pixels of `rects`, device pixels of the
+        /// window: the bars around a pixmap shown with
+        /// [`present_at`](Self::present_at). Only those rectangles, cut to
+        /// the window, are touched.
+        ///
+        /// # Errors
+        ///
+        /// [`WindowError::Closed`] after the window was destroyed.
+        pub fn present_color(&self, color: Color, rects: &[IRect]) -> Result<(), WindowError> {
+            self.inner().present_color(color, rects)
         }
 
         /// Marks `rect` (device pixels) as needing drawing: the handler
@@ -1031,6 +1061,56 @@ impl Inner {
         let mut back = self.back.try_borrow_mut().map_err(|_| WindowError::Busy)?;
         for rect in damage.rects() {
             if let Some(done) = back.convert(pixels, *rect) {
+                self.platform.blit(&back, done);
+            }
+        }
+        Ok(())
+    }
+
+    fn present_at(
+        &self,
+        pixels: &Pixmap,
+        rects: &[IRect],
+        origin: PhysicalPoint,
+    ) -> Result<(), WindowError> {
+        self.check_open()?;
+        let bounds = self.size.get().bounds();
+        let source = pixels.bounds();
+        // Merged and cut as the window sees them.
+        let mut damage = Damage::new();
+        for rect in rects {
+            let Some(rect) = rect.intersect(&source) else {
+                continue;
+            };
+            damage.add_clipped(
+                IRect::new(
+                    rect.x.saturating_add(origin.x),
+                    rect.y.saturating_add(origin.y),
+                    rect.width,
+                    rect.height,
+                ),
+                bounds,
+            );
+        }
+        let mut back = self.back.try_borrow_mut().map_err(|_| WindowError::Busy)?;
+        for rect in damage.rects() {
+            if let Some(done) = back.convert_at(pixels, *rect, origin) {
+                self.platform.blit(&back, done);
+            }
+        }
+        Ok(())
+    }
+
+    fn present_color(&self, color: Color, rects: &[IRect]) -> Result<(), WindowError> {
+        self.check_open()?;
+        let bounds = self.size.get().bounds();
+        let mut damage = Damage::new();
+        for rect in rects {
+            damage.add_clipped(*rect, bounds);
+        }
+        let mut back = self.back.try_borrow_mut().map_err(|_| WindowError::Busy)?;
+        for rect in damage.rects() {
+            if let Some(done) = back.fill(color, *rect) {
                 self.platform.blit(&back, done);
             }
         }

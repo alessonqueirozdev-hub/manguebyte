@@ -1,8 +1,8 @@
 //! The window's back buffer and the conversion into it.
 
-use manguebyte_gfx::{IRect, MAX_SIDE, Pixmap};
+use manguebyte_gfx::{Color, IRect, MAX_SIDE, Pixmap};
 
-use crate::event::PhysicalSize;
+use crate::event::{PhysicalPoint, PhysicalSize};
 
 /// What the window shows, in the byte order GDI reads: blue, green, red,
 /// then alpha, premultiplied, rows top to bottom with no padding.
@@ -105,6 +105,55 @@ impl BackBuffer {
         Some(rect)
     }
 
+    /// Converts into `rect` of the buffer the pixels of `source`, whose
+    /// top-left pixel is at `origin` in the buffer. Returns the part of
+    /// `rect` that lies inside both, or `None` if none does.
+    pub(crate) fn convert_at(
+        &mut self,
+        source: &Pixmap,
+        rect: IRect,
+        origin: PhysicalPoint,
+    ) -> Option<IRect> {
+        let placed = IRect::new(origin.x, origin.y, source.width(), source.height());
+        let rect =
+            rect.intersect(&placed)?
+                .intersect(&IRect::new(0, 0, self.width, self.height))?;
+        // Inside both, so every coordinate is in range and non-negative:
+        // `rect` is at or past `origin`, and past the buffer's corner.
+        let width = rect.width as usize;
+        let src_x = (i64::from(rect.x) - i64::from(origin.x)) as usize;
+        let src_y = (i64::from(rect.y) - i64::from(origin.y)) as usize;
+        let src_stride = source.width() as usize * 4;
+        let dst_stride = self.width as usize * 4;
+        for row in 0..rect.height as usize {
+            let from = (src_y + row) * src_stride + src_x * 4;
+            let to = (rect.y as usize + row) * dst_stride + rect.x as usize * 4;
+            rgba_to_bgra(
+                &source.data()[from..from + width * 4],
+                &mut self.bgra[to..to + width * 4],
+            );
+        }
+        self.converted = self.converted.saturating_add(rect.area());
+        Some(rect)
+    }
+
+    /// Fills `rect` with `color`. Returns the part of `rect` that lies
+    /// inside the buffer, or `None` if none does.
+    pub(crate) fn fill(&mut self, color: Color, rect: IRect) -> Option<IRect> {
+        let rect = rect.intersect(&IRect::new(0, 0, self.width, self.height))?;
+        let [r, g, b, a] = color.premultiply().to_array();
+        let width = rect.width as usize;
+        let stride = self.width as usize * 4;
+        for row in 0..rect.height as usize {
+            let to = (rect.y as usize + row) * stride + rect.x as usize * 4;
+            for pixel in self.bgra[to..to + width * 4].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[b, g, r, a]);
+            }
+        }
+        self.converted = self.converted.saturating_add(rect.area());
+        Some(rect)
+    }
+
     /// The buffer as a premultiplied RGBA pixmap.
     pub(crate) fn to_pixmap(&self) -> Pixmap {
         let mut rgba = vec![0; self.bgra.len()];
@@ -187,6 +236,63 @@ mod tests {
             Some(IRect::new(0, 0, 4, 1))
         );
         assert_eq!(back.converted(), 12);
+    }
+
+    #[test]
+    fn a_pixmap_shown_at_an_origin_lands_there_and_is_cut_to_the_buffer() {
+        let mut back = BackBuffer::empty();
+        back.resize(PhysicalSize::new(8, 6));
+        let source = pattern(3, 2);
+        let origin = PhysicalPoint::new(4, 2);
+        // A rectangle of the buffer that reaches past the pixmap.
+        assert_eq!(
+            back.convert_at(&source, IRect::new(5, 0, 100, 100), origin),
+            Some(IRect::new(5, 2, 2, 2))
+        );
+        assert_eq!(back.converted(), 4);
+        let frame = back.to_pixmap();
+        for y in 0..6 {
+            for x in 0..8 {
+                let expected = if (5..7).contains(&x) && (2..4).contains(&y) {
+                    source.pixel(x - 4, y - 2).expect("inside")
+                } else {
+                    PremulColor::TRANSPARENT
+                };
+                assert_eq!(frame.pixel(x, y), Some(expected), "({x}, {y})");
+            }
+        }
+        // A pixmap reaching past the buffer's corners, and one outside it.
+        let mut back = BackBuffer::empty();
+        back.resize(PhysicalSize::new(2, 2));
+        let origin = PhysicalPoint::new(-1, -1);
+        assert_eq!(
+            back.convert_at(&source, IRect::new(0, 0, 2, 2), origin),
+            Some(IRect::new(0, 0, 2, 1))
+        );
+        assert_eq!(
+            back.to_pixmap().pixel(0, 0),
+            source.pixel(1, 1),
+            "the pixmap's pixel at 1, 1 is the buffer's at 0, 0"
+        );
+        let away = PhysicalPoint::new(i32::MAX, i32::MAX);
+        assert_eq!(back.convert_at(&source, IRect::new(0, 0, 2, 2), away), None);
+    }
+
+    #[test]
+    fn a_colour_fills_only_its_rectangle_in_the_buffers_byte_order() {
+        let mut back = BackBuffer::empty();
+        back.resize(PhysicalSize::new(4, 3));
+        let color = Color::rgb(10, 20, 30);
+        assert_eq!(
+            back.fill(color, IRect::new(2, 1, 100, 1)),
+            Some(IRect::new(2, 1, 2, 1))
+        );
+        assert_eq!(back.fill(color, IRect::new(9, 9, 1, 1)), None);
+        assert_eq!(back.converted(), 2);
+        assert_eq!(&back.bgra()[(4 + 2) * 4..(4 + 3) * 4], [30, 20, 10, 255]);
+        let frame = back.to_pixmap();
+        assert_eq!(frame.pixel(3, 1), Some(color.premultiply()));
+        assert_eq!(frame.pixel(1, 1), Some(PremulColor::TRANSPARENT));
     }
 
     #[test]
