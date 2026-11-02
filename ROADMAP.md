@@ -441,10 +441,16 @@ our own, and nothing claimed before its test exists.
   inside it, their place and whether they are open in states the
   application keeps, raised by a press, Escape and the focus going in and
   back, done ([ADR 0019](docs/adr/0019-floating-panels.md)), without
-  resizing, snapping or docking; dragging out of the window, rows of
-  different heights, multi-line text, drag and drop by keyboard, dialogs
+  resizing, snapping or docking; an interface designed at one size zoomed
+  to fit any window, with bars around it and everything from clicks to the
+  caret in the same space, and layouts chosen by the room they get, built
+  once, with no frame showing the wrong one, done
+  ([ADR 0027](docs/adr/0027-zoom-to-fit-and-responsive-layouts.md)), for
+  the whole window only, not per panel, tested headless and in real Win32
+  windows and not yet in a program by hand; dragging out of the window, rows
+  of different heights, multi-line text, drag and drop by keyboard, dialogs
   with content of their own and overflowing tab bars not started
-  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97, 105 and 112)
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97, 105, 112 and 122)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,

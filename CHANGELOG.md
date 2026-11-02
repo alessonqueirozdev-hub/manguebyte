@@ -1126,6 +1126,41 @@ break the API.
 
 ### User interface
 
+- Zoom to fit and layouts by room, for an interface designed at one size that
+  has to live in a smaller window or half a screen
+  ([ADR 0027](docs/adr/0027-zoom-to-fit-and-responsive-layouts.md),
+  [TECH_DEBT](docs/TECH_DEBT.md) item 122).
+  `manguebyte_gui::Editor::with_zoom_to_fit(min_zoom)` keeps the layout at the
+  editor's own size, the zoom being the smaller of window over design on the
+  two axes, applied as the root's scale; with `Resize::Free` or `Ratio` a
+  resize changes the zoom and does not reflow. Paint, hit testing, pointer
+  events, assistive technology's bounds and the text caret are in the same
+  zoomed space. The layout sits in the middle of the window, with bars in the
+  theme's background colour that take no clicks and leave the focus where it
+  is. Below `min_zoom` the zoom stops there and the layout reflows in the room
+  there is. `Editor::with_real_size_below(window)` turns the zoom off below a
+  window size. It works in a host and in an application's window
+  (`open_in_app`); `HeadlessEditor` clicks in the design's pixels with the zoom
+  applied underneath, and has `origin`.
+  `manguebyte_ui::responsive(children).below(size)`, with `margin`, shows the
+  first child that fits the room layout gives it (default margin
+  `RESPONSIVE_MARGIN`, 16 logical pixels, on the way down). Every child is built
+  once and kept with its state, through `Shown`; the choice is made during
+  layout (`Widget::adapt`, for a node laid out as the new `Arrange::Adaptive`),
+  and what comes into sight is polled in the same frame, so no frame shows the
+  wrong child, the first included. A widget in a child that is hidden loses the
+  focus, which goes nowhere until Tab or a click gives it again. `Window` has
+  `present_at`, a pixmap at an origin in the window, and `present_color`.
+  `Root` has `set_origin`, which `AccessEntry::device` counts from, and
+  `last_damage`.
+  `examples/zoom_responsive.rs` shows both. Tested headless and against real
+  Win32 windows, a child and an application's: clicks and focus at zooms of 0.7
+  and 1.3, with bars on either axis; bars in the theme's colour that take no
+  clicks; bounds and the caret in the zoomed window; a zoom of 0.75 pixel for
+  pixel the same layout drawn at scale 0.75; reflow below `min_zoom`; nothing
+  drawn on a quiet frame; and the full layout zoomed with the compact one at its
+  real size, across the breakpoint both ways, in one frame.
+
 A new look and motion ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)),
 with what they may cost the audio and the idle interface tested.
 
