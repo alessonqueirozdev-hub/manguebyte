@@ -662,6 +662,10 @@ break the API.
   unchanged, which misaligned a sidechain. Each piece now gets the events
   that fall in it, on their frames, and an offset that says where it
   begins.
+- `RenderPool` is no longer `Sync`: `job` and `rendered` lend jobs by `&self`
+  and a job need not be `Sync`, so two threads could race on one through safe
+  code. A wait limit too long to add to the clock, such as `Duration::MAX`,
+  panicked on the audio thread; it now waits without a limit.
 - `RenderPool::job` and `job_mut` could return `None` after a block with no
   miss, for a job nothing was rendering: a worker waking after the block
   closed took the job's flag, then saw the block was closed, and held it for
@@ -670,7 +674,7 @@ break the API.
   pool test failed in CI that way. Each job now has one atomic claim word
   (ADR 0015, note of 2026-11-02): a thread that comes late fails a
   compare-and-swap and writes nothing, so `None` now means a job a block
-  counted missed. The same moment could make a later block count a job
+  counted missed, or one a block abandoned by a panic. The same moment could make a later block count a job
   missed for nothing, which is gone too. A panic in a job or a `request` on
   the audio thread now closes the block as it passes, where it used to leave
   jobs lendable and claimable at once. Tested in the module's tests with no

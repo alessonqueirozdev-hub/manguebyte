@@ -77,8 +77,8 @@
 //! touch one job at a time, and the audio thread never waits unboundedly.
 //!
 //! A worker that merely wakes late, after the block is closed, finds nothing
-//! to take and changes nothing: only a job that was counted missed is ever
-//! refused.
+//! to take and changes nothing: only a job that a block counted missed, or
+//! one a block abandoned by a panic, is ever refused.
 //!
 //! This is why a pool owns its jobs, and why a job borrows nothing: a job
 //! may still be running after `run` has returned.
@@ -90,8 +90,9 @@
 
 mod priority;
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::hint;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -216,7 +217,9 @@ const RENDERED: u64 = 3;
 
 /// A claim word: `state` for `block`. Blocks count from 1 and never repeat;
 /// the 62 bits left for them last over 100 000 years at a block per
-/// microsecond, so a word once replaced never comes back.
+/// microsecond, so a word of an earlier block never comes back. Within a
+/// block, a job whose thread panicked is opened again: a thread still holding
+/// that word then claims the job, which the block wants anyway.
 const fn claim_word(block: u64, state: u64) -> u64 {
     (block << 2) | state
 }
@@ -259,7 +262,8 @@ struct Shared<J> {
 // its slot from `OPEN` to `RENDERING`, until that thread's Release store moves
 // the slot on, and by the audio thread when no block is open and the slot is
 // not `RENDERING` (`job`, `job_mut`, `rendered`). So jobs move between threads
-// (which needs `J: Send`) but are never shared. The argument takes one
+// (which needs `J: Send`) but are never shared: the pool is not `Sync`, so
+// only one thread at a time can call those three. The argument takes one
 // location at a time, as every thread sees one atomic's writes in one order:
 //
 // - Exclusion. Two threads cannot both claim, since a compare-and-swap reads
@@ -380,6 +384,9 @@ pub struct RenderPool<J: Job> {
     block: u64,
     wait_limit: Duration,
     stats: PoolStats,
+    /// `job` and `rendered` lend jobs by `&self`, and a job need not be
+    /// `Sync`, so the pool is not.
+    not_sync: PhantomData<Cell<()>>,
 }
 
 impl<J: Job> RenderPool<J> {
@@ -436,6 +443,7 @@ impl<J: Job> RenderPool<J> {
             block: 0,
             wait_limit: config.wait_limit,
             stats: PoolStats::default(),
+            not_sync: PhantomData,
         }
     }
 
@@ -476,6 +484,18 @@ impl<J: Job> RenderPool<J> {
     /// Job `index`, or `None` if it does not exist or a late worker still
     /// renders it, which happens only to a job a block has counted missed
     /// (or, after a panic in `run`, a job of the block it abandoned).
+    ///
+    /// The pool is not `Sync`, since a job need not be:
+    ///
+    /// ```compile_fail
+    /// use manguebyte_core::pool::{Job, RenderPool};
+    /// struct Voice(std::cell::Cell<f32>);
+    /// impl Job for Voice {
+    ///     fn render(&mut self) {}
+    /// }
+    /// fn shared_between_threads<T: Sync>() {}
+    /// shared_between_threads::<RenderPool<Voice>>();
+    /// ```
     pub fn job(&self, index: usize) -> Option<&J> {
         let slot = &self.shared.slots.get(index)?.0;
         if slot.claim.load(Ordering::Acquire) & STATE == RENDERING {
@@ -492,6 +512,12 @@ impl<J: Job> RenderPool<J> {
     /// Job `index` to change between blocks, or `None` as for
     /// [`job`](Self::job). The change reaches the job's next rendering,
     /// whichever thread does it.
+    ///
+    /// A job refused here can render again before the program reaches it
+    /// again: if its late worker lets it go before the next block, that
+    /// block renders it with what it held, and reports it as rendered. So
+    /// a program that keeps a change for a refused job should not mix that
+    /// job's output until the change has gone in.
     pub fn job_mut(&mut self, index: usize) -> Option<&mut J> {
         let slot = &self.shared.slots.get(index)?.0;
         if slot.claim.load(Ordering::Acquire) & STATE == RENDERING {
@@ -614,8 +640,10 @@ impl<J: Job> RenderPool<J> {
             }
             let Some(index) = pending else { break };
             first = index;
-            let deadline = *deadline.get_or_insert_with(|| Instant::now() + self.wait_limit);
-            if Instant::now() >= deadline {
+            // A limit too long to add to the clock is no limit.
+            let deadline =
+                *deadline.get_or_insert_with(|| Instant::now().checked_add(self.wait_limit));
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
             hint::spin_loop();
@@ -851,7 +879,7 @@ mod tests {
 
     /// Claims job `index` as a worker does, and keeps it: the job is then
     /// held by a thread that does not run, until the test sets the word.
-    fn hold(shared: &Shared<Count>, index: usize) {
+    fn hold<J>(shared: &Shared<J>, index: usize) {
         let open = word_of(shared, index);
         assert_eq!(open & STATE, OPEN);
         let held = claim_word(open >> 2, RENDERING);
@@ -861,7 +889,7 @@ mod tests {
     }
 
     /// What the thread `hold` stands for does when it finishes, late.
-    fn let_go(shared: &Shared<Count>, index: usize, block: u64) {
+    fn let_go<J>(shared: &Shared<J>, index: usize, block: u64) {
         let word = claim_word(block, RENDERED);
         shared.slots[index].0.claim.store(word, Ordering::Release);
     }
@@ -910,6 +938,27 @@ mod tests {
         assert!(pool.was_rendered(1));
         assert_eq!(pool.job(1).unwrap().0, 1);
         assert_eq!(pool.job(0).unwrap().0, 3);
+    }
+
+    #[test]
+    fn a_wait_limit_too_long_for_the_clock_waits_without_a_panic() {
+        let mut pool = counts(2);
+        let shared = Arc::clone(&pool.shared);
+        pool.run_with(2, |_| {
+            hold(&shared, 1);
+            false
+        });
+        pool.set_wait_limit(Duration::MAX);
+        // The next block finds the job held, and waits until it is let go.
+        let late = Arc::clone(&shared);
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let_go(&late, 1, 1);
+        });
+        let report = pool.run(2);
+        worker.join().unwrap();
+        assert!(report.is_complete());
+        assert_eq!(pool.job(1).unwrap().0, 1);
     }
 
     #[test]
@@ -993,9 +1042,15 @@ mod tests {
         }
     }
 
+    /// A pool that has rendered one clean block, and so has jobs counted as
+    /// rendered for a panic to take back, with job 1 armed for the next.
     fn bombs() -> RenderPool<Bomb> {
-        let jobs = (0..4).map(|index| Bomb { armed: index == 1 }).collect();
-        RenderPool::new(jobs, PoolConfig::offline())
+        let jobs = (0..4).map(|_| Bomb { armed: false }).collect();
+        let mut pool = RenderPool::new(jobs, PoolConfig::offline());
+        assert!(pool.run(4).is_complete());
+        assert_eq!(pool.rendered().count(), 4);
+        pool.job_mut(1).unwrap().armed = true;
+        pool
     }
 
     /// No slot can be claimed, every job can be lent, and the pool goes on.
@@ -1026,5 +1081,34 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_closed_after_a_panic(&mut pool);
+    }
+
+    /// A thread that claimed a job of the abandoned block may still render
+    /// it, so the job is neither lent nor counted as rendered until it is
+    /// done, and a slot left `OPEN` is taken back.
+    #[test]
+    fn a_job_a_thread_holds_is_not_lent_after_a_panic() {
+        let mut pool = bombs();
+        pool.job_mut(1).unwrap().armed = false;
+        let shared = Arc::clone(&pool.shared);
+        let block = pool.block + 1;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            pool.run_with(4, |_| {
+                hold(&shared, 1);
+                assert_eq!(word_of(&shared, 2) & STATE, OPEN);
+                panic!("a request panicked on purpose")
+            })
+        }));
+        assert!(result.is_err());
+        assert!(pool.job(1).is_none());
+        assert!(pool.job_mut(1).is_none());
+        assert_eq!(pool.rendered().count(), 0);
+        assert_ne!(word_of(&shared, 2) & STATE, OPEN);
+        assert!(pool.job(2).is_some());
+
+        let_go(&shared, 1, block);
+        assert!(pool.job(1).is_some());
+        assert!(pool.run(4).is_complete());
+        assert_eq!(pool.rendered().count(), 4);
     }
 }
