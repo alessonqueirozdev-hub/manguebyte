@@ -204,7 +204,9 @@ struct Slot<V> {
 ///   starting a note is told where they stand, so the note sounds the same
 ///   whichever voice it lands on and whether or not that voice was sounding
 ///   when the wheel moved. Controller 121 puts them back.
-/// - Controllers 120 and 123 silence or release a whole channel.
+/// - Controller 120 silences a whole channel. Controllers 123 to 127 release
+///   one: all notes off, and the four mode messages that MIDI makes include
+///   it, whose modes the synth does not otherwise follow.
 /// - **The tuning** ([`set_tuning`](Self::set_tuning)) reaches every voice,
 ///   and a note on a key it leaves unmapped does not start.
 ///
@@ -575,7 +577,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             }
             MidiMessage::ControlChange {
                 channel,
-                controller: 123,
+                controller: 123..=127,
                 ..
             } => {
                 self.sustain[usize::from(channel & 0x0F)] = false;
@@ -1158,6 +1160,24 @@ mod tests {
         assert_eq!(output, [50.0, 45.0, 45.0, 40.0]);
         let output = run(&mut synth, 2, &[(1, on(10)), (1, controller(120, 0))]);
         assert_eq!(output, [40.0, 40.0]);
+    }
+
+    #[test]
+    fn the_mode_messages_release_a_channel_as_all_notes_off_does() {
+        let played = |number| {
+            let mut synth = synth(4);
+            let output = run(
+                &mut synth,
+                6,
+                &[(0, on(10)), (0, on(20)), (2, controller(number, 0))],
+            );
+            (output, synth.active_voices())
+        };
+        let expected = played(123);
+        assert_eq!(expected.1, 0, "released and faded");
+        for mode in 124..=127 {
+            assert_eq!(played(mode), expected, "controller {mode}");
+        }
     }
 
     #[test]
