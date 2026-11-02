@@ -25,7 +25,9 @@ use crate::open::{Clock, FRAME_PERIOD_MS, Shared};
 /// input to the window in logical pixels, runs the window's frame timer,
 /// and reads what the editor shows, its scene and its accessibility tree.
 /// Everything it does reaches the editor through the same window code as
-/// a system window's input does.
+/// a system window's input does. The logical pixels are the interface's, so
+/// for an editor that [zooms to fit](crate::Editor::with_zoom_to_fit) a test
+/// clicks in the design's pixels with the zoom applied underneath.
 ///
 /// The editor's clock is the test's: it starts at zero and moves only
 /// with [`tick`](Self::tick) and [`advance`](Self::advance).
@@ -177,6 +179,13 @@ impl HeadlessEditor {
         self.with_root(|root| (root.size(), root.scale()))
     }
 
+    /// Where the interface's back buffer is in the window, in device pixels:
+    /// not 0, 0 only for an editor that
+    /// [zooms to fit](crate::Editor::with_zoom_to_fit) with bars around it.
+    pub fn origin(&self) -> Option<(i32, i32)> {
+        self.with_root(manguebyte_ui::Root::origin)
+    }
+
     /// The window's size in device pixels, or `None` once it is gone.
     pub fn size(&self) -> Option<PhysicalSize> {
         self.window
@@ -190,11 +199,13 @@ impl HeadlessEditor {
         slot.as_ref().map(read)
     }
 
-    /// `at` in device pixels, at the interface's scale.
+    /// `at`, in the interface's logical pixels, in the window's device
+    /// pixels: at the interface's scale, and past any bars around it.
     fn device(&self, at: Point) -> PhysicalPoint {
         let scale = self.layout().map_or(1.0, |(_, scale)| f64::from(scale));
-        let device = |v: f32| (f64::from(v) * scale).round() as i32;
-        PhysicalPoint::new(device(at.x), device(at.y))
+        let (x, y) = self.origin().unwrap_or((0, 0));
+        let device = |v: f32, from: i32| (f64::from(v) * scale).round() as i32 + from;
+        PhysicalPoint::new(device(at.x, x), device(at.y, y))
     }
 
     /// Drags `data` from another program onto the editor at `at`, in

@@ -19,7 +19,11 @@ use manguebyte_gfx::{IRect, Pixmap};
 use manguebyte_params::{FloatParam, FloatRange, Param, param_set};
 use manguebyte_plugin::editor::testing::{HostCall, RecordingEditorHost};
 use manguebyte_plugin::editor::{EditorContext, HostSize, OpenEditor, Resize};
-use manguebyte_ui::{AtomicSource, IntoView, ParamHandle, Role, column, knob, label, meter, row};
+use manguebyte_ui::access::AccessNode;
+use manguebyte_ui::{
+    AccessCx, AtomicSource, Event as UiEvent, EventCx, Handled as UiHandled, IntoView, MeasureCx,
+    PaintCx, ParamHandle, Role, View, Widget, column, knob, label, meter, row,
+};
 use manguebyte_window::win32::testing::{self, Message, ReadBack, TopLevel};
 use manguebyte_window::{Button, PhysicalPoint};
 
@@ -62,6 +66,31 @@ fn spec(params: &Arc<Params>, level: &Arc<AtomicF32>) -> Editor {
         min: HostSize::new(150, 100),
         max: HostSize::new(400, 280),
     })
+}
+
+/// A colour filling the interface, counting the presses it takes.
+struct Solid(Rc<std::cell::Cell<u32>>);
+
+impl Widget for Solid {
+    fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+        AccessNode::new(Role::Button, "Solid")
+    }
+
+    fn measure(&mut self, _cx: &MeasureCx<'_>) -> manguebyte_gfx::Size {
+        manguebyte_gfx::Size::new(10.0, 10.0)
+    }
+
+    fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut manguebyte_gfx::Scene) {
+        scene.fill(cx.rect(), manguebyte_gfx::Color::rgb(30, 160, 90));
+    }
+
+    fn event(&mut self, _cx: &mut EventCx<'_>, event: &UiEvent) -> UiHandled {
+        if matches!(event, UiEvent::PointerDown { .. }) {
+            self.0.set(self.0.get() + 1);
+            return UiHandled::Yes;
+        }
+        UiHandled::No
+    }
 }
 
 /// What GDI shows for premultiplied pixels: the colour over black, opaque.
@@ -338,6 +367,218 @@ fn an_editor_lives_inside_a_real_win32_parent() {
     assert!(!opened.window.is_open());
     drop(opened);
     drop(link);
+
+    // --- Zoom to fit in a real child window: the design is 200 by 140, and
+    // a window twice as wide has it at its own size with bars at the sides.
+    let zoomed = spec.clone().with_zoom_to_fit(0.5);
+    params.gain.set(0.5);
+    let host = Rc::new(RecordingEditorHost::new().with_params(params.clone()));
+    let (context, link) = EditorContext::attach(host.clone());
+    let mut opened = open_window(
+        &zoomed,
+        Backend::Native,
+        parent.parent(),
+        Some(1.0),
+        context,
+    )
+    .expect("a child window");
+    opened.set_visible(true);
+    assert!(pump_frames(&opened, 1));
+    let child = handle(&opened);
+    assert!(opened.set_size(HostSize::new(400, 140)));
+    let layout = |opened: &Opened| {
+        let root = opened.shared.root.borrow();
+        let root = root.as_ref().expect("open");
+        (root.size(), root.scale(), root.origin())
+    };
+    let design = manguebyte_gfx::Size::new(200.0, 140.0);
+    assert_eq!(layout(&opened), (design, 1.0, (100, 0)));
+    if readable {
+        testing::update(child);
+        let shown = testing::read_back(&opened.window.cx(), ReadBack::Screen).expect("ours");
+        let root = opened.shared.root.borrow();
+        let root = root.as_ref().expect("open");
+        let mut want = Pixmap::new(400, 140).expect("small");
+        want.fill(root.theme().palette.background);
+        want.copy_from(root.pixels(), root.pixels().bounds(), 100, 0);
+        assert!(shown == opaque(&want), "the screen is not the letterbox");
+    }
+    // A press on a bar reaches nothing.
+    host.take_calls();
+    for x in [2, 397] {
+        let at = PhysicalPoint::new(x, 70);
+        let press = Message::ButtonDown {
+            button: Button::Primary,
+            at,
+            shift: false,
+            control: false,
+        };
+        testing::send(child, press);
+        let release = Message::ButtonUp {
+            button: Button::Primary,
+            at,
+        };
+        testing::send(child, release);
+    }
+    assert_eq!(host.take_calls(), []);
+    // A window that is larger: 1.5 times, with smaller bars. A drag on the
+    // knob, as the system delivers it in device pixels, goes by the zoom:
+    // 30 of them are 20 logical pixels, a tenth of the drag range.
+    assert!(opened.set_size(HostSize::new(400, 210)));
+    assert_eq!(layout(&opened), (design, 1.5, (50, 0)));
+    let (knob, knob_device) = {
+        let root = opened.shared.root.borrow();
+        let entry = root
+            .as_ref()
+            .expect("open")
+            .access_tree()
+            .into_iter()
+            .find(|entry| entry.node.role == Role::Slider && entry.node.name == "Gain")
+            .expect("a knob");
+        let center = PhysicalPoint::new(
+            entry.device.x + entry.device.width as i32 / 2,
+            entry.device.y + entry.device.height as i32 / 2,
+        );
+        (center, entry.device)
+    };
+    testing::send(
+        child,
+        Message::ButtonDown {
+            button: Button::Primary,
+            at: knob,
+            shift: false,
+            control: false,
+        },
+    );
+    let up = PhysicalPoint::new(knob.x, knob.y - 30);
+    testing::send(
+        child,
+        Message::MouseMove {
+            at: up,
+            shift: false,
+            control: false,
+        },
+    );
+    testing::send(
+        child,
+        Message::ButtonUp {
+            button: Button::Primary,
+            at: up,
+        },
+    );
+    assert!(
+        (params.gain.value() - 0.6).abs() < 1e-6,
+        "{}",
+        params.gain.value()
+    );
+    // The caret of a value being typed is where the zoomed knob is.
+    for _ in 0..2 {
+        testing::send(
+            child,
+            Message::ButtonDown {
+                button: Button::Primary,
+                at: knob,
+                shift: false,
+                control: false,
+            },
+        );
+        testing::send(
+            child,
+            Message::ButtonUp {
+                button: Button::Primary,
+                at: knob,
+            },
+        );
+    }
+    assert!(pump_frames(&opened, 1));
+    let caret = testing::system_caret().expect("a caret while typing");
+    assert_eq!(caret.0, child);
+    assert!(
+        knob_device.contains_rect(&caret.1),
+        "{:?} outside {knob_device:?}",
+        caret.1
+    );
+    drop(opened);
+    drop(link);
+
+    // --- And in a real application's window, whatever scale the system
+    // has here: twice as wide as the design has bars a quarter wide.
+    let app = manguebyte_window::App::new().expect("Win32");
+    let hits = Rc::new(std::cell::Cell::new(0));
+    let options = manguebyte_window::AppWindowOptions::new("Zoom", design)
+        .at(PhysicalPoint::new(80, 80))
+        .without_activation();
+    let editor = crate::app::open(
+        &app,
+        options,
+        (
+            HostSize::new(200, 140),
+            Resize::Fixed,
+            Some(crate::zoom::ZoomRules {
+                min_zoom: 0.25,
+                real_below: None,
+            }),
+        ),
+        manguebyte_ui::Theme::dark(),
+        None,
+        View::new(Solid(Rc::clone(&hits))),
+    )
+    .expect("an application window");
+    let window = editor.window();
+    let hwnd = window.raw_handle().expect("open");
+    testing::pump(Duration::from_millis(100));
+    let size = window.size();
+    window
+        .resize(manguebyte_window::PhysicalSize::new(
+            size.width * 2,
+            size.height,
+        ))
+        .expect("open");
+    testing::pump(Duration::from_millis(100));
+    let size = window.size();
+    let quarter = size.width as i32 / 4;
+    let middle = size.height as i32 / 2;
+    let click = |x: i32| {
+        let at = PhysicalPoint::new(x, middle);
+        testing::send(
+            hwnd,
+            Message::ButtonDown {
+                button: Button::Primary,
+                at,
+                shift: false,
+                control: false,
+            },
+        );
+        testing::send(
+            hwnd,
+            Message::ButtonUp {
+                button: Button::Primary,
+                at,
+            },
+        );
+    };
+    click(2);
+    click(quarter - 3);
+    click(size.width as i32 - 3);
+    assert_eq!(hits.get(), 0, "the bars took a click");
+    click(size.width as i32 / 2);
+    assert_eq!(hits.get(), 1);
+    if readable {
+        let shown = testing::read_back(&window.cx(), ReadBack::Screen).expect("ours");
+        let bar = manguebyte_ui::Theme::dark()
+            .palette
+            .background
+            .premultiply();
+        let fill = manguebyte_gfx::Color::rgb(30, 160, 90).premultiply();
+        for x in [2, quarter - 3, size.width as i32 - 3] {
+            let pixel = shown.pixel(x as u32, middle as u32).expect("inside");
+            assert_eq!(pixel, bar, "at {x}");
+        }
+        let pixel = shown.pixel(size.width / 2, middle as u32).expect("inside");
+        assert_eq!(pixel, fill);
+    }
+    drop(editor);
+    drop(app);
 
     // --- Opened and closed many times, it leaves no window, DC or bitmap
     // behind. The system caches some objects on first use, so the count

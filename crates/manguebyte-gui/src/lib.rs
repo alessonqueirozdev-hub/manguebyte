@@ -20,6 +20,9 @@
 //! are read from their atomics once per frame. The audio thread never sees
 //! any of it.
 //!
+//! An editor designed at one size can keep its layout whatever the window,
+//! with [`Editor::with_zoom_to_fit`], in a host or an application's window.
+//!
 //! # The keyboard in hosts
 //!
 //! Hosts keep keys for their own shortcuts, and many give a plugin's
@@ -122,6 +125,8 @@ mod editor;
 #[cfg(feature = "headless")]
 mod headless;
 mod open;
+
+mod zoom;
 
 #[cfg(all(test, windows))]
 mod win32_tests;

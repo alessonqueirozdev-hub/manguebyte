@@ -6,17 +6,19 @@ use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use manguebyte_gfx::{Color, Point};
 use manguebyte_plugin::editor::{
     EditorContext, EditorError, HostSize, Key, KeyEvent, OpenEditor, ParentWindow, Resize,
     WindowApi, checked_scale,
 };
 use manguebyte_ui::{self as ui, MAX_BUFFER_SIDE, Root};
 use manguebyte_window::{
-    Event, Handled, IRect, PhysicalSize, TimerId, Window, WindowCx, WindowError, WindowHandler,
-    WindowOptions,
+    Event, Handled, IRect, PhysicalPoint, PhysicalSize, PointerEvent, TimerId, Window, WindowCx,
+    WindowError, WindowHandler, WindowOptions,
 };
 
 use crate::editor::Editor;
+use crate::zoom::{self, ZoomRules};
 
 /// How often frames run while an editor is visible, in milliseconds:
 /// about 60 a second. Win32 timers fire no faster than every 10 ms and
@@ -106,6 +108,22 @@ pub(crate) struct Shared {
     pub(crate) close_request: RefCell<Option<CloseRequest>>,
     /// What the drag over the window carries, for the interface.
     dropping: RefCell<Option<ui::DropData>>,
+    /// How the interface zooms to fit the window, if it does.
+    zoom: Option<ZoomRules>,
+    /// Whether the window was last below the size for no zoom at all.
+    real_size: Cell<Option<bool>>,
+    /// The window, the buffer's place in it and the colour of the bars, as
+    /// last shown: when they change, all of it is shown again.
+    letterbox: Cell<Option<Letterbox>>,
+}
+
+/// What the window shows around a zoomed interface's back buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Letterbox {
+    window: PhysicalSize,
+    origin: PhysicalPoint,
+    buffer: PhysicalSize,
+    color: Color,
 }
 
 /// What an application decides on a close request: true to close.
@@ -231,6 +249,7 @@ impl Shared {
         scale: Option<f64>,
         clock: Clock,
         app: bool,
+        zoom: Option<ZoomRules>,
     ) -> Rc<Shared> {
         Rc::new(Shared {
             root: RefCell::new(None),
@@ -252,6 +271,9 @@ impl Shared {
             app,
             close_request: RefCell::new(None),
             dropping: RefCell::new(None),
+            zoom,
+            real_size: Cell::new(None),
+            letterbox: Cell::new(None),
         })
     }
 
@@ -282,7 +304,7 @@ impl Shared {
 
     /// Gives a drag from another program to the interface.
     fn file_drop(&self, window: &WindowCx<'_>, event: Event) -> Handled {
-        let at = |pointer: manguebyte_window::PointerEvent| pointer.position;
+        let at = |pointer: PointerEvent| self.pointer_at(pointer);
         let drop = match event {
             Event::DragEnter(pointer) => {
                 *self.dropping.borrow_mut() = window.drag_data().map(|data| {
@@ -314,13 +336,64 @@ impl Shared {
         handled.unwrap_or(Handled::No)
     }
 
-    /// Brings the root to the window's size and scale.
-    fn sync(root: &mut Root, window: &WindowCx<'_>) {
-        let scale = window.scale() as f32;
-        let size = window.logical_size();
+    /// Brings the root to the window's size and scale: with zoom to fit,
+    /// the layout's own size and the scale that fits it in the window,
+    /// with the buffer in the middle.
+    fn sync(&self, root: &mut Root, window: &WindowCx<'_>) {
+        let (size, scale) = match self.zoom {
+            Some(rules) => {
+                let mut real = self.real_size.get();
+                let fitted = zoom::fit(self.base, rules, window.size(), window.scale(), &mut real);
+                self.real_size.set(real);
+                (fitted.size, fitted.scale)
+            }
+            None => (window.logical_size(), window.scale() as f32),
+        };
         if root.size() != size || root.scale() != scale {
             root.resize(size, scale);
         }
+        if self.zoom.is_some() {
+            let origin = zoom::origin(window.size(), root.pixels());
+            root.set_origin(origin.x, origin.y);
+        }
+    }
+
+    /// Where `pointer` is in the interface's logical pixels: the window
+    /// worked it out at the window's scale, which is the interface's unless
+    /// it zooms.
+    fn pointer_at(&self, pointer: PointerEvent) -> Point {
+        if self.zoom.is_none() {
+            return pointer.position;
+        }
+        let in_interface = |root: &Root| {
+            let (x, y) = root.origin();
+            let scale = f64::from(root.scale());
+            let along = |at: i32, from: i32| ((f64::from(at) - f64::from(from)) / scale) as f32;
+            Point::new(along(pointer.physical.x, x), along(pointer.physical.y, y))
+        };
+        self.read_root(in_interface).unwrap_or(pointer.position)
+    }
+
+    /// Whether `pointer` is on the bars around a zoomed interface, where
+    /// nothing of the interface hears it. While a menu is open it does:
+    /// a press outside a menu closes it, wherever that is.
+    fn on_bars(&self, pointer: PointerEvent) -> bool {
+        self.zoom.is_some()
+            && self
+                .read_root(|root| {
+                    if root.has_menu() {
+                        return false;
+                    }
+                    let (x, y) = root.origin();
+                    let pixels = root.pixels();
+                    let across = |at: i32, from: i32, length: u32| {
+                        let at = i64::from(at) - i64::from(from);
+                        at < 0 || at >= i64::from(length)
+                    };
+                    across(pointer.physical.x, x, pixels.width())
+                        || across(pointer.physical.y, y, pixels.height())
+                })
+                .unwrap_or(false)
     }
 
     /// Whether the interface is gone: the editor gave up on it.
@@ -371,7 +444,7 @@ impl Shared {
         let Some(root) = slot.as_mut() else {
             return false;
         };
-        Shared::sync(root, window);
+        self.sync(root, window);
         let frame = root.frame(self.clock.now());
         self.frames.set(self.frames.get().wrapping_add(1));
         self.painted
@@ -379,16 +452,49 @@ impl Shared {
         if frame.laid_out {
             self.layouts.set(self.layouts.get().wrapping_add(1));
         }
-        if frame.damage.is_empty() {
+        let presented = if self.zoom.is_some() {
+            self.present_zoomed(root, window)
+        } else if frame.damage.is_empty() {
             return false;
-        }
-        // Fails only once the window is gone, when there is nothing to
-        // show anything on.
-        let presented = window.present(frame.pixels, frame.damage).is_ok();
+        } else {
+            // Fails only once the window is gone, when there is nothing to
+            // show anything on.
+            window.present(frame.pixels, frame.damage).is_ok()
+        };
         if presented {
             self.presented.set(self.presented.get().wrapping_add(1));
         }
         presented
+    }
+
+    /// Shows what a zoomed interface's last frame drew, where it goes in the
+    /// window, and the bars when they have changed: a window that grew on
+    /// the axis with room to spare changes nothing in the interface, and
+    /// still has to be drawn. Returns whether it showed anything.
+    fn present_zoomed(&self, root: &Root, window: &WindowCx<'_>) -> bool {
+        let pixels = root.pixels();
+        let (x, y) = root.origin();
+        let origin = PhysicalPoint::new(x, y);
+        let now = Letterbox {
+            window: window.size(),
+            origin,
+            buffer: PhysicalSize::new(pixels.width(), pixels.height()),
+            color: root.theme().palette.background,
+        };
+        if self.letterbox.get() != Some(now) {
+            self.letterbox.set(Some(now));
+            let shown = window
+                .present_at(pixels, &[pixels.bounds()], origin)
+                .is_ok();
+            // One at a time: rectangles shown together may be merged, and
+            // what joins two bars is the interface.
+            for bar in zoom::bars(now.window, pixels, origin) {
+                let _ = window.present_color(now.color, &[bar]);
+            }
+            return shown;
+        }
+        let damage = root.last_damage();
+        !damage.is_empty() && window.present_at(pixels, damage, origin).is_ok()
     }
 
     /// `read` of the interface, if there is one and it is not busy.
@@ -461,8 +567,35 @@ impl Shared {
         let Ok(slot) = self.root.try_borrow() else {
             return;
         };
-        if let Some(root) = slot.as_ref() {
+        let Some(root) = slot.as_ref() else {
+            return;
+        };
+        if self.zoom.is_none() {
             let _ = window.present(root.pixels(), rects);
+            return;
+        }
+        // `rects` are the window's; what is shown counts from the buffer's
+        // corner.
+        let pixels = root.pixels();
+        let (x, y) = root.origin();
+        let origin = PhysicalPoint::new(x, y);
+        let inside: Vec<IRect> = rects
+            .iter()
+            .map(|rect| {
+                IRect::new(
+                    rect.x.saturating_sub(x),
+                    rect.y.saturating_sub(y),
+                    rect.width,
+                    rect.height,
+                )
+            })
+            .collect();
+        let _ = window.present_at(pixels, &inside, origin);
+        let color = root.theme().palette.background;
+        for bar in zoom::bars(window.size(), pixels, origin) {
+            if rects.iter().any(|rect| rect.intersect(&bar).is_some()) {
+                let _ = window.present_color(color, &[bar]);
+            }
         }
     }
 
@@ -525,8 +658,15 @@ impl Shared {
 /// Where the caret of what is being typed into is, in the window's device
 /// pixels.
 fn caret_in_device(root: &Root) -> Option<IRect> {
-    let caret = root.caret()?;
-    Some(caret.to_device(root.scale())).filter(|rect| !rect.is_empty())
+    let caret = root.caret()?.to_device(root.scale());
+    let (x, y) = root.origin();
+    Some(IRect::new(
+        caret.x.saturating_add(x),
+        caret.y.saturating_add(y),
+        caret.width,
+        caret.height,
+    ))
+    .filter(|rect| !rect.is_empty())
 }
 
 /// What the window calls with every event.
@@ -542,8 +682,9 @@ impl Glue {
     }
 }
 
-/// A window event as the interface receives it, if it has a meaning there.
-fn to_ui(event: Event) -> Option<ui::Event> {
+/// A window event as the interface receives it, if it has a meaning there,
+/// with pointers placed in the interface by `at`.
+fn to_ui(event: Event, at: impl Fn(PointerEvent) -> Point) -> Option<ui::Event> {
     let button = |button: manguebyte_window::Button| match button {
         manguebyte_window::Button::Secondary => ui::Button::Secondary,
         manguebyte_window::Button::Middle => ui::Button::Middle,
@@ -555,27 +696,27 @@ fn to_ui(event: Event) -> Option<ui::Event> {
             button: pressed,
             clicks,
         } => ui::Event::PointerDown {
-            at: pointer.position,
+            at: at(pointer),
             button: button(pressed),
             clicks,
             modifiers: pointer.modifiers,
         },
         Event::PointerMove(pointer) => ui::Event::PointerMove {
-            at: pointer.position,
+            at: at(pointer),
             modifiers: pointer.modifiers,
         },
         Event::PointerUp {
             pointer,
             button: released,
         } => ui::Event::PointerUp {
-            at: pointer.position,
+            at: at(pointer),
             button: button(released),
             modifiers: pointer.modifiers,
         },
         Event::PointerCancel => ui::Event::PointerCancel,
         Event::PointerLeave => ui::Event::PointerLeave,
         Event::Wheel { pointer, delta } => ui::Event::Wheel {
-            at: pointer.position,
+            at: at(pointer),
             delta,
             modifiers: pointer.modifiers,
         },
@@ -625,7 +766,15 @@ impl WindowHandler for Glue {
             }
             Event::Key { key, .. } => shared.deliver_typed(window, Path::Window, Typed::Key(key)),
             Event::Text(c) => shared.deliver_typed(window, Path::Window, Typed::Text(c)),
-            other => match to_ui(other) {
+            // The bars around a zoomed interface are not part of it: a
+            // press there leaves the focus where it is, and the wheel does
+            // nothing.
+            Event::PointerDown { pointer, .. } | Event::Wheel { pointer, .. }
+                if shared.on_bars(pointer) =>
+            {
+                Handled::No
+            }
+            other => match to_ui(other, |pointer| shared.pointer_at(pointer)) {
                 Some(event) => shared.deliver(window, event),
                 None => Handled::No,
             },
@@ -787,6 +936,8 @@ pub(crate) fn attach_root(
     let mut root = Root::new(view, window.logical_size(), window.scale() as f32, context)
         .with_theme(theme)
         .with_clipboard(Rc::new(WindowClipboard(window.clipboard())));
+    // In the place it will have, for what comes before the first frame.
+    shared.sync(&mut root, &window.cx());
     // People who asked the system for less motion get none: transitions
     // jump. A headless window, on a test's clock, keeps the theme's, so
     // that what it draws does not depend on the machine.
@@ -829,7 +980,15 @@ pub(crate) fn open_window(
     };
     // Until it opens, nothing is drawn: the first frame timer tick draws
     // everything.
-    let shared = Shared::new(context.clone(), spec.size, spec.resize, scale, clock, false);
+    let shared = Shared::new(
+        context.clone(),
+        spec.size,
+        spec.resize,
+        scale,
+        clock,
+        false,
+        spec.zoom_rules(),
+    );
     // Hidden, and with no frame timer, until the host shows it: CLAP's
     // `show`, or the VST 3 wrapper once `attached` succeeded. Both reach the
     // editor as `set_visible(true)`, which starts the timer.

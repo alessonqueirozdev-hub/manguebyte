@@ -1,0 +1,19 @@
+fill rect(0 0 400 300) solid(#101116ff)
+fill rect(0 0 200 100) solid(#1ea05aff)
+fill rect(200 0 200 100) solid(#1ea05aff)
+shadow circle(200 177.08545 15.4800005) offset 0 2 blur 4 spread 0 solid(#00000066)
+fill circle(200 177.08545 15.4800005) radial(196.904 170.89345, 20.124, pad [0 #383d49ff, 1 #181a22ff])
+stroke circle(200 177.08545 14.9800005) width 1 cap butt join miter 4 solid(#ffffff1a)
+stroke arc(200 177.08545 21.5 2.3561945 4.712389) width 3 cap round join round solid(#ffffff14)
+shadow arc(200 177.08545 21.5 2.3561945 2.3561945) width 3 cap round join round offset 0 0 blur 4 spread 0 solid(#ff7a3da6)
+stroke arc(200 177.08545 21.5 2.3561945 2.3561945) width 3 cap round join round solid(#ff7a3dff)
+stroke path(nonzero M 200 177.08545 L 200 165.93985) width 2 cap round join round solid(#ffffffff)
+text "Gain" size 12 weight 500 opsz 14 solid(#989eafff) [32 186.98633 257.7959, 115 195.95703 257.7959, 158 202.77148 257.7959, 181 205.79492 257.7959]
+text "0.50" size 11 weight 500 opsz 14 solid(#eef0f6ff) [257 187.83179 271.34668, 268 194.95923 271.34668, 262 197.91333 271.34668, 257 205.04077 271.34668]
+clip rect(0 276 400 24) {
+  fill rounded_rect(2 278 396 20 radii 10 10 10 10) solid(#1c1f28ff)
+  stroke rounded_rect(2.5 278.5 395 19 radii 9.5 9.5 9.5 9.5) width 1 cap butt join miter 4 solid(#ffffff1a)
+  clip rect(6 280.74023 388 14.519531) {
+    text "" size 12 weight 500 opsz 14 solid(#eef0f6ff) []
+  }
+}

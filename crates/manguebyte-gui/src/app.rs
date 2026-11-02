@@ -17,6 +17,7 @@ use manguebyte_window::{App, AppWindowOptions, Dialogs, Window, WindowCx};
 
 use crate::editor::Editor;
 use crate::open::{Clock, FRAME_PERIOD_MS, FRAME_TIMER, Glue, Shared, attach_root, editor_error};
+use crate::zoom::ZoomRules;
 
 /// The host of an application's own interface: there is none, so the
 /// interface's gestures set the parameters directly, as a standalone
@@ -210,8 +211,7 @@ pub fn open_app_window(
     open(
         app,
         options,
-        base,
-        Resize::Fixed,
+        (base, Resize::Fixed, None),
         theme,
         params,
         view.into_view(),
@@ -245,8 +245,7 @@ impl Editor {
         open(
             app,
             options,
-            self.size,
-            self.resize,
+            (self.size, self.resize, self.zoom_rules()),
             self.theme,
             params,
             (self.view)(),
@@ -254,11 +253,10 @@ impl Editor {
     }
 }
 
-fn open(
+pub(crate) fn open(
     app: &App,
     options: AppWindowOptions,
-    base: HostSize,
-    rules: Resize,
+    (base, rules, zoom): (HostSize, Resize, Option<ZoomRules>),
     theme: Theme,
     params: Option<Arc<dyn ParamSet>>,
     view: manguebyte_ui::View,
@@ -273,7 +271,7 @@ fn open(
     } else {
         Clock::Real(Instant::now())
     };
-    let shared = Shared::new(context.clone(), base, rules, None, clock, true);
+    let shared = Shared::new(context.clone(), base, rules, None, clock, true, zoom);
     let visible = options.visible;
     let window = app
         .open_window(options.with_file_drops(), Glue::new(&shared))
