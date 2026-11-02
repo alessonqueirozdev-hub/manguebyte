@@ -66,9 +66,10 @@ frames that are fixed, and bandwidths in hertz are worked out for it.
 
 **4. A per-partial generator, stepped only on updates.** One xorshift32 a
 partial, whose high and low halves give the two parts of `n`, seeded from one
-seed by SplitMix64. A partial's stream does not depend on how many others
-there are or what they do. Generators never restart on a note, only on a new
-seed, so that one note never repeats another. The update is plain Rust over
+seed by SplitMix64. A generator moves only on updates when its partial has air
+or breath, so a partial's stream depends on its own settings and on no other
+partial's, whenever those start. Generators never restart on a note, only on a
+new seed, so that one note never repeats another. The update is plain Rust over
 slices the compiler knows are apart, which vectorises on the baseline
 instruction set and in exact IEEE arithmetic gives the same bits as any other
 compilation of it, so the bank's backends do not enter into it. No platform
@@ -91,12 +92,24 @@ updates still differ for delays that differ by a few frames.
 The breath does not wait for the delay or the rise, since in a real pipe the
 air arrives before the tone: `(level · air + breath) n` is not scaled by the
 level. It starts wide and narrows, by moving the noise's pole, as the pipe's
-resonance builds up.
+resonance builds up. The pole moves between two poles, the breath's and the
+partial's own as it is now, so that a bandwidth or a sample rate changed during
+the attack cannot take it outside the unit circle. The breath counts from the
+first update, not from the call, because a fall that short is what the updates
+read of it: counted from the call, one of 64 frames differed by 60 dB by where
+it landed, and one of 20 was not heard at all.
+
+An attack from silence drops the level to 0 at once, which clicks on a partial
+that is sounding, so `restart_attack` starts one from the modulator as it is
+now: the level holds through the delay and rises from there, for a key struck
+again during a release, which keeps its gain and phasor.
 
 **6. Wind jitter is one wander through both gain and rotation.** Two one-pole
 low-passes in a row over white noise, one generator a bank, normalised to a
 standard deviation of 1 and scaled by a depth in cents and one in decibels.
-One wander, because one wind moves both.
+One wander, because one wind moves both. The normalising scale is on the
+filter's input, so that the filter's output has that standard deviation at
+every rate, and a new rate neither moves the wander nor deepens it.
 
 The bank keeps what the caller set (`cos_step`, `sin_step`, returned by
 `rotation`) apart from what the kernel turns by, and each update works the
@@ -122,21 +135,23 @@ all of its numbers are judgements, and no one has heard them on Caecilia yet.
 ## Consequences
 
 - With everything off: the same bits, by test, and no measurable cost; the
-  voicing's arrays are there all the same, 128 bytes a partial on top of the
+  voicing's arrays are there all the same, 140 bytes a partial on top of the
   bank's own 40.
 - 2 000 partials at 48 kHz in blocks of 128 frames, on one logical processor of
-  a busy Intel Core i3-1215U (`examples/partial_voicing_speed.rs`), against the
-  plain kernel, across runs and whether as one bank or as 125 banks of 16:
-  air alone 1.3 to 1.7 times (0.05 to 0.14 of a core on AVX2); air and jitter
-  1.6 to 2.4; air, jitter and every partial always in an attack 1.8 to 2.9
-  (0.07 to 0.17 of a core). Attacks last a moment and are rarely all at once,
-  so the last is a peak and not a sustained load.
-- What is promised exactly: the same bits on every backend and however the
-  caller cuts its blocks, given settings on the same frames; the same bits
-  in a debug and an optimised build; given rotations that do not use a
-  platform's maths, the same bits on any machine (fingerprints in
-  `tests/partial_voicing.rs`, seen on one machine only so far). An attack
-  starts silent, so one started on a sounding partial clicks.
+  an Intel Core i3-1215U (`examples/partial_voicing_speed.rs`), against the
+  plain kernel, across two runs and whether as one bank or as 125 banks of 16:
+  air alone 1.4 to 1.6 times (0.05 to 0.11 of a core on AVX2); air and jitter
+  1.6 to 2.1 (0.07 to 0.13); all three with every partial always in an attack
+  1.8 to 2.5 (0.08 to 0.15). With other work on the machine earlier runs went up
+  to 2.9. Attacks last a moment and are rarely all at once, so the last is a
+  peak and not a sustained load.
+- What is promised exactly: the same bits however the caller cuts its blocks,
+  given settings on the same frames; the same bits on the backends run (scalar,
+  SSE2, AVX and AVX2, on one x86-64 machine; NEON and WebAssembly SIMD share the
+  generic kernel's code and have not been run); the same bits in a debug and an
+  optimised build. Given rotations that do not use a platform's maths, the
+  update has none in it either, so another machine should agree, and the
+  fingerprints in `tests/partial_voicing.rs` will say so when one runs them.
 - A new rotation lags up to 31 frames while a shift is in force.
 - With any partial voiced, the whole bank runs the dearer kernel.
 - The caller must give each pipe its own seed; two banks with the same one

@@ -191,9 +191,11 @@ Everything a standalone audio application needs, short of a user interface.
   around each partial, an attack for each with overshoot, breath and a
   settling pitch, and wind jitter that keeps harmonics in ratio. A bank
   that asks for none of it renders the same bits as before; with it, the
-  same bits on every backend and whatever the blocks; its level, width,
-  timing and depth measured on the output. 2 000 partials cost 1.3 to 1.7
-  times the plain kernel with air, up to 2.9 with everything on all at once.
+  same bits whatever the blocks and on the backends run (scalar, SSE2, AVX and
+  AVX2; not yet NEON or WebAssembly SIMD); its level, width, timing and depth
+  measured on the output. 2 000 partials cost 1.4 to 1.6 times the plain
+  kernel with air (0.05 to 0.11 of a core on AVX2), 1.8 to 2.5 (0.08 to 0.15)
+  with everything on and every partial in an attack.
   Not yet wired into Caecilia and not yet judged by ear: its defaults are
   mostly judgements (TECH_DEBT 119)
 - 🚧 The space around an organ's pipes (`manguebyte_dsp::space`, ADR

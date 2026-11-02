@@ -128,6 +128,7 @@ break the API.
   phasor multiplied by `1 + depth · n(t)`; `start_attack` gives a partial a
   `PartialAttack`: a delay, a rise, an overshoot that settles, a breath of
   extra air that starts wide and narrows, and a pitch that settles;
+  `restart_attack` does so from the level a sounding partial has now;
   `set_wind_jitter` wanders the bank's gain and every partial's frequency
   by one ratio, on top of whatever a bellows model sets, so that harmonics
   stay harmonic. They update every 32 frames, in straight lines between, on
@@ -135,8 +136,10 @@ break the API.
   is a documented starting point, most of it a judgement, heard by no one on
   a real organ yet. A bank that asks for none of it runs the old kernel, and
   renders the same bits as before, checked against fingerprints taken from
-  the code before the change. With it, the output is the same bit for bit on
-  every backend and whatever the blocks. Measured on the output
+  the code before the change. With it, the output is the same bit for bit
+  whatever the blocks and on every backend run (scalar, SSE2, AVX and AVX2 on
+  one x86-64 machine; NEON and WebAssembly SIMD have not been run). Measured
+  on the output
   (`tests/partial_voicing.rs`): the skirt's level within 0.5 dB and half its
   peak within 20 % of half the bandwidth, up to 375 Hz at 48 kHz, falling at
   6 dB an octave, with the first image of the updates over 55 dB under its
@@ -148,10 +151,10 @@ break the API.
   under it in the same ratio within 0.002 cents; and a change of depth or
   width while playing no larger a step from sample to sample than 1.3 times
   the noise's own. 2 000 partials at 48 kHz in blocks of 128 frames,
-  against the plain kernel, on one logical processor of a busy Core i3-1215U
-  (`examples/partial_voicing_speed.rs`): air 1.3 to 1.7 times, air and
-  jitter 1.6 to 2.4, those and every partial always in an attack 1.8 to 2.9
-  (0.05 to 0.19 of a core on AVX2). `examples/organ_pipe_wavs.rs` writes a
+  against the plain kernel, on one logical processor of a Core i3-1215U
+  (`examples/partial_voicing_speed.rs`): air 1.4 to 1.6 times (0.05 to 0.11 of
+  a core on AVX2), air and jitter 1.6 to 2.1 (0.07 to 0.13), all three with
+  every partial always in an attack 1.8 to 2.5 (0.08 to 0.15). `examples/organ_pipe_wavs.rs` writes a
   pipe and a chord, plain and voiced, to compare by ear (TECH_DEBT item 119).
 - The space around an organ's pipes (`manguebyte_dsp::space`, ADR 0025),
   for an organ that renders each pipe as its own mono signal. Geometry in
