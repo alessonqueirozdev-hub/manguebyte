@@ -1151,15 +1151,26 @@ break the API.
   wrong child, the first included. A widget in a child that is hidden loses the
   focus, which goes nowhere until Tab or a click gives it again. `Window` has
   `present_at`, a pixmap at an origin in the window, and `present_color`.
-  `Root` has `set_origin`, which `AccessEntry::device` counts from, and
-  `last_damage`.
-  `examples/zoom_responsive.rs` shows both. Tested headless and against real
-  Win32 windows, a child and an application's: clicks and focus at zooms of 0.7
-  and 1.3, with bars on either axis; bars in the theme's colour that take no
-  clicks; bounds and the caret in the zoomed window; a zoom of 0.75 pixel for
-  pixel the same layout drawn at scale 0.75; reflow below `min_zoom`; nothing
-  drawn on a quiet frame; and the full layout zoomed with the compact one at its
-  real size, across the breakpoint both ways, in one frame.
+  `Root` has `set_origin`, which `AccessEntry::device` counts from, `set_pointer`
+  and `last_damage`, and `layout::rooms` works out the room to choose by: not
+  snapped to device pixels, and on an axis with a smallest size not depending on
+  the child showing, so a choice stays made however often the interface is laid
+  out. A modal subtree inside a child a container hides is modal again when it
+  is shown, and `PointerLeave` forgets where the pointer was, so a switch hovers
+  nothing under a pointer that has gone. In an application's window a new scale
+  runs no frame until its size has come.
+  `examples/zoom_responsive.rs` shows both. Tested headless: clicks and focus at
+  zooms of 0.7 and 1.3, with bars on either axis; bars in the theme's colour that
+  take no clicks; bounds and the caret in the zoomed window; a zoom of 0.75 pixel
+  for pixel the same layout drawn at scale 0.75; reflow below `min_zoom`; nothing
+  drawn on a quiet frame; the full layout zoomed with the compact one at its real
+  size, across the breakpoint both ways, in one frame; and a move between monitors
+  that keeps the layout, the focus and what is being typed. Tested in real Win32
+  windows as well, more narrowly: a child window at a host's scale of 1, at zooms
+  of 1 and 1.5, with the screen read back, bars that take no clicks, a drag and the
+  caret; and an application's window at the machine's scale, with bars read back
+  and a click. No reflow or breakpoint, and no move between monitors, has run in a
+  real window.
 
 A new look and motion ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)),
 with what they may cost the audio and the idle interface tested.

@@ -70,8 +70,21 @@ up the same way in the glue.
 ### Below `min_zoom`, reflow in the room there is
 
 The layout then gets the whole window at `min_zoom`: its size is the window's
-over that scale, and there are no bars. At the boundary the room is continuous
-with the design size, so it needs no margin.
+over that scale, and there are no bars. For a window of the design's shape the
+room is continuous at the boundary. For one with bars it is not: at a `min_zoom`
+of 0.5, a window of 800 by 2000 lays out at 1600 by 980, and one of 799 by 2000 at
+1598 by 4000, since the axis with room to spare gets all of it at once. That was
+kept, and has no margin: the layout only gains room in that jump, and what it
+shows is the window it has.
+
+Past the largest zoom (a scale of 8, or the buffer's side of `MAX_BUFFER_SIDE`
+device pixels, whichever comes first) the layout stays whole and the bars grow,
+since a buffer that was cut would leave part of the layout undrawn. A window of
+no area changes nothing that is remembered, as it says nothing about what fits.
+
+A window of the design size, within the half a device pixel that rounding allows
+at the system's scale, is treated just as an editor with no zoom treats it: the
+scale is the system's and the size the window's own, so nothing is softened.
 
 ### `responsive` decides during layout
 
@@ -81,16 +94,27 @@ when `Shown` was only asked for from `update`, which runs before layout with
 the rectangle of the frame before: a window resized would draw one frame with
 the old child in the new room, and the first frame would know no room at all.
 
-So the frame gained a step. A node laid out as `Arrange::Adaptive` is asked
-after each `layout::solve`, through `Widget::adapt(cx, room)`, which children
-to show. A different answer hides and shows them, polls what came into sight
-(it was not polled this frame, and tabs say which page they show when polled),
-and solves again, all before any widget is placed or painted. **No frame shows
-the wrong child**, the first frame included, which a test proves by counting
-paints. A node changes at most once a frame, so the loop ends, after at most
-one solve per adaptive node more. Solving again costs only when a switch
-happens; a quiet frame does not lay out at all. Hidden children are not
-measured, as with `Shown` from `update`.
+So the frame gained a step. Each time the interface is laid out, a node laid
+out as `Arrange::Adaptive` is asked first, through `Widget::adapt(cx, room)`,
+which children to show, in the room `layout::rooms` works out. A different
+answer hides and shows them, polls what came into sight (it was not polled this
+frame, and tabs say which page they show when polled), and works the rooms out
+again; only then is the layout solved and placed. **No frame shows the wrong
+child**, the first frame included, which a test proves by counting paints. A
+node changes at most once a frame, so the loop ends. An interface with an
+adaptive node works its layout out once more than one without; a quiet frame
+does not lay out at all. Hidden children are not measured, as with `Shown` from
+`update`.
+
+The frame around it had to keep to this too. An application's window hears of a
+new monitor as a scale and then a size. A frame between them laid out the old
+size at the new scale, which is half or twice the room, so `responsive` switched
+for one frame and focus, typed text and gestures went with it. So in an
+application's window a new scale runs no frame by itself: the size's frame shows
+both, and with no new size the next frame the timer runs does. In a host the
+editor asks for the new size in the same call, and a host that grants it draws
+one frame; a host that grants it later has, until then, a window that really is
+that small ([TECH_DEBT](../TECH_DEBT.md) item 122).
 
 ### The margin is on the way down
 
@@ -102,21 +126,39 @@ size whatever the window, and a first child whose smallest size is the design
 size would never come back. The cost is that a child can be up to the margin
 short of what it asked for; the docs say to allow for it.
 
-Comparisons allow half a device pixel, as layout snaps edges to the nearest one
-and a room of exactly a smallest size can come out a fraction short (at 0.7,
-1602 logical pixels is 1121.4 device pixels, which snaps to 1121, or 1601.43
-logical pixels). A first
-decision has no margin, as nothing is showing to hold on to. A room with no
-area decides nothing: a minimised window is not a small one.
+A first decision has no margin, as nothing is showing to hold on to. A room with
+no area decides nothing: a minimised window is not a small one.
 
-### The natural size does not depend on the child showing
+### The room it chooses by does not depend on the child showing, or the scale
 
 In a column, with no weight, a child is given its natural size. If that were
 the child showing, a small layout would give itself too little room to ever
-bring the large one back. `Arrange::Adaptive` is a stack whose content size is
-a floor under its natural size, and `responsive` gives its first child's
-smallest size there, so what a parent gives does not fall below what the first
-child needs while there is room for it.
+bring the large one back. A floor under the natural size is not enough either:
+in a column too short for what is in it, each child gives up a share of what it
+asks for, so a child asking for more gets more, and the choice flipped on every
+layout (with a header of 100 in 580, and a floor of 500: a child of 100 leaves a
+room of 483, which chooses the child of 800, which gets 515, which chooses back).
+
+So the choice and the placing are two sums. `layout::rooms` works out the room
+as if an adaptive node's natural size, on each axis with a floor, were that floor
+(`responsive`'s is the largest smallest size), whichever child shows. Then
+`layout::solve` places what was chosen by its natural size, with that floor under
+it: a large child keeps its natural size, and a child can be placed in more room
+than it was chosen by.
+
+An axis with no floor keeps the child's natural size in the sum, or a second node
+beside it would be given room that is not there. The choice cannot depend on a
+floor's axis, so a node's choice does not depend on its own child. Two nodes could
+still feed each other across axes: in a row too narrow for it, around a column
+holding one node with a smallest width and one with a smallest height, each
+changing the natural size of the axis the other chooses by. That is left: it needs
+all of that together, and a node changes only once a frame in any case.
+
+`rooms` snaps nothing to device pixels, so the choice does not depend on the scale.
+A comparison against rooms that had been snapped would need a slack, and that slack
+grows with what is around the node: two edges snapped apart make a room almost a
+device pixel short, and a padding one more rounding. The comparisons here allow
+only for adding up lengths in single precision (0.01 logical pixels).
 
 ### Focus
 
@@ -125,7 +167,22 @@ Tab then brings it to the first control of the child that came in. A text input
 takes what was typed, as on any loss of focus. Moving the focus to some control
 of the new layout would be a guess: nothing says which matches, and a screen
 reader would announce a control the person did not go to. Gestures end, open
-menus and tooltips close, and the pointer's hover is worked out again.
+menus and tooltips close, and the pointer's hover is worked out again, from where
+it is: a pointer that has left the window, as it has in any drag of a border,
+hovers nothing, and when a zoom moves the interface under a pointer that stays,
+the glue says where the pointer now is (`Root::set_pointer`).
+
+### A dialog in a child that is hidden
+
+A modal subtree used to end when it was hidden, which was right: hiding it was how
+its own dialog closed, and while it was modal nothing could hide it from outside
+but the program. A layout that changes with the window is a new way out, and the
+dialog came back drawn open and not modal, with Tab reaching what is under the
+scrim. So the root tells the two apart. A modal subtree hidden by the widget that
+made it modal ends. One hidden by a container around it is suspended, still open,
+with where the focus was in it, and is modal again when it is shown, before it is
+polled, so that one answered meanwhile closes as usual. Each layout can have its
+own open dialog.
 
 ### How they combine: a breakpoint on the window
 
@@ -183,6 +240,8 @@ Editor::new(HostSize::new(1600, 980), move || {
 - Each change of zoom draws everything again, as any change of scale does: a border
   dragged across a large console redraws it each step. Nothing is built again, but
   it is not free ([TECH_DEBT](../TECH_DEBT.md) item 122).
+- A plain `responsive` with no zoom gains the same: rooms that do not depend on the
+  scale, and no switch between a monitor's scale and its size.
 - Natural sizes that depend on the scale, such as a text's height rounded to device
   pixels, can differ by under a logical pixel between zooms, which a flexible
   neighbour absorbs. "No reflow" means the layout's size and arrangement, not every
