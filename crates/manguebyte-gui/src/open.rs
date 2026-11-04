@@ -115,6 +115,9 @@ pub(crate) struct Shared {
     /// The window, the buffer's place in it and the colour of the bars, as
     /// last shown: when they change, all of it is shown again.
     letterbox: Cell<Option<Letterbox>>,
+    /// Where the pointer last was in the window, while it is over it, for a
+    /// zoomed interface that moves under it.
+    pointer: Cell<Option<PhysicalPoint>>,
 }
 
 /// What the window shows around a zoomed interface's back buffer.
@@ -274,6 +277,7 @@ impl Shared {
             zoom,
             real_size: Cell::new(None),
             letterbox: Cell::new(None),
+            pointer: Cell::new(None),
         })
     }
 
@@ -349,12 +353,35 @@ impl Shared {
             }
             None => (window.logical_size(), window.scale() as f32),
         };
+        let before = (root.scale(), root.origin());
         if root.size() != size || root.scale() != scale {
             root.resize(size, scale);
         }
         if self.zoom.is_some() {
             let origin = zoom::origin(window.size(), root.pixels());
             root.set_origin(origin.x, origin.y);
+            // The same pixel of the window is somewhere else in the interface.
+            if (root.scale(), root.origin()) != before {
+                if let Some(at) = self.pointer.get() {
+                    let at = in_interface(root, at);
+                    root.set_pointer(Some(at));
+                }
+            }
+        }
+    }
+
+    /// Keeps where the pointer is, for a zoomed interface.
+    fn follow_pointer(&self, event: Event) {
+        if self.zoom.is_none() {
+            return;
+        }
+        match event {
+            Event::PointerDown { pointer, .. }
+            | Event::PointerUp { pointer, .. }
+            | Event::Wheel { pointer, .. }
+            | Event::PointerMove(pointer) => self.pointer.set(Some(pointer.physical)),
+            Event::PointerLeave => self.pointer.set(None),
+            _ => {}
         }
     }
 
@@ -365,13 +392,8 @@ impl Shared {
         if self.zoom.is_none() {
             return pointer.position;
         }
-        let in_interface = |root: &Root| {
-            let (x, y) = root.origin();
-            let scale = f64::from(root.scale());
-            let along = |at: i32, from: i32| ((f64::from(at) - f64::from(from)) / scale) as f32;
-            Point::new(along(pointer.physical.x, x), along(pointer.physical.y, y))
-        };
-        self.read_root(in_interface).unwrap_or(pointer.position)
+        self.read_root(|root| in_interface(root, pointer.physical))
+            .unwrap_or(pointer.position)
     }
 
     /// Whether `pointer` is on the bars around a zoomed interface, where
@@ -669,6 +691,14 @@ fn caret_in_device(root: &Root) -> Option<IRect> {
     .filter(|rect| !rect.is_empty())
 }
 
+/// A pixel of the window, in the logical pixels of a zoomed interface.
+fn in_interface(root: &Root, at: PhysicalPoint) -> Point {
+    let (x, y) = root.origin();
+    let scale = f64::from(root.scale());
+    let along = |at: i32, from: i32| ((f64::from(at) - f64::from(from)) / scale) as f32;
+    Point::new(along(at.x, x), along(at.y, y))
+}
+
 /// What the window calls with every event.
 pub(crate) struct Glue {
     shared: Rc<Shared>,
@@ -731,6 +761,7 @@ fn to_ui(event: Event, at: impl Fn(PointerEvent) -> Point) -> Option<ui::Event> 
 impl WindowHandler for Glue {
     fn event(&mut self, window: &WindowCx<'_>, event: Event) -> Handled {
         let shared = &self.shared;
+        shared.follow_pointer(event);
         match event {
             Event::Paint(damage) => {
                 // Brought up to date first, so that what is shown is what
@@ -750,7 +781,15 @@ impl WindowHandler for Glue {
             Event::ScaleChanged(scale) => {
                 let old = shared.scale_seen.replace(scale);
                 shared.follow_system_scale(window, old, scale);
-                shared.refresh(window);
+                // The system gives an application's window its size for the
+                // new monitor straight after the scale. A frame between them
+                // would lay out the old size at the new scale, half or twice
+                // the room, and a layout chosen by room would change for it,
+                // and lose its focus and gestures. That size's frame shows
+                // it; with no new size, the next frame the timer runs.
+                if !shared.app {
+                    shared.refresh(window);
+                }
                 Handled::Yes
             }
             Event::Closed => {

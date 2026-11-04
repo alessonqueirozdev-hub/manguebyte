@@ -196,10 +196,14 @@ impl Editor {
     ///
     /// Below `min_zoom` the zoom stops there, so that nothing gets too small
     /// to read, and the layout goes back to reflowing in the room there is,
-    /// which is the whole window at that zoom, with no bars. Within the
-    /// scales the interface can draw (`0.25..=8` with the system's scale
-    /// counted in): past the largest, the bars grow. A `min_zoom` that is
-    /// not a positive number asks only for that limit.
+    /// which is the whole window at that zoom, with no bars. That changes
+    /// at once on the axis with room to spare, which the bars had: a window
+    /// tall for its width goes from the design's height to all of its own.
+    /// Within what the interface can draw (scales `0.25..=8` with the
+    /// system's scale counted in, and
+    /// [`MAX_BUFFER_SIDE`](manguebyte_ui::MAX_BUFFER_SIDE) device pixels a
+    /// side): past that, the bars grow. A `min_zoom` that is not a positive
+    /// number asks only for that limit.
     ///
     /// Each resize draws everything again at the new scale, as any change
     /// of scale does; nothing is built again.

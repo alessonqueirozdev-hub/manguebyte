@@ -137,6 +137,7 @@ struct Pad {
     presses: Arc<AtomicU32>,
     paints: Arc<AtomicU32>,
     drops: Arc<AtomicU32>,
+    hovered: Arc<AtomicBool>,
 }
 
 impl Pad {
@@ -146,6 +147,10 @@ impl Pad {
 
     fn paints(&self) -> u32 {
         self.paints.load(Ordering::Relaxed)
+    }
+
+    fn is_hovered(&self) -> bool {
+        self.hovered.load(Ordering::Relaxed)
     }
 
     fn view(&self, name: &'static str) -> View {
@@ -180,6 +185,10 @@ impl Widget for PadWidget {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         self.pad.paints.fetch_add(1, Ordering::Relaxed);
         scene.fill(cx.rect(), Color::rgb(30, 160, 90));
+    }
+
+    fn hover_changed(&mut self, _cx: &mut EventCx<'_>, hovered: bool) {
+        self.pad.hovered.store(hovered, Ordering::Relaxed);
     }
 
     fn event(&mut self, _cx: &mut EventCx<'_>, event: &Event) -> Handled {
@@ -1005,6 +1014,225 @@ fn an_application_window_zooms_as_a_hosts_does() {
     let (x, y) = ui.origin().expect("open");
     let buffer = IRect::new(x, y, pixels.width(), pixels.height());
     assert!(shown.crop(buffer).as_ref() == Some(&pixels));
+}
+
+/// The full console and a compact one, as the Caecilia has them, with what
+/// is typed in the full one and which was drawn counted.
+fn full_or_compact(wide: &Pad, compact: &Pad, breakpoint: Size) -> Editor {
+    let (wide, compact) = (wide.clone(), compact.clone());
+    Editor::new(HostSize::new(1600, 980), move || {
+        responsive((
+            column((
+                wide.view("Keyboards"),
+                text_field("Title", State::new(String::new())),
+            )),
+            compact.view("Summary"),
+        ))
+        .below(breakpoint)
+    })
+    .with_resize(Resize::Free {
+        min: HostSize::new(300, 200),
+        max: HostSize::new(4000, 3000),
+    })
+}
+
+#[test]
+fn moving_an_application_window_between_monitors_keeps_its_layout_and_its_state() {
+    let breakpoint = Size::new(1100.0, 700.0);
+    for zoomed in [true, false] {
+        let (wide, compact) = (Pad::default(), Pad::default());
+        let spec = full_or_compact(&wide, &compact, breakpoint);
+        let spec = if zoomed {
+            spec.with_zoom_to_fit(0.5).with_real_size_below(breakpoint)
+        } else {
+            spec
+        };
+        let (app, _test) = App::headless();
+        let window = spec.open_in_app(&app, "Console", None).expect("headless");
+        let ui = window.headless().expect("headless");
+        ui.tick();
+        ui.window().drag_frame_to(PhysicalSize::new(1536, 840));
+        ui.tick();
+        // Typing, with the focus in the full console.
+        let field = ui
+            .find(Role::TextInput, "Title")
+            .expect("shown")
+            .bounds
+            .center();
+        ui.press(field);
+        ui.release(field);
+        ui.type_text("Fugue");
+        let focused = |ui: &HeadlessEditor| {
+            ui.find(Role::TextInput, "Title")
+                .is_some_and(|entry| entry.node.state.focused)
+        };
+        assert!(focused(&ui));
+
+        // To twice the scale and back: the same logical window throughout.
+        for scale in [2.0, 1.0, 1.5, 1.0] {
+            assert!(ui.window().move_to_monitor(scale));
+            assert!(focused(&ui), "the focus went at {scale}, zoomed {zoomed}");
+            assert_eq!(
+                compact.paints(),
+                0,
+                "the compact layout was shown at {scale}, zoomed {zoomed}"
+            );
+            ui.tick();
+            assert!(focused(&ui));
+        }
+        assert_eq!(compact.paints(), 0);
+        drop(window);
+    }
+}
+
+#[test]
+fn moving_a_compact_application_window_between_monitors_keeps_it_compact() {
+    let breakpoint = Size::new(1100.0, 700.0);
+    let (wide, compact) = (Pad::default(), Pad::default());
+    let spec = full_or_compact(&wide, &compact, breakpoint)
+        .with_zoom_to_fit(0.5)
+        .with_real_size_below(breakpoint);
+    let (app, _test) = App::headless();
+    let window = spec.open_in_app(&app, "Console", None).expect("headless");
+    let ui = window.headless().expect("headless");
+    ui.tick();
+    assert!(ui.window().move_to_monitor(2.0));
+    // 768 by 830 logical, at 2.0.
+    ui.window().drag_frame_to(PhysicalSize::new(1536, 1660));
+    ui.tick();
+    assert!(ui.find(Role::Button, "Summary").is_some());
+    let painted = wide.paints();
+    // At 1.0 the old size would read 1536 by 1660: the full console.
+    assert!(ui.window().move_to_monitor(1.0));
+    assert_eq!(wide.paints(), painted, "the full layout was shown");
+    assert!(ui.find(Role::Button, "Summary").is_some());
+    assert_eq!(ui.layout(), Some((Size::new(768.0, 830.0), 1.0)));
+    drop(window);
+}
+
+#[test]
+fn a_scale_that_brings_no_new_size_is_followed_by_the_next_frame() {
+    let (left, right) = (Pad::default(), Pad::default());
+    let (app, _test) = App::headless();
+    let spec = console(&left, &right, &params()).with_zoom_to_fit(0.25);
+    let window = spec.open_in_app(&app, "Console", None).expect("headless");
+    let ui = window.headless().expect("headless");
+    ui.tick();
+    assert_eq!(ui.layout(), Some((Size::new(400.0, 300.0), 1.0)));
+    // Not a move to a monitor: the scale alone.
+    assert!(ui.window().set_system_scale(2.0));
+    ui.tick();
+    let (_, scale) = ui.layout().expect("open");
+    assert_eq!(scale, 1.0, "half the logical size at twice the scale");
+    drop(window);
+}
+
+#[test]
+fn what_is_hovered_follows_a_zoom_under_a_pointer_that_stays() {
+    let (left, right) = (Pad::default(), Pad::default());
+    let spec = console(&left, &right, &params()).with_zoom_to_fit(0.25);
+    let mut open = Open::new(spec, Some(1.0));
+    // At zoom 1, 150 is over the left pad.
+    open.ui.window().input(RawInput::PointerMove {
+        at: PhysicalPoint::new(150, 20),
+        modifiers: Modifiers::NONE,
+    });
+    assert!(left.is_hovered());
+    // At zoom 0.5, the same pixel is 300 logical pixels in: the right pad.
+    open.resize(200, 150);
+    assert!(right.is_hovered(), "the old zoom's position");
+    assert!(!left.is_hovered());
+    // Only the bars moving: 500 wide at 150 tall has the layout from 150, so
+    // the pixel is the left pad's first.
+    open.resize(500, 150);
+    assert_eq!(open.ui.origin(), Some((150, 0)));
+    assert!(left.is_hovered());
+    assert!(!right.is_hovered());
+    // And further: it is on a bar, over nothing.
+    open.resize(800, 150);
+    assert!(!left.is_hovered() && !right.is_hovered());
+}
+
+#[test]
+fn a_window_with_no_area_leaves_the_zoom_where_it_was() {
+    let breakpoint = Size::new(1100.0, 700.0);
+    let (wide, compact) = (Pad::default(), Pad::default());
+    let spec = full_or_compact(&wide, &compact, breakpoint)
+        .with_zoom_to_fit(0.5)
+        .with_real_size_below(breakpoint);
+    let mut open = Open::new(spec, Some(1.0));
+    // Inside the margin, on the way down: still zoomed.
+    open.resize(1090, 800);
+    assert_eq!(open.layout_size(), Size::new(1600.0, 980.0));
+    // Minimised, as a host may do it, and back.
+    open.ui.window().resize(PhysicalSize::new(0, 0));
+    open.ui.tick();
+    open.ui.window().resize(PhysicalSize::new(1090, 800));
+    open.ui.tick();
+    assert_eq!(
+        open.layout_size(),
+        Size::new(1600.0, 980.0),
+        "the full console at its real size, in less room than it was designed for"
+    );
+    assert!(open.ui.find(Role::Button, "Keyboards").is_some());
+    assert_eq!(compact.paints(), 0);
+}
+
+#[test]
+fn a_zoom_larger_than_the_buffer_can_hold_leaves_nothing_undrawn() {
+    let (left, right) = (Pad::default(), Pad::default());
+    let (view_left, view_right) = (left.clone(), right.clone());
+    let spec = Editor::new(HostSize::new(4000, 100), move || {
+        row((view_left.view("Left"), view_right.view("Right")))
+    })
+    .with_resize(Resize::Free {
+        min: HostSize::new(40, 40),
+        max: HostSize::new(16000, 400),
+    })
+    .with_zoom_to_fit(0.25);
+    let open = Open::new(spec, Some(1.0));
+    open.ui.window().resize(PhysicalSize::new(16000, 400));
+    open.ui.tick();
+    assert_eq!(open.layout_size(), Size::new(4000.0, 100.0));
+    let pixels = open.ui.pixels().expect("open");
+    let scale = open.scale();
+    assert_eq!(
+        (f64::from(4000.0 * scale)).round() as u32,
+        pixels.width(),
+        "cut at the largest buffer: the layout is not all there at {scale}"
+    );
+    assert!(pixels.width() <= manguebyte_ui::MAX_BUFFER_SIDE);
+    // The far end of the layout is drawn, and takes a press.
+    let right_pad = open.get(Role::Button, "Right").device;
+    let end = PhysicalPoint::new(right_pad.right() as i32 - 2, right_pad.y + 2);
+    open.click_device(end);
+    assert_eq!(right.presses(), 1, "the far end counted as a bar");
+}
+
+#[test]
+fn a_design_sized_window_is_not_zoomed_whatever_the_scale_rounds_to() {
+    // At 1.3, 975 is 1267.5: the window rounds that up in double precision,
+    // and the scale in single precision comes out just under.
+    let (left, right) = (Pad::default(), Pad::default());
+    let build = |zoomed: bool| {
+        let (left, right) = (left.clone(), right.clone());
+        let spec = Editor::new(HostSize::new(1605, 975), move || {
+            row((left.view("Left"), right.view("Right")))
+        });
+        if zoomed {
+            spec.with_zoom_to_fit(0.25)
+        } else {
+            spec
+        }
+    };
+    for scale in [1.1, 1.3, 1.7, 2.3] {
+        let zoomed = Open::new(build(true), Some(scale));
+        let plain = Open::new(build(false), Some(scale));
+        assert_eq!(zoomed.scale(), scale as f32, "soft at {scale}");
+        assert_eq!(zoomed.ui.origin(), Some((0, 0)));
+        assert_eq!(zoomed.ui.layout(), plain.ui.layout());
+        assert!(zoomed.ui.shown() == plain.ui.shown(), "at {scale}");
+    }
 }
 
 #[test]

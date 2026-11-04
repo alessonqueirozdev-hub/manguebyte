@@ -9,7 +9,7 @@
 
 use manguebyte_gfx::{IRect, Pixmap, Size};
 use manguebyte_plugin::editor::{HostSize, MAX_SCALE, MIN_SCALE};
-use manguebyte_ui::RESPONSIVE_MARGIN;
+use manguebyte_ui::{MAX_BUFFER_SIDE, RESPONSIVE_MARGIN};
 use manguebyte_window::{PhysicalPoint, PhysicalSize};
 
 /// What an editor asked for with `Editor::with_zoom_to_fit` and
@@ -29,12 +29,6 @@ pub(crate) struct Fitted {
     pub(crate) size: Size,
     /// Device pixels per logical pixel: the system's scale times the zoom.
     pub(crate) scale: f32,
-}
-
-/// A side of the back buffer of `length` logical pixels at `scale`, as the
-/// root works it out.
-fn side(length: f64, scale: f64) -> f64 {
-    (length * f64::from(scale as f32)).round()
 }
 
 /// Works out what the root takes for a window of `window` device pixels at
@@ -63,10 +57,17 @@ pub(crate) fn fit(
         } else {
             0.0
         };
-        let slack = 0.501 / system;
-        let under = |length: f64, limit: f32| length + slack < f64::from(limit - margin);
-        let now = under(logical_width, below.width) || under(logical_height, below.height);
-        *real = Some(now);
+        let under = |length: f64, limit: f32| length + 0.01 < f64::from(limit - margin);
+        // A window with no area says nothing about what fits it, as it says
+        // nothing to `responsive`: whatever comes next is judged from what
+        // there was.
+        let now = if width == 0.0 || height == 0.0 {
+            real.unwrap_or(false)
+        } else {
+            let now = under(logical_width, below.width) || under(logical_height, below.height);
+            *real = Some(now);
+            now
+        };
         if now {
             return filling(system);
         }
@@ -76,16 +77,21 @@ pub(crate) fn fit(
         f64::from(design.width.max(1)),
         f64::from(design.height.max(1)),
     );
-    // A window of the design size, as rounding left it at this scale, has
-    // no zoom at all, not 0.999: that would soften everything for nothing.
-    if side(design_width, system) == width && side(design_height, system) == height {
-        return Fitted {
-            size: Size::new(design_width as f32, design_height as f32),
-            scale: system as f32,
-        };
+    // A window of the design size, whichever way rounding left it at this
+    // scale, has no zoom at all, not 0.999, which would soften everything
+    // for nothing: it is as if the editor did not zoom.
+    let is_design = |design: f64, window: f64| (design * system - window).abs() <= 0.5 + 1e-6;
+    if is_design(design_width, width) && is_design(design_height, height) {
+        return filling(system);
     }
     let zoom = (logical_width / design_width).min(logical_height / design_height);
-    let most = MAX_SCALE / system;
+    // No scale past what a root draws, nor one whose buffer would be cut.
+    let buffer = f64::from(MAX_BUFFER_SIDE);
+    let largest = MAX_SCALE
+        .min(buffer / design_width)
+        .min(buffer / design_height)
+        .max(MIN_SCALE);
+    let most = largest / system;
     let least = f64::from(rules.min_zoom).max(MIN_SCALE / system).min(most);
     if zoom < least {
         return filling(system * least);
@@ -191,8 +197,29 @@ mod tests {
                 &mut None,
             );
             assert_eq!(at.scale, system as f32);
-            assert_eq!(at.size, Size::new(1601.0, 981.0));
+            // The window's own logical size, as an editor with no zoom has.
+            assert_eq!(at.size.width, (f64::from(width) / system) as f32);
+            assert_eq!(at.size.height, (f64::from(height) / system) as f32);
         }
+        // At 1.3, 975 is 1267.5, which the window rounds up, and which the
+        // scale in single precision would round down.
+        let at = fit(
+            HostSize::new(1605, 975),
+            rules(0.25),
+            PhysicalSize::new(2087, 1268),
+            1.3,
+            &mut None,
+        );
+        assert_eq!(at.scale, 1.3);
+        // A device pixel more is a window of another size.
+        let at = fit(
+            HostSize::new(1605, 975),
+            rules(0.25),
+            PhysicalSize::new(2087, 1269),
+            1.3,
+            &mut None,
+        );
+        assert_eq!(at.size, Size::new(1605.0, 975.0));
     }
 
     #[test]
@@ -203,11 +230,8 @@ mod tests {
         for width in 400..1900_u32 {
             let window = PhysicalSize::new(width, 5000);
             let at = fit(design, rules(0.0), window, 1.0, &mut None);
-            assert_eq!(
-                side(1601.0, f64::from(at.scale)),
-                f64::from(width),
-                "{at:?}"
-            );
+            let side = (1601.0 * f64::from(at.scale)).round();
+            assert_eq!(side, f64::from(width), "{at:?}");
         }
     }
 
@@ -230,13 +254,28 @@ mod tests {
         assert_eq!(at.scale, MIN_SCALE as f32);
         assert_eq!(at.size, Size::new(400.0, 400.0));
         // At the largest, the layout does not grow: the bars do.
-        let at = fitted(0.25, 16000, 9800, 1.0);
+        let small = HostSize::new(800, 490);
+        let window = PhysicalSize::new(16000, 9800);
+        let at = fit(small, rules(0.25), window, 1.0, &mut None);
         assert_eq!(at.scale, MAX_SCALE as f32);
+        assert_eq!(at.size, Size::new(800.0, 490.0));
+        // Sooner than that, the largest buffer: all of the layout is in it.
+        let at = fitted(0.25, 16000, 9800, 1.0);
         assert_eq!(at.size, Size::new(1600.0, 980.0));
+        assert_eq!(at.scale, (f64::from(MAX_BUFFER_SIDE) / 1600.0) as f32);
+        let side = (1600.0 * f64::from(at.scale)).round() as u32;
+        assert_eq!(side, MAX_BUFFER_SIDE);
+        // Whichever side reaches it first, on top of the system's scale.
+        let tall = HostSize::new(100, 4000);
+        let window = PhysicalSize::new(16000, 16000);
+        let at = fit(tall, rules(0.25), window, 2.0, &mut None);
+        let side = (4000.0 * f64::from(at.scale)).round() as u32;
+        assert_eq!(side, MAX_BUFFER_SIDE);
         // A smallest zoom past the largest gives way to it.
         let at = fitted(100.0, 1600, 980, 1.0);
         assert_eq!(at.scale, 1.0, "the design size is no zoom");
-        assert_eq!(fitted(100.0, 1599, 980, 1.0).scale, MAX_SCALE as f32);
+        let largest = (f64::from(MAX_BUFFER_SIDE) / 1600.0) as f32;
+        assert_eq!(fitted(100.0, 1599, 980, 1.0).scale, largest);
     }
 
     #[test]
@@ -244,6 +283,22 @@ mod tests {
         let at = fitted(0.5, 0, 0, 1.0);
         assert_eq!(at.size, Size::new(0.0, 0.0));
         assert_eq!(at.scale, 0.5);
+    }
+
+    #[test]
+    fn a_window_with_no_area_says_nothing_about_the_real_size() {
+        let rules = ZoomRules {
+            min_zoom: 0.25,
+            real_below: Some(Size::new(1100.0, 700.0)),
+        };
+        for before in [None, Some(false), Some(true)] {
+            for window in [(0, 0), (1090, 0), (0, 800)] {
+                let mut real = before;
+                let window = PhysicalSize::new(window.0, window.1);
+                fit(DESIGN, rules, window, 1.0, &mut real);
+                assert_eq!(real, before, "{window:?}");
+            }
+        }
     }
 
     #[test]
