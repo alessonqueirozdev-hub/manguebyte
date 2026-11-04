@@ -196,16 +196,16 @@ Everything a standalone audio application needs, short of a user interface.
   measured on the output. 2 000 partials cost 1.4 to 1.6 times the plain
   kernel with air (0.05 to 0.11 of a core on AVX2), 1.8 to 2.5 (0.08 to 0.15)
   with everything on and every partial in an attack.
-  Not yet wired into Caecilia and not yet judged by ear: its defaults are
-  mostly judgements (TECH_DEBT 119)
+  In Caecilia's code but in no published version of it, and not yet judged
+  by ear: its defaults are mostly judgements (TECH_DEBT 119)
 - 🚧 The space around an organ's pipes (`manguebyte_dsp::space`, ADR
   0025): each pipe placed into up to 16 channels with pan, fractional
   delay, distance gain and air absorption, through shared fixed-point
   rings (300 sounding pipes into stereo in 8 to 11 % of a block's time on
   a busy laptop, bit for bit the same whatever the blocks); early
   reflections of a rectangular room by image sources up to order 6; a
-  swell box. Done and tested, but not yet used by Caecilia or any
-  example instrument, and no frequency-dependent walls beyond one
+  swell box. Done and tested, and in Caecilia's code but in no published
+  version of it; used by no example instrument, and no frequency-dependent walls beyond one
   one-pole a path, no diffraction, no binaural output, no Doppler
   (TECH_DEBT 118)
 
@@ -320,8 +320,9 @@ Write a processor once and ship it in every format.
   ports, device channels in the standalone runner, and in the harness; a
   bus switched off is not rendered. Tested in process through the
   framework's own host in all four formats, and the example organ, Mangue
-  Divisions, loaded from its built library as CLAP and VST 3. Not yet run
-  through the CI validators (wired in, not seen to pass) or a DAW; widths
+  Divisions, loaded from its built library as CLAP and VST 3. It passes
+  the CI validators (clap-validator, Steinberg's and auval, with lilv
+  listing it) and has not been in a DAW; widths
   are fixed, there are no auxiliary inputs, and an Audio Unit renders
   every element (TECH_DEBT 110)
 - 🚧 Audio Unit, version 2: `export_au!` through the plain C interface,
@@ -411,7 +412,7 @@ our own, and nothing claimed before its test exists.
   other programs onto widgets, and the open, folder and save dialogs
   ([ADR 0010](docs/adr/0010-application-windows.md)), tested headless and
   with real Win32 windows; showing the dialogs and a real drag from the
-  file manager are tested by hand only, and not yet recorded. macOS and
+  file manager are left to a person, and no such run is recorded. macOS and
   Linux follow as CI proves each ([TECH_DEBT](docs/TECH_DEBT.md) item 97)
 - 🚧 Editors for the example plugins: Mangue Duck's (knobs, a bypass switch
   and a gain-reduction meter) and Mangue Pluck's (a knob for each
