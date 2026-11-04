@@ -598,8 +598,10 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     let room = Room::start(&mock, &devices, seconds);
 
     // Each change is asked for at a time of the song, but a busy machine
-    // can let this thread wake later than that: where in the song each one
-    // really happened is noted, and the checks below are made from there.
+    // can let this thread wake later than that, or stop it halfway through
+    // one: where in the song each one really began is noted, and the checks
+    // below are made from there. And each gets a tenth of a second of the
+    // song once it has returned, which is three of its fades.
     // To another device at the same rate, with a smaller block.
     room.wait(&mut manager, 0.3);
     let to_b = room.now();
@@ -607,7 +609,7 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Crossfade);
 
     // To one at 44.1 kHz: the engine stays at 48 kHz, the edge resamples.
-    room.wait(&mut manager, 0.6);
+    room.wait(&mut manager, f64::max(0.6, room.now() + 0.1));
     assert_eq!(mock.stream_count(), 1, "the crossfade is over");
     let to_c = room.now();
     manager.apply(&setup(C)).unwrap();
@@ -616,7 +618,7 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
 
     // Its driver asks to be reset: the same device cannot be open twice,
     // so it fades out, closes, opens again and fades in.
-    room.wait(&mut manager, 0.9);
+    room.wait(&mut manager, f64::max(0.9, room.now() + 0.1));
     assert_eq!(mock.stream_count(), 1);
     let reset_asked = room.now();
     assert!(mock.request_restart(Direction::Output));
@@ -637,7 +639,7 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     let reset_done = room.now();
 
     // To one with four channels and blocks of 64 frames.
-    room.wait(&mut manager, 1.2);
+    room.wait(&mut manager, f64::max(1.2, room.now() + 0.1));
     let reset = manager.last_swap().unwrap_or(reset);
     let to_d = room.now();
     manager.apply(&setup(D).with_buffer_size(64)).unwrap();
@@ -689,7 +691,8 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
     assert_eq!((a.offset, a.first), (0, 0), "a starts the song");
     assert!(a.faded <= fade_frames(48_000) + 1, "a has no fade-in");
     assert!(b.faded <= 2 * fade_frames(48_000) + 2);
-    // ... at full level outside the fades, halfway between changes, ...
+    // ... at full level outside the fades, just before each next change: a
+    // fade can end anywhere in the stretch, and is over by its end, ...
     let end = seconds - 0.05;
     for (take, from, to) in [
         (&takes[0], 0.0, to_b),
@@ -703,9 +706,12 @@ fn the_song_goes_on_while_the_device_changes_under_it() {
             "only {:.3} s between changes at {from:.3} and {to:.3} s",
             to - from
         );
-        let at = (from + to) / 2.0;
+        let at = to - 0.002;
         let gain = take.gain_at(at);
-        assert!((gain - 1.0).abs() < 0.01, "a gain of {gain} at {at:.3} s");
+        assert!(
+            (gain - 1.0).abs() < 0.01,
+            "a gain of {gain} at {at:.3} s, between changes at {from:.3} and {to:.3} s"
+        );
     }
     // ... with no dip while two devices play at once, ...
     assert_no_dip(&takes[0], &takes[1], to_b, to_c, "a to b");
