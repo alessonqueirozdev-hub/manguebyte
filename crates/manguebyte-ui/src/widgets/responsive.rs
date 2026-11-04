@@ -12,6 +12,10 @@ use crate::widget::{AccessCx, MeasureCx, PaintCx, Shown, UpdateCx, Widget};
 /// logical pixels, unless [`Responsive::margin`] says otherwise.
 pub const RESPONSIVE_MARGIN: f32 = 16.0;
 
+/// What a room can come out short of a smallest size it should reach, in
+/// logical pixels, from adding up lengths in single precision.
+const ROOM_SLACK: f32 = 0.01;
+
 /// Several layouts of one interface, of which the first that fits the room
 /// is shown: what [`responsive`] makes.
 ///
@@ -46,13 +50,22 @@ pub const RESPONSIVE_MARGIN: f32 = 16.0;
 /// frame shows a child in a room it does not fit, the first frame included.
 /// The child that comes in is polled in that same frame.
 ///
-/// What a parent gives does not depend on the child showing: the natural
-/// size is at least the first child's smallest size, which keeps a row or
-/// column that gives it no more than its natural size from stranding it in
-/// the small layout. It still needs to be given room to decide on: a parent
-/// that aligns it to its natural size gives it no less, so give it
-/// [`flex`](IntoView::flex) or a stretching alignment along an axis that
-/// has a smallest size.
+/// The choice does not depend on the child showing. The room it is made
+/// from is worked out as if, on each axis that has a smallest size, the
+/// natural size were the largest smallest size, whichever child shows (see
+/// [`rooms`](crate::layout::rooms)); it is not snapped to device pixels, so it
+/// does not depend on the scale either. So a row or column that gives it no
+/// more than its natural size does not strand it in the small layout, and a
+/// choice stays made however often the interface is laid out. Where it is then
+/// placed is by the natural size of the child showing, with that smallest size
+/// as a floor, which can be more than the room it was chosen by: a child given
+/// less room than it asks for shrinks as any other does.
+///
+/// A parent that aligns it to its natural size gives it no less than that
+/// floor, so give it [`flex`](IntoView::flex) or a stretching alignment along
+/// an axis that has a smallest size. On an axis with no smallest size its
+/// natural size is the child's, as for a stack, and that can change the room
+/// of a second `responsive` beside it.
 ///
 /// # What goes with a child that is hidden
 ///
@@ -177,8 +190,8 @@ struct Chooser {
 }
 
 impl Chooser {
-    /// The child to show in `room`, within `slack` logical pixels.
-    fn choose(&self, room: Size, slack: f32) -> usize {
+    /// The child to show in `room`.
+    fn choose(&self, room: Size) -> usize {
         let last = self.count.saturating_sub(1);
         (0..last)
             .find(|&at| {
@@ -186,8 +199,8 @@ impl Chooser {
                 // Until it has decided, nothing is showing to hold on to.
                 let holds = self.decided && at == self.current;
                 let margin = if holds { self.margin } else { 0.0 };
-                room.width + slack >= smallest.width - margin
-                    && room.height + slack >= smallest.height - margin
+                room.width + ROOM_SLACK >= smallest.width - margin
+                    && room.height + ROOM_SLACK >= smallest.height - margin
             })
             .unwrap_or(last)
     }
@@ -198,10 +211,12 @@ impl Widget for Chooser {
         AccessNode::new(Role::Group, "")
     }
 
-    /// The first child's smallest size: a floor under the natural size,
-    /// which layout adds the child showing to (see [`Arrange::Adaptive`]).
+    /// The largest smallest size on each axis: a floor under the natural
+    /// size, and all of it in the room chosen by (see [`Arrange::Adaptive`]).
     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
-        self.smallest.first().copied().unwrap_or_default()
+        self.smallest.iter().fold(Size::default(), |floor, size| {
+            Size::new(floor.width.max(size.width), floor.height.max(size.height))
+        })
     }
 
     fn paint(&mut self, _cx: &PaintCx<'_>, _scene: &mut Scene) {}
@@ -215,15 +230,13 @@ impl Widget for Chooser {
         }
     }
 
-    fn adapt(&mut self, cx: &MeasureCx<'_>, room: Size) -> Option<Shown> {
+    fn adapt(&mut self, _cx: &MeasureCx<'_>, room: Size) -> Option<Shown> {
         // A window with no area (minimised, or not sized yet) says nothing
         // about what fits it.
         if self.count == 0 || room.width <= 0.0 || room.height <= 0.0 {
             return None;
         }
-        // Layout snaps edges to the nearest device pixel, so a room of exactly a
-        // smallest size can come out up to half a pixel short.
-        self.current = self.choose(room, 0.501 / cx.scale());
+        self.current = self.choose(room);
         self.decided = true;
         Some(Shown::Only(self.current))
     }

@@ -10,7 +10,9 @@
 //! out and drawn afresh.
 //!
 //! A modal subtree ([`UpdateCx::set_modal`](crate::UpdateCx::set_modal))
-//! is where all input goes while it is set: a dialog over the interface.
+//! is where all input goes while it is set: a dialog over the interface. A
+//! container around it hiding it does not end it, only suspends it: the
+//! dialog is still open, and is modal again when it is shown.
 
 use super::Root;
 use crate::event::{Event, MenuEvent};
@@ -25,6 +27,14 @@ pub(crate) struct Modal {
     pub(crate) node: NodeId,
     /// The widget that had the focus when it began, which gets it back.
     pub(crate) focus_before: Option<NodeId>,
+}
+
+/// A modal subtree inside a child a container hid.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Suspended {
+    modal: Modal,
+    /// The widget inside it that had the focus.
+    focus: Option<NodeId>,
 }
 
 impl Root {
@@ -59,6 +69,7 @@ impl Root {
         let end = self.tree.nodes[id].end.min(self.tree.nodes.len());
         let (mut lost_focus, mut lost_capture, mut lost_hover) = (false, false, false);
         let (mut lost_modal, mut hid) = (false, false);
+        let mut restored = None;
         for index in id + 1..end {
             let hidden = match self.tree.nodes[index].parent {
                 Some(parent) if parent.index() < index => {
@@ -89,6 +100,9 @@ impl Root {
                 }
             } else {
                 node.paint = true;
+                if let Some(found) = self.suspended.iter().position(|s| Some(s.modal.node) == at) {
+                    restored = Some(self.suspended.swap_remove(found));
+                }
             }
         }
         if lost_capture {
@@ -98,6 +112,7 @@ impl Root {
             self.capture = None;
         }
         if lost_modal {
+            self.suspend_if_around(id);
             self.end_modal();
         }
         // A floating widget gives the focus back to the widget that had it
@@ -114,6 +129,42 @@ impl Root {
             if !self.pressed {
                 self.hover_to(self.pointer);
             }
+        }
+        if let Some(restored) = restored {
+            self.resume_modal(restored);
+        }
+    }
+
+    /// The modal subtree is being hidden by container `id`. If that is not
+    /// the widget that made it modal, which ends it by hiding it, it stays
+    /// open, and is remembered.
+    fn suspend_if_around(&mut self, id: usize) {
+        let Some(modal) = self.modal else {
+            return;
+        };
+        let owner = self.tree.get(modal.node).and_then(|node| node.parent);
+        if owner == Some(NodeId::from_index(id)) {
+            return;
+        }
+        let end = self.tree.get(modal.node).map_or(0, |node| node.end);
+        let inside = |focus: &NodeId| (modal.node.index()..end).contains(&focus.index());
+        self.suspended.push(Suspended {
+            modal,
+            focus: self.focus.filter(inside),
+        });
+    }
+
+    /// A modal subtree that was hidden is shown again: it is modal again,
+    /// with the focus where it was, or on the first widget in it that takes
+    /// it.
+    fn resume_modal(&mut self, suspended: Suspended) {
+        let Suspended { modal, focus } = suspended;
+        self.begin_modal(modal);
+        let focus = focus
+            .filter(|&id| self.focusable(id))
+            .or_else(|| self.focus_within(modal.node.index()));
+        if focus.is_some() {
+            self.set_focus(focus);
         }
     }
 
@@ -172,12 +223,20 @@ impl Root {
         if self.modal.is_some() {
             self.end_modal();
         }
+        let focus_before = self.focus;
+        self.begin_modal(Modal { node, focus_before });
+    }
+
+    /// Makes `modal` the modal subtree, in place of none.
+    fn begin_modal(&mut self, modal: Modal) {
+        if self.modal.is_some() {
+            self.end_modal();
+        }
         if self.menus.is_some() {
             self.close_menus(MenuEvent::Closed);
         }
         self.quiet_tooltip();
-        let focus_before = self.focus;
-        self.modal = Some(Modal { node, focus_before });
+        self.modal = Some(modal);
         // What happens outside ends.
         if self.drag.is_some() {
             self.event(Event::PointerCancel);

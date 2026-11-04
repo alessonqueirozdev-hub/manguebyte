@@ -217,17 +217,17 @@ pub trait Widget: 'static {
 
     /// For a widget laid out as
     /// [`Arrange::Adaptive`](crate::layout::Arrange::Adaptive): which of its
-    /// children to show in `room`, the logical pixels layout has just given
-    /// them (its rectangle less its padding), or `None` to leave them as
-    /// they are. Asked after every layout, while the widget is not hidden,
-    /// before anything is drawn. A different answer hides and shows the
-    /// children as [`UpdateCx::show`] does, polls what came into sight and
-    /// lays out again, all within the frame, so no frame is drawn with the
-    /// children of the room before. The children change at most once a
-    /// frame. `room` has its edges on device pixels at [`MeasureCx::scale`], so
-    /// a comparison with a length should allow for half a device pixel.
-    /// Nothing unless overridden. [`responsive`](crate::responsive) is built
-    /// on this.
+    /// children to show in `room`, in logical pixels: the room layout has
+    /// for them (see [`rooms`](crate::layout::rooms)), which is not snapped to
+    /// device pixels and, on an axis where the widget measures itself as more
+    /// than zero, does not depend on the children it shows. Or `None` to
+    /// leave them as they are. Asked each time the interface is laid out,
+    /// while the widget is not hidden, before anything is placed or drawn. A
+    /// different answer hides and shows the children as [`UpdateCx::show`]
+    /// does, polls what came into sight and asks again, all within the frame,
+    /// so no frame is drawn with the children of the room before. The children
+    /// change at most once a frame. Nothing unless overridden.
+    /// [`responsive`](crate::responsive) is built on this.
     fn adapt(&mut self, cx: &MeasureCx<'_>, room: Size) -> Option<Shown> {
         let _ = (cx, room);
         None

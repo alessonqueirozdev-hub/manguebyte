@@ -135,9 +135,11 @@ pub enum Arrange {
     /// On top of each other, each placed in the whole area.
     Stack,
     /// As a stack, with the node's content size ([`LayoutNode::content`]) a
-    /// floor under its natural size, whatever children it shows: what
-    /// [`responsive`](crate::responsive) is laid out as, so that the room a
-    /// parent gives it does not depend on the child it is showing.
+    /// floor under its natural size, and for working out the room it has to
+    /// choose its children by ([`Widget::adapt`](crate::Widget::adapt)),
+    /// that floor in place of its children's size on each axis that has
+    /// one: what [`responsive`](crate::responsive) is laid out as, so that
+    /// its room on such an axis does not depend on the child it is showing.
     Adaptive,
     /// Through a viewport that scrolls on the axes set to `true`, as a
     /// [`scroll_view`](crate::scroll_view) does. The node's content size
@@ -406,12 +408,78 @@ pub fn solve(nodes: &[LayoutNode], root: usize, area: Rect, scale: f32) -> Vec<P
         return placements;
     }
     let order = preorder(nodes, root);
+    let rects = divide(nodes, &order, root, area, Sizing::Natural);
+    for &index in &order.nodes {
+        placements[index] = snap(rects[index], scale);
+    }
+    placements
+}
+
+/// The room each node has for its children: what [`solve`] divides its
+/// rectangle among them from, less its padding, with no edge snapped to a
+/// device pixel, so it does not depend on the scale; and with every
+/// [`Arrange::Adaptive`] node's content in place of its children's size on
+/// the axes where its content is not zero, so on those axes it does not
+/// depend on which of its children it shows. Zero for a node not reached.
+///
+/// ```
+/// use manguebyte_gfx::{Rect, Size};
+/// use manguebyte_ui::layout::{Arrange, Insets, LayoutNode, Style, rooms};
+///
+/// // A column with a header of 100 and a node with 10 of padding all round,
+/// // which shows one child of 800 and has a floor of 500.
+/// let adaptive = Style { arrange: Arrange::Adaptive, padding: Insets::all(10.0), ..Style::leaf() };
+/// let nodes = vec![
+///     LayoutNode::new(Style::column(), Size::default(), vec![1, 2]),
+///     LayoutNode::leaf(Style::leaf(), Size::new(10.0, 100.0)),
+///     LayoutNode::new(adaptive, Size::new(0.0, 500.0), vec![3]),
+///     LayoutNode::leaf(Style::leaf(), Size::new(10.0, 800.0)),
+/// ];
+/// let room = rooms(&nodes, 0, Rect::new(0.0, 0.0, 200.0, 2000.0))[2];
+/// // Its floor: not 800. And across, what there is.
+/// assert_eq!(room, Size::new(180.0, 500.0));
+/// ```
+pub fn rooms(nodes: &[LayoutNode], root: usize, area: Rect) -> Vec<Size> {
+    let mut rooms = vec![Size::default(); nodes.len()];
+    if root >= nodes.len() {
+        return rooms;
+    }
+    let order = preorder(nodes, root);
+    let rects = divide(nodes, &order, root, area, Sizing::Floors);
+    for &index in &order.nodes {
+        let padding = nodes[index].style.padding.cleaned();
+        rooms[index] = Size::new(
+            length(rects[index].width - padding.left - padding.right),
+            length(rects[index].height - padding.top - padding.bottom),
+        );
+    }
+    rooms
+}
+
+/// What an [`Arrange::Adaptive`] node's natural size is taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sizing {
+    /// Its children, with its content as a floor: where it is placed.
+    Natural,
+    /// Its content where that is not zero: the room it chooses by.
+    Floors,
+}
+
+/// Works out every node's rectangle, before any edge is snapped: natural
+/// sizes come up, rectangles go down.
+fn divide(
+    nodes: &[LayoutNode],
+    order: &Order,
+    root: usize,
+    area: Rect,
+    sizing: Sizing,
+) -> Vec<Rect> {
     let mut natural = vec![Size::default(); nodes.len()];
     let mut rects = vec![Rect::default(); nodes.len()];
     // Children come after their parents, so going backwards measures each
     // child before its parent.
     for &index in order.nodes.iter().rev() {
-        natural[index] = measure(nodes, &order, index, &natural);
+        natural[index] = measure(nodes, order, index, &natural, sizing);
     }
     rects[root] = clean_rect(area);
     let mut tracks = Vec::new();
@@ -419,7 +487,7 @@ pub fn solve(nodes: &[LayoutNode], root: usize, area: Rect, scale: f32) -> Vec<P
     for &index in &order.nodes {
         arrange(
             nodes,
-            &order,
+            order,
             index,
             &natural,
             &mut rects,
@@ -427,10 +495,7 @@ pub fn solve(nodes: &[LayoutNode], root: usize, area: Rect, scale: f32) -> Vec<P
             &mut sizes,
         );
     }
-    for &index in &order.nodes {
-        placements[index] = snap(rects[index], scale);
-    }
-    placements
+    rects
 }
 
 /// The size the tree under `root` asks for: its natural size, as [`solve`]
@@ -457,7 +522,7 @@ pub fn natural_size(nodes: &[LayoutNode], root: usize) -> Size {
     let order = preorder(nodes, root);
     let mut natural = vec![Size::default(); nodes.len()];
     for &index in order.nodes.iter().rev() {
-        natural[index] = measure(nodes, &order, index, &natural);
+        natural[index] = measure(nodes, &order, index, &natural, Sizing::Natural);
     }
     natural[root]
 }
@@ -553,7 +618,13 @@ fn limits(style: &Style) -> (Size, Size) {
 }
 
 /// The natural size of `index`, its children's already known.
-fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) -> Size {
+fn measure(
+    nodes: &[LayoutNode],
+    order: &Order,
+    index: usize,
+    natural: &[Size],
+    sizing: Sizing,
+) -> Size {
     let node = &nodes[index];
     let style = &node.style;
     let padding = style.padding.cleaned();
@@ -599,10 +670,20 @@ fn measure(nodes: &[LayoutNode], order: &Order, index: usize, natural: &[Size]) 
             width + padding.left + padding.right,
             height + padding.top + padding.bottom,
         ),
-        Arrange::Adaptive => (
-            width.max(length(node.content.width)) + padding.left + padding.right,
-            height.max(length(node.content.height)) + padding.top + padding.bottom,
-        ),
+        Arrange::Adaptive => {
+            let along = |children: f32, floor: f32| {
+                let floor = length(floor);
+                if sizing == Sizing::Floors && floor > 0.0 {
+                    floor
+                } else {
+                    children.max(floor)
+                }
+            };
+            (
+                along(width, node.content.width) + padding.left + padding.right,
+                along(height, node.content.height) + padding.top + padding.bottom,
+            )
+        }
         Arrange::Scroll { x, y } => {
             let (bar_x, bar_y) = bars(node, x, y);
             (
@@ -997,7 +1078,7 @@ mod tests {
         assert_eq!(order.nodes, [0, 1, 2, 3]);
         let mut natural = vec![Size::default(); 4];
         for &index in order.nodes.iter().rev() {
-            natural[index] = measure(&nodes, &order, index, &natural);
+            natural[index] = measure(&nodes, &order, index, &natural, Sizing::Natural);
         }
         // 10 + 20 + 30, two gaps of 5, padding 1 and 3; 9 tall plus 2 and 4.
         assert_eq!(natural[0], Size::new(74.0, 15.0));

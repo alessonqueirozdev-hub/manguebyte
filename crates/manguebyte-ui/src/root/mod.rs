@@ -173,8 +173,11 @@ pub struct Root {
     /// The device pixels that widgets taken away since the last frame
     /// covered (closed menus), drawn again then.
     removed: Vec<IRect>,
-    /// Where the pointer was last.
+    /// Where the pointer was last; `None` once it has left.
     pointer: Option<Point>,
+    /// The interface changed under the pointer: what it hovers is worked
+    /// out again in the next frame, before drawing.
+    rehover: bool,
     /// The widget under the pointer while no button is held.
     hover: Option<NodeId>,
     /// A button is held: the hovered widget stays as it is until it is let
@@ -186,6 +189,9 @@ pub struct Root {
     drag: Option<drag::DragState>,
     /// The subtree that has all input, if any (see `UpdateCx::set_modal`).
     modal: Option<pages::Modal>,
+    /// Modal subtrees inside a child a container hides, which are modal
+    /// again when it shows them.
+    suspended: Vec<pages::Suspended>,
     /// The floating widgets (see `UpdateCx::float_at`), back to front.
     floats: Vec<NodeId>,
     /// The interface's own widgets in drawing order, as runs of the arena:
@@ -346,12 +352,14 @@ impl Root {
             menus: None,
             removed: Vec::new(),
             pointer: None,
+            rehover: false,
             hover: None,
             pressed: false,
             tip: None,
             tip_quiet: None,
             drag: None,
             modal: None,
+            suspended: Vec::new(),
             floats: Vec::new(),
             order: Vec::new(),
             last_press: None,
@@ -447,6 +455,16 @@ impl Root {
     /// pixels (see [`set_origin`](Root::set_origin)).
     pub fn origin(&self) -> (i32, i32) {
         self.origin
+    }
+
+    /// Says that the interface moved under a pointer that did not move, for
+    /// a window layer that changes the scale or the origin: `at` is where the
+    /// pointer now is in the interface's logical pixels, or `None` if it is
+    /// not over the window. What it hovers follows in the next frame, unless
+    /// a button is held. Nothing else hears of it.
+    pub fn set_pointer(&mut self, at: Option<Point>) {
+        self.pointer = at.filter(|at| at.is_finite());
+        self.rehover = true;
     }
 
     /// `rect`, device pixels of the back buffer, in device pixels of the
@@ -1142,6 +1160,11 @@ impl Root {
         if let Some(at) = event.position().filter(|at| at.is_finite()) {
             self.pointer = Some(at);
         }
+        if matches!(event, Event::PointerLeave) {
+            // Nothing is under a pointer that is not there, whatever comes
+            // to be where it last was.
+            self.pointer = None;
+        }
         match event {
             Event::PointerDown { at, .. } => {
                 self.pressed = true;
@@ -1329,6 +1352,9 @@ impl Root {
         } else if self.drag.as_ref().is_some_and(|drag| drag.moved) {
             self.place_ghost();
         }
+        if std::mem::take(&mut self.rehover) && !self.pressed && self.menus.is_none() {
+            self.hover_to(self.pointer);
+        }
         let animating = polled.animating;
         let painted = self.paint();
         if !self.damage.is_empty() {
@@ -1504,34 +1530,39 @@ impl Root {
     fn layout(&mut self, elapsed: Duration, polled: &mut Polled) {
         let mut adapted = Vec::new();
         let area = Rect::new(0.0, 0.0, self.size.width, self.size.height);
-        let placed = loop {
+        let main = self.tree.main;
+        let adaptive = self.tree.layout[..main]
+            .iter()
+            .any(|item| item.style.arrange == layout::Arrange::Adaptive);
+        loop {
             self.needs_layout = false;
             self.measure_widgets();
-            let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
-            if !self.adapt_children(&placed, &mut adapted, elapsed, polled) {
-                break placed;
+            if !adaptive {
+                break;
             }
-        };
+            let rooms = layout::rooms(&self.tree.layout, 0, area);
+            if !self.adapt_children(&rooms, &mut adapted, elapsed, polled) {
+                break;
+            }
+        }
+        let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
         // The interface's own widgets; what is over them is placed after.
         self.place_main(&placed);
         self.place_menus();
         self.place_tooltip();
         self.place_ghost();
         // What is under the pointer may be something else now.
-        if !adapted.is_empty() && !self.pressed {
-            self.hover_to(self.pointer);
-        }
+        self.rehover |= !adapted.is_empty();
     }
 
     /// Asks the widgets laid out as
     /// [`Arrange::Adaptive`](layout::Arrange::Adaptive) which children to
-    /// show in the room `placed` gives them, outermost first, and acts on
-    /// the first different answer from a widget not yet in `adapted`, those
-    /// that changed in this frame. Returns whether one did: the rooms in
-    /// `placed` then no longer hold.
+    /// show in their `rooms`, outermost first, and acts on the first different
+    /// answer from a widget not yet in `adapted`, those that changed in this
+    /// frame. Returns whether one did: `rooms` then no longer hold.
     fn adapt_children(
         &mut self,
-        placed: &[Placement],
+        rooms: &[Size],
         adapted: &mut Vec<usize>,
         elapsed: Duration,
         polled: &mut Polled,
@@ -1540,7 +1571,7 @@ impl Root {
             theme: &self.theme,
             scale: self.scale,
         };
-        let main = self.tree.main.min(placed.len());
+        let main = self.tree.main.min(rooms.len());
         let mut change = None;
         for (index, node) in self.tree.nodes[..main].iter_mut().enumerate() {
             let style = &self.tree.layout[index].style;
@@ -1550,7 +1581,7 @@ impl Root {
             if adapted.contains(&index) {
                 continue;
             }
-            let room = placed[index].inset(style.padding, self.scale).rect.size();
+            let room = rooms[index];
             if let Some(shown) = node.widget.adapt(&cx, room).filter(|&s| s != node.shown) {
                 change = Some((index, shown));
                 break;

@@ -9,16 +9,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use manguebyte_gfx::snapshot::Snapshots;
-use manguebyte_gfx::{Color, Scene, Size};
+use manguebyte_gfx::{Color, Point, Scene, Size};
 use manguebyte_params::{FloatParam, FloatRange, Param, param_set};
 use manguebyte_plugin::editor::testing::HostCall;
 use manguebyte_ui::access::AccessNode;
 use manguebyte_ui::layout::{Align, Arrange, Style};
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    AccessCx, IntoView, MeasureCx, PaintCx, ParamHandle, RESPONSIVE_MARGIN, Role, Shown, State,
-    UpdateCx, View, Widget, card, column, combo, knob, label, responsive, row, scroll_view, tabs,
-    text_field,
+    AccessCx, DialogState, Event, IntoView, Key, MeasureCx, PaintCx, ParamHandle,
+    RESPONSIVE_MARGIN, Role, Shown, State, TOOLTIP_DELAY, Theme, UpdateCx, View, Widget,
+    action_button, canvas, card, column, combo, confirm_dialog, knob, label, responsive, row,
+    scroll_view, tabs, text_field,
 };
 
 /// How often a [`Probe`] was asked to do things, and whether it was dropped.
@@ -596,6 +597,298 @@ fn a_widget_of_ones_own_can_choose_its_children_by_room() {
     ui.resize(Size::new(350.0, 40.0), 1.0);
     ui.frame();
     assert!(shows(&ui, "C"));
+}
+
+#[test]
+fn a_switch_after_the_pointer_left_hovers_nothing() {
+    // As in any drag of a window's border: the pointer leaves the interface,
+    // then the room changes.
+    let view = responsive((
+        label("Wide").tooltip("Help for the wide layout"),
+        label("Narrow").tooltip("Help for the narrow layout"),
+    ))
+    .below(Size::new(300.0, 0.0));
+    let mut ui = Harness::new(view, Size::new(400.0, 100.0), 1.0);
+    ui.frame();
+    // Where the narrow layout will be too.
+    ui.move_to(Point::new(50.0, 50.0));
+    assert!(ui.root().hovered().is_some());
+    ui.send(Event::PointerLeave);
+    assert_eq!(ui.root().hovered(), None);
+
+    ui.resize(Size::new(200.0, 100.0), 1.0);
+    ui.frame();
+    assert!(shows(&ui, "Narrow"));
+    assert_eq!(ui.root().hovered(), None, "nothing is under no pointer");
+    ui.advance(TOOLTIP_DELAY * 2);
+    assert!(
+        ui.find(Role::Tooltip, "Help for the narrow layout")
+            .is_none(),
+        "a tooltip for a pointer that is not there"
+    );
+}
+
+#[test]
+fn a_pointer_that_stays_hovers_what_comes_under_it() {
+    let view = responsive((label("Wide"), label("Narrow"))).below(Size::new(300.0, 0.0));
+    let mut ui = Harness::new(view, Size::new(400.0, 100.0), 1.0);
+    ui.frame();
+    ui.move_to(Point::new(50.0, 50.0));
+    ui.resize(Size::new(200.0, 100.0), 1.0);
+    ui.frame();
+    assert_eq!(ui.root().hovered(), Some(ui.get(Role::Label, "Narrow").id));
+}
+
+/// A console with a dialog over it, as the first of two layouts.
+fn console_with_dialog(ask: &DialogState) -> View {
+    responsive((
+        column((action_button("Behind"), action_button("Also behind"))).with_dialog(
+            confirm_dialog(ask.clone(), "Discard?", "It cannot be undone."),
+        ),
+        action_button("Narrow"),
+    ))
+    .below(Size::new(300.0, 0.0))
+    .into_view()
+}
+
+fn focused_name(ui: &Harness) -> Option<String> {
+    ui.focused().map(|found| found.name().to_owned())
+}
+
+#[test]
+fn an_open_dialog_is_modal_again_when_its_child_comes_back() {
+    let ask = DialogState::new();
+    let mut ui = Harness::new(console_with_dialog(&ask), Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    ask.open();
+    ui.frame();
+    assert!(ui.root().modal().is_some());
+    // The focus is moved off the default button, to see it come back.
+    assert!(ui.tab());
+    let had_focus = focused_name(&ui);
+    assert_eq!(had_focus.as_deref(), Some("Cancel"));
+
+    // Away: nothing of the console is there, and the narrow layout is not
+    // held by a dialog it cannot see.
+    ui.resize(Size::new(200.0, 300.0), 1.0);
+    ui.frame();
+    assert!(ui.find(Role::Dialog, "Discard?").is_none());
+    assert_eq!(ui.root().modal(), None);
+    assert!(ask.is_open(), "only hidden, not answered");
+    ui.tab();
+    assert_eq!(focused_name(&ui).as_deref(), Some("Narrow"));
+
+    // And back: drawn open, and modal, with the focus where it was.
+    ui.resize(Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    assert!(ui.find(Role::Dialog, "Discard?").is_some());
+    assert!(ui.root().modal().is_some(), "a dialog that traps nothing");
+    assert_eq!(focused_name(&ui), had_focus);
+    for _ in 0..4 {
+        assert!(ui.tab());
+        let name = focused_name(&ui);
+        assert!(
+            name.as_deref() != Some("Behind") && name.as_deref() != Some("Also behind"),
+            "Tab reached {name:?} under the scrim"
+        );
+    }
+    let behind = ui.get(Role::Button, "Behind");
+    assert!(!ui.root_mut().set_focus_to(Some(behind.id)));
+    assert!(ui.key(Key::Function(5)), "every key is the dialog's");
+
+    // It ends as a dialog ends.
+    assert!(ui.key(Key::Escape));
+    assert!(!ask.is_open());
+    ui.frame();
+    assert_eq!(ui.root().modal(), None);
+    assert!(ui.find(Role::Dialog, "Discard?").is_none());
+    assert!(!ui.key(Key::Function(5)), "keys go to the host again");
+}
+
+#[test]
+fn a_dialog_answered_while_its_child_is_hidden_is_not_modal_when_it_comes_back() {
+    let ask = DialogState::new();
+    let mut ui = Harness::new(console_with_dialog(&ask), Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    ask.open();
+    ui.frame();
+    ui.resize(Size::new(200.0, 300.0), 1.0);
+    ui.frame();
+    ask.answer(manguebyte_ui::DialogResult::Cancelled);
+    ui.frame();
+    ui.resize(Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    assert_eq!(ui.root().modal(), None);
+    assert!(ui.find(Role::Dialog, "Discard?").is_none());
+    assert!(ui.pixels() == &ui.render_fresh());
+}
+
+#[test]
+fn a_dialog_that_closes_itself_is_not_brought_back_by_a_later_switch() {
+    let ask = DialogState::new();
+    let mut ui = Harness::new(console_with_dialog(&ask), Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    ask.open();
+    ui.frame();
+    assert!(ui.key(Key::Escape));
+    ui.frame();
+    assert_eq!(ui.root().modal(), None);
+    ui.resize(Size::new(200.0, 300.0), 1.0);
+    ui.frame();
+    ui.resize(Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    assert_eq!(ui.root().modal(), None);
+}
+
+#[test]
+fn each_layout_keeps_its_own_open_dialog() {
+    let (first, second) = (DialogState::new(), DialogState::new());
+    let view = responsive((
+        action_button("Wide").with_dialog(confirm_dialog(first.clone(), "First?", "One.")),
+        action_button("Narrow").with_dialog(confirm_dialog(second.clone(), "Second?", "Two.")),
+    ))
+    .below(Size::new(300.0, 0.0));
+    let mut ui = Harness::new(view, Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    first.open();
+    ui.frame();
+    assert!(ui.find(Role::Dialog, "First?").is_some());
+    ui.resize(Size::new(200.0, 300.0), 1.0);
+    ui.frame();
+    second.open();
+    ui.frame();
+    let narrow = ui.root().modal().expect("the second dialog");
+    assert!(ui.find(Role::Dialog, "Second?").is_some());
+
+    ui.resize(Size::new(400.0, 300.0), 1.0);
+    ui.frame();
+    let wide = ui.root().modal().expect("the first dialog");
+    assert_ne!(wide, narrow);
+    assert!(ui.find(Role::Dialog, "First?").is_some());
+    ui.resize(Size::new(200.0, 300.0), 1.0);
+    ui.frame();
+    assert_eq!(ui.root().modal(), Some(narrow));
+}
+
+/// A canvas of `height` natural pixels, that draws nothing.
+fn tall(name: &'static str, height: f32) -> View {
+    canvas(name, Size::new(10.0, height), |_, _| {}).into_view()
+}
+
+#[test]
+fn the_choice_does_not_depend_on_the_child_showing_however_often_it_is_laid_out() {
+    // A column with no weight, too short for what is in it: what each child
+    // gets depends on what the children ask for.
+    let view = column((
+        tall("Header", 100.0),
+        responsive((tall("Small", 100.0), tall("Large", 800.0))).below(Size::new(0.0, 500.0)),
+    ));
+    let mut ui = Harness::new(view, Size::new(200.0, 580.0), 1.0);
+    let mut seen = Vec::new();
+    for round in 0..8 {
+        // Anything that lays the interface out again.
+        ui.set_theme(if round % 2 == 0 {
+            Theme::light()
+        } else {
+            Theme::dark()
+        });
+        assert!(ui.frame().laid_out);
+        let small = ui.find(Role::Image, "Small").is_some();
+        let large = ui.find(Role::Image, "Large").is_some();
+        assert!(small != large);
+        seen.push(small);
+    }
+    assert!(
+        seen.iter().all(|&small| small == seen[0]),
+        "it flips with each layout: {seen:?}"
+    );
+}
+
+#[test]
+fn the_choice_stays_on_an_axis_only_a_later_child_has_a_smallest_size_on() {
+    // The first child asks for height, the second for width; the row is too
+    // narrow for what is in it.
+    let wide = |name: &'static str, width: f32| {
+        canvas(name, Size::new(width, 10.0), |_, _| {}).into_view()
+    };
+    let view = row((
+        wide("Sidebar", 100.0),
+        responsive((
+            wide("First", 100.0),
+            wide("Second", 100.0),
+            wide("Third", 800.0),
+        ))
+        .below(Size::new(0.0, 500.0))
+        .below(Size::new(500.0, 0.0)),
+    ));
+    let mut ui = Harness::new(view, Size::new(580.0, 300.0), 1.0);
+    let mut seen = Vec::new();
+    for round in 0..8 {
+        ui.set_theme(if round % 2 == 0 {
+            Theme::light()
+        } else {
+            Theme::dark()
+        });
+        ui.frame();
+        seen.push(ui.find(Role::Image, "Second").is_some());
+    }
+    assert!(
+        seen.iter().all(|&second| second == seen[0]),
+        "it flips with each layout: {seen:?}"
+    );
+}
+
+#[test]
+fn a_child_given_more_than_its_smallest_size_keeps_its_natural_size() {
+    // What decides is the smallest size, and what is placed is the natural
+    // size of the child that shows.
+    let view = column((
+        responsive((tall("Large", 400.0), tall("Small", 100.0))).below(Size::new(0.0, 300.0)),
+        tall("Footer", 20.0),
+    ));
+    let mut ui = Harness::new(view, Size::new(200.0, 500.0), 1.0);
+    ui.frame();
+    assert_eq!(ui.get(Role::Image, "Large").bounds.height, 400.0);
+    // No room for that, and still for the smallest size.
+    ui.resize(Size::new(200.0, 330.0), 1.0);
+    ui.frame();
+    assert!(ui.find(Role::Image, "Large").is_some());
+}
+
+#[test]
+fn a_room_cut_short_by_rounding_its_two_edges_still_fits() {
+    // At 0.64875 a header of 41 ends at 26.6, snapped to 27, and the window
+    // of 981 at 636.4, snapped to 636: 609 device pixels are 938.73 logical,
+    // for a room that is exactly 940.
+    let view = column((
+        label("Header").height(41.0),
+        responsive((label("Wide"), label("Narrow")))
+            .below(Size::new(0.0, 940.0))
+            .margin(0.0)
+            .flex(1.0),
+    ));
+    let mut ui = Harness::new(view, Size::new(1600.0, 981.0), 0.64875);
+    ui.frame();
+    assert!(shows(&ui, "Wide"));
+
+    // Its own padding, which takes a second rounding.
+    for scale in [0.64875_f32, 0.7, 0.77, 1.3, 1.37] {
+        let view = column((
+            label("Header").height(41.0),
+            responsive((label("Wide"), label("Narrow")))
+                .below(Size::new(0.0, 900.0))
+                .margin(0.0)
+                .padding(20.0)
+                .flex(1.0),
+        ));
+        let mut ui = Harness::new(view, Size::new(1600.0, 981.0), scale);
+        ui.frame();
+        assert!(shows(&ui, "Wide"), "at {scale}");
+        // And a pixel less does not.
+        ui.resize(Size::new(1600.0, 980.0), scale);
+        ui.frame();
+        assert!(shows(&ui, "Narrow"), "at {scale}");
+    }
 }
 
 fn snapshots() -> Snapshots {
