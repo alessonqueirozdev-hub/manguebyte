@@ -10,7 +10,7 @@
 //!
 //! On macOS the functions are CoreFoundation's and AudioToolbox's own. On
 //! every other system the same names are a small stand-in written in Rust
-//! ([`fake_cf`](super::fake_cf)), with the same signatures, so that the
+//! (`fake_cf`), with the same signatures, so that the
 //! wrapper is built and tested through its C interface everywhere; only a
 //! Mac can load the component.
 

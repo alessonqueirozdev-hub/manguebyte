@@ -463,6 +463,9 @@ jobs:
       # lists) is linted here too: no other job compiles it.
       - run: cargo clippy -p manguebyte-au -p manguebyte-host -p mangue-pluck -p mangue-duck -p mangue-divisions --all-targets
       - run: cargo test -p manguebyte-au
+      # Docs link items that exist on one system only; build them here too, so
+      # a link that resolves on Linux but not on a Mac fails CI (issue #28).
+      - run: cargo doc --workspace --no-deps
       # An instrument and an effect with a sidechain, installed where hosts
       # look, so that Apple's own validator finds them by their codes.
       - run: cargo run -p cargo-mangue -- mangue install -p mangue-pluck --format au --release
