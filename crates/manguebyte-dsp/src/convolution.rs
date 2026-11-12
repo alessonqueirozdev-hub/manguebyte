@@ -34,6 +34,18 @@
 //! complete only its own transforms and one product are left. With host
 //! blocks smaller than a partition, no block carries the whole sum.
 //!
+//! [`ConvolutionSettings::with_non_uniform_partitions`] asks for a scheme
+//! that is cheaper on long responses: after the first partitions the size
+//! doubles from band to band, so taps `[s, 2s)` of the response are
+//! convolved in partitions of `s`, up to a largest size where the tail runs
+//! on. Each band is a uniform convolution of its own, all computed on the
+//! audio thread as everything here is: the bands' boundaries are staggered
+//! half a period apart, so at most one band's forward transform and one
+//! band's inverse transform land in a block of `partition_size` samples,
+//! and the inverse is deferred to the block after the boundary. The output
+//! stays the same bit for bit however the host slices the blocks, and the
+//! latency is the same as the uniform scheme's.
+//!
 //! [`Convolution`] is the processor to put in a chain. It runs one engine
 //! and takes a new one from a [`ConvolutionLoader`] on another thread, with
 //! an optional crossfade, and sends the old one back to be dropped there. The
@@ -101,6 +113,7 @@ pub const MAX_LOADER_CAPACITY: usize = 1_024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConvolutionSettings {
     partition_size: usize,
+    largest_partition_size: usize,
     zero_latency: bool,
 }
 
@@ -115,6 +128,7 @@ impl ConvolutionSettings {
     pub const fn new() -> Self {
         Self {
             partition_size: 128,
+            largest_partition_size: 128,
             zero_latency: true,
         }
     }
@@ -126,9 +140,36 @@ impl ConvolutionSettings {
     /// partition mode they also mean less latency. In zero-latency mode the
     /// first partition is convolved directly, which costs `partition_size`
     /// multiplications per sample and channel.
+    ///
+    /// With non-uniform partitions this is the size of the first, smallest
+    /// partitions, which the cost of short responses and of the direct head
+    /// follows. While the scheme is uniform, the largest partition follows
+    /// this size.
     #[must_use]
     pub const fn with_partition_size(mut self, frames: usize) -> Self {
+        if self.largest_partition_size == self.partition_size {
+            self.largest_partition_size = frames;
+        }
         self.partition_size = frames;
+        self
+    }
+
+    /// Lets the partition size grow past the first partitions, doubling
+    /// from band to band up to `largest` samples: response taps `[s, 2s)`
+    /// are convolved in partitions of `s`. `largest` must be a power of
+    /// two at least twice `partition_size`, up to [`MAX_PARTITION_SIZE`];
+    /// equal to `partition_size` (the default) is the uniform scheme.
+    ///
+    /// For a long response the tail is convolved in a few large partitions
+    /// instead of hundreds of small ones, which is cheaper per sample at
+    /// small block sizes. The latency is unchanged. The price is that the
+    /// largest transforms still land inside one block each, so the busiest
+    /// block grows with `largest`; the work is staggered so that at most
+    /// one band of partitions starts and one ends in any block of
+    /// `partition_size` samples.
+    #[must_use]
+    pub const fn with_non_uniform_partitions(mut self, largest: usize) -> Self {
+        self.largest_partition_size = largest;
         self
     }
 
@@ -140,9 +181,15 @@ impl ConvolutionSettings {
         self
     }
 
-    /// The partition size in samples.
+    /// The size of the first, smallest partitions, in samples.
     pub const fn partition_size(&self) -> usize {
         self.partition_size
+    }
+
+    /// The largest partition in samples: `partition_size` when the scheme
+    /// is uniform.
+    pub const fn largest_partition_size(&self) -> usize {
+        self.largest_partition_size
     }
 
     /// Whether the first partition is convolved directly, for no latency.
@@ -219,6 +266,59 @@ struct Kernel<S> {
     partitions: Vec<S>,
 }
 
+/// One band of partitions of equal size in a non-uniform scheme: a uniform
+/// convolution on its own, covering `partitions` response partitions of
+/// `size` samples each. The band right below convolves the earlier taps in
+/// partitions half the size, so the bands tile the response without gaps;
+/// the last, largest band runs on to the end of the response.
+///
+/// A band's boundary, where a partition of input completes, lands on a
+/// different block than any other band's: band `i` starts half a period
+/// late, so its boundaries fall `size / 2` samples after a boundary of
+/// every smaller band. Two boundary jobs are split between two blocks of
+/// `partition_size` samples: the forward transform of the input just
+/// completed runs at the boundary, and the last product and the inverse
+/// transform run one block later, before the new `pending` is first read.
+#[derive(Clone)]
+struct Band<S: Sample> {
+    /// The partition size of this band.
+    size: usize,
+    /// Frequency bins of the size-2·`size` transform: `size + 1`.
+    bins: usize,
+    /// Response partitions this band covers.
+    partitions: usize,
+    fft: RealFft<S>,
+    /// Per response, the spectra of its partitions of this band, as
+    /// interleaved real and imaginary parts.
+    kernels: Vec<Vec<S>>,
+    /// Per input channel, `2 * size` samples: the previous partition of
+    /// input, then the current one as it fills.
+    frames: Vec<S>,
+    /// Per input channel, the spectra of the last `partitions` input
+    /// frames, as a ring, as interleaved real and imaginary parts.
+    spectra: Vec<S>,
+    /// Per output channel, the partition of output computed last, played
+    /// out while the next one fills.
+    pending: Vec<S>,
+    /// Per output channel, the spectrum of the next partition of output,
+    /// as far as it has been summed, as interleaved real and imaginary
+    /// parts.
+    accumulators: Vec<S>,
+    /// One spectrum, for the transforms.
+    spectrum: Vec<Complex<S>>,
+    time: Vec<S>,
+    /// How much of the current partition has been filled.
+    fill: usize,
+    /// Where in the ring of spectra the newest one goes.
+    position: usize,
+    /// How many of the older partitions (1, 2, ...) have been added to
+    /// `accumulators` for the next partition of output.
+    summed: usize,
+    /// Whether the last boundary's product and inverse transform are still
+    /// owed before `pending` is read.
+    inverse_due: bool,
+}
+
 /// Which input reaches which output through which kernel.
 #[derive(Debug, Clone, Copy)]
 struct Path {
@@ -289,6 +389,106 @@ pub struct ConvolutionEngine<S: Sample = f32> {
     /// How many of the older partitions (1, 2, ...) have been added to
     /// `accumulators` for the next partition of output.
     summed: usize,
+    /// The bands of larger partitions a non-uniform scheme uses past the
+    /// first partition, in order of size. Empty in the uniform scheme.
+    bands: Vec<Band<S>>,
+}
+
+impl<S: Sample> Band<S> {
+    /// Adds the older partitions' share of the next output, in proportion
+    /// to how much of the current partition has been filled, exactly as the
+    /// smallest partitions' `sum_ahead` does.
+    fn sum_ahead(&mut self, paths: &[Path]) {
+        if self.partitions < 2 {
+            return;
+        }
+        let older = (self.partitions - 1) as u64;
+        // Below `older * size`, so it fits.
+        let due = (older * self.fill as u64 / self.size as u64) as usize;
+        self.sum_partitions(due, paths);
+    }
+
+    /// Adds partitions `summed + 1` to `upto` of the response band to the
+    /// next output, as `sum_partitions` does for the smallest partitions.
+    fn sum_partitions(&mut self, upto: usize, paths: &[Path]) {
+        let (bins, count) = (self.bins, self.partitions);
+        while self.summed < upto {
+            let partition = self.summed + 1;
+            let slot = (self.position + count - partition) % count;
+            let len = 2 * bins;
+            for path in paths {
+                let input = &self.spectra[(path.input * count + slot) * len..][..len];
+                let response = &self.kernels[path.kernel][partition * len..][..len];
+                let sum = &mut self.accumulators[path.output * len..][..len];
+                vector::complex_multiply_add(sum, input, response);
+            }
+            self.summed += 1;
+        }
+    }
+
+    /// Advances by `count` samples of input already recorded, doing the
+    /// boundary work when a partition completes: whatever is left of the
+    /// older partitions' share, then the forward transform, whose spectrum
+    /// goes to the ring. The last product and the inverse transform are
+    /// owed to the next block (`inverse_due`), so two transforms of the
+    /// band's size never land in one block.
+    fn advance(&mut self, count: usize, paths: &[Path]) {
+        self.fill += count;
+        if self.fill == self.size {
+            self.sum_partitions(self.partitions - 1, paths);
+            let len = 2 * self.bins;
+            for (channel, frame) in self.frames.chunks_exact(2 * self.size).enumerate() {
+                self.fft.forward(frame, &mut self.spectrum);
+                let slot =
+                    &mut self.spectra[(channel * self.partitions + self.position) * len..][..len];
+                split_parts(&self.spectrum, slot);
+            }
+            for frame in self.frames.chunks_exact_mut(2 * self.size) {
+                frame.copy_within(self.size.., 0);
+            }
+            self.fill = 0;
+            self.inverse_due = true;
+        } else {
+            self.sum_ahead(paths);
+        }
+    }
+
+    /// The work deferred to the block after a boundary: the newest input
+    /// spectrum meets the band's first partition, and the sum goes back to
+    /// the time domain to be played out from this block on.
+    fn finish_pending(&mut self, paths: &[Path]) {
+        let len = 2 * self.bins;
+        for path in paths {
+            let input =
+                &self.spectra[(path.input * self.partitions + self.position) * len..][..len];
+            let response = &self.kernels[path.kernel][..len];
+            let sum = &mut self.accumulators[path.output * len..][..len];
+            vector::complex_multiply_add(sum, input, response);
+        }
+        for (output, sum) in self.accumulators.chunks_exact_mut(len).enumerate() {
+            join_parts(sum, &mut self.spectrum);
+            self.fft.inverse(&self.spectrum, &mut self.time);
+            self.pending[output * self.size..][..self.size]
+                .copy_from_slice(&self.time[self.size..]);
+            sum.fill(S::ZERO);
+        }
+        self.summed = 0;
+        self.position = (self.position + 1) % self.partitions;
+        self.inverse_due = false;
+    }
+
+    /// Forgets all past input, and puts the boundary back half a period
+    /// after every smaller band's, where the staggering wants it.
+    fn clear(&mut self) {
+        self.frames.fill(S::ZERO);
+        self.spectra.fill(S::ZERO);
+        self.pending.fill(S::ZERO);
+        self.accumulators.fill(S::ZERO);
+        self.fill = self.size / 2;
+        self.position = 0;
+        self.summed = 0;
+        self.inverse_due = false;
+    }
 }
 
 impl<S: Sample> fmt::Debug for ConvolutionEngine<S> {
@@ -296,7 +496,8 @@ impl<S: Sample> fmt::Debug for ConvolutionEngine<S> {
         f.debug_struct("ConvolutionEngine")
             .field("channels", &self.channels)
             .field("partition_size", &self.block)
-            .field("partitions", &self.num_partitions)
+            .field("largest_partition_size", &self.largest_partition_size())
+            .field("partitions", &self.num_partitions())
             .field("response_len", &self.response_len)
             .field("latency", &self.latency())
             .finish_non_exhaustive()
@@ -325,6 +526,12 @@ impl<S: Sample> ConvolutionEngine<S> {
         let block = settings.partition_size;
         if !block.is_power_of_two() || block > MAX_PARTITION_SIZE {
             return Err(ConvolutionError::PartitionSize(block));
+        }
+        let largest = settings.largest_partition_size;
+        if largest != block
+            && (!largest.is_power_of_two() || largest < 2 * block || largest > MAX_PARTITION_SIZE)
+        {
+            return Err(ConvolutionError::PartitionSize(largest));
         }
         let count_error = ConvolutionError::ChannelCount {
             responses: responses.len(),
@@ -383,7 +590,15 @@ impl<S: Sample> ConvolutionEngine<S> {
         } else {
             0
         };
-        let num_partitions = (response_len - head_len).div_ceil(block);
+        let non_uniform = largest != block;
+        // In a non-uniform scheme the first, smallest partitions cover one
+        // partition of the response after the head; the bands take over
+        // from there.
+        let num_partitions = if non_uniform {
+            (response_len - head_len).div_ceil(block).min(1)
+        } else {
+            (response_len - head_len).div_ceil(block)
+        };
         let bins = block + 1;
         let mut fft = RealFft::<S>::new(2 * block);
 
@@ -409,6 +624,75 @@ impl<S: Sample> ConvolutionEngine<S> {
             })
             .collect();
 
+        // The bands of a non-uniform scheme: partitions doubling in size
+        // from `2 * block` to `largest`. The first tap of a band sits
+        // `delta` samples before its size: at `size` in zero-latency mode,
+        // where the direct head covers the first `block` taps and the
+        // bands the rest, and at `size - block` in partition mode, where
+        // every band's output is late by the same `block` as the smallest
+        // partitions'. A middle band covers exactly one partition, up to
+        // where the band twice its size begins; the largest band runs on
+        // to the end of the response.
+        let delta = block - head_len;
+        let mut bands = Vec::new();
+        if non_uniform {
+            let mut size = 2 * block;
+            while size <= largest {
+                let offset = size - delta;
+                if offset >= response_len {
+                    break;
+                }
+                let end = if 2 * size <= largest {
+                    (2 * size - delta).min(response_len)
+                } else {
+                    response_len
+                };
+                let partitions = (end - offset).div_ceil(size);
+                let bins = size + 1;
+                let mut fft = RealFft::<S>::new(2 * size);
+                let mut frame = vec![S::ZERO; 2 * size];
+                let mut spectrum = vec![Complex::ZERO; bins];
+                let kernels = responses
+                    .iter()
+                    .map(|response| {
+                        let response = response.as_ref();
+                        let mut parts = vec![S::ZERO; partitions * 2 * bins];
+                        for (index, part) in parts.chunks_exact_mut(2 * bins).enumerate() {
+                            let start = offset + index * size;
+                            for (o, slot) in frame[..size].iter_mut().enumerate() {
+                                *slot = response.get(start + o).copied().unwrap_or(S::ZERO);
+                            }
+                            frame[size..].fill(S::ZERO);
+                            fft.forward(&frame, &mut spectrum);
+                            split_parts(&spectrum, part);
+                        }
+                        parts
+                    })
+                    .collect();
+                // `fill` starts half a partition in, so this band's
+                // boundaries land `size / 2` samples after every smaller
+                // band's and never share a block with them.
+                bands.push(Band {
+                    size,
+                    bins,
+                    partitions,
+                    fft,
+                    kernels,
+                    frames: vec![S::ZERO; channels * 2 * size],
+                    spectra: vec![S::ZERO; channels * partitions * 2 * bins],
+                    pending: vec![S::ZERO; channels * size],
+                    accumulators: vec![S::ZERO; channels * 2 * bins],
+                    spectrum,
+                    time: vec![S::ZERO; 2 * size],
+                    fill: size / 2,
+                    position: 0,
+                    summed: 0,
+                    inverse_due: false,
+                });
+                size *= 2;
+            }
+        }
+
         Ok(Self {
             channels,
             block,
@@ -431,6 +715,7 @@ impl<S: Sample> ConvolutionEngine<S> {
             fill: 0,
             position: 0,
             summed: 0,
+            bands,
         })
     }
 
@@ -439,14 +724,21 @@ impl<S: Sample> ConvolutionEngine<S> {
         self.channels
     }
 
-    /// The partition size in samples.
+    /// The size of the first, smallest partitions in samples.
     pub fn partition_size(&self) -> usize {
         self.block
     }
 
-    /// The number of partitions convolved in the frequency domain.
+    /// The largest partition in samples: the partition size when the
+    /// scheme is uniform.
+    pub fn largest_partition_size(&self) -> usize {
+        self.bands.last().map_or(self.block, |band| band.size)
+    }
+
+    /// The number of partitions convolved in the frequency domain: the
+    /// first partition plus, in a non-uniform scheme, every band's.
     pub fn num_partitions(&self) -> usize {
-        self.num_partitions
+        self.num_partitions + self.bands.iter().map(|band| band.partitions).sum::<usize>()
     }
 
     /// The length of the longest response, in samples.
@@ -470,6 +762,15 @@ impl<S: Sample> ConvolutionEngine<S> {
             let count = (block - self.fill).min(frames - start);
             let at = block + self.fill;
 
+            // A band boundary left the newest product and the inverse
+            // transform to this block; they run before the fresh pending
+            // is first read below.
+            for band in &mut self.bands {
+                if band.inverse_due {
+                    band.finish_pending(&self.paths);
+                }
+            }
+
             // Record the input first: with true stereo, every output needs
             // every input of the same frame.
             for (channel, frame) in self.frames.chunks_exact_mut(2 * block).enumerate() {
@@ -480,11 +781,26 @@ impl<S: Sample> ConvolutionEngine<S> {
                     target.fill(S::ZERO);
                 }
             }
+            for band in self.bands.iter_mut() {
+                let at = band.size + band.fill;
+                for (channel, frame) in band.frames.chunks_exact_mut(2 * band.size).enumerate() {
+                    let target = &mut frame[at..at + count];
+                    if channel < present {
+                        target.copy_from_slice(&buffer.channel(channel)[start..start + count]);
+                    } else {
+                        target.fill(S::ZERO);
+                    }
+                }
+            }
 
             for output in 0..present {
                 let out = &mut buffer.channel_mut(output)[start..start + count];
                 let pending = &self.pending[output * block + self.fill..][..count];
                 out.copy_from_slice(pending);
+                for band in &self.bands {
+                    let at = output * band.size + band.fill;
+                    vector::add(out, &band.pending[at..at + count]);
+                }
                 if head_len == 0 {
                     continue;
                 }
@@ -516,6 +832,9 @@ impl<S: Sample> ConvolutionEngine<S> {
                 self.finish_partition();
             } else {
                 self.sum_ahead();
+            }
+            for band in &mut self.bands {
+                band.advance(count, &self.paths);
             }
         }
     }
@@ -598,6 +917,9 @@ impl<S: Sample> ConvolutionEngine<S> {
         self.fill = 0;
         self.position = 0;
         self.summed = 0;
+        for band in &mut self.bands {
+            band.clear();
+        }
     }
 }
 
@@ -1142,6 +1464,314 @@ mod tests {
         eprintln!("largest relative error: f32 {worst32:e}, f64 {worst64:e}");
     }
 
+    /// Response length, first partition and largest partition, for the
+    /// non-uniform scheme: short and long responses, a scheme of one band,
+    /// and one where the largest size never engages.
+    const NUP_CASES: [(usize, usize, usize); 8] = [
+        (1, 1, 2),
+        (700, 64, 256),
+        (1_000, 32, 1_024),
+        (4_097, 64, 512),
+        (20_000, 64, 2_048),
+        (48_000, 128, 4_096),
+        (100_000, 64, 8_192),
+        (144_000, 64, 16_384),
+    ];
+
+    #[test]
+    fn non_uniform_matches_direct_convolution() {
+        let mut worst32 = 0.0f64;
+        let mut worst64 = 0.0f64;
+        for (case, &(len, partition, largest)) in NUP_CASES.iter().enumerate() {
+            let checked = if len > 3_000 { Some(400) } else { None };
+            for zero_latency in [true, false] {
+                let settings = ConvolutionSettings::new()
+                    .with_partition_size(partition)
+                    .with_non_uniform_partitions(largest)
+                    .with_zero_latency(zero_latency);
+                let seed = 200 * case as u64 + u64::from(zero_latency);
+                let error32 = relative_error::<f32>(len, settings, seed, checked);
+                assert!(
+                    error32 < 2e-6,
+                    "f32, {len} taps, {settings:?}: error {error32:e}"
+                );
+                worst32 = worst32.max(error32);
+                if len <= 20_000 {
+                    let error64 = relative_error::<f64>(len, settings, seed, checked);
+                    assert!(
+                        error64 < 1e-13,
+                        "f64, {len} taps, {settings:?}: error {error64:e}"
+                    );
+                    worst64 = worst64.max(error64);
+                }
+            }
+        }
+        eprintln!("largest non-uniform relative error: f32 {worst32:e}, f64 {worst64:e}");
+    }
+
+    /// The two schemes convolve the same response differently, so their
+    /// sums round differently; each stays within its measured distance of
+    /// direct convolution, and so of the other.
+    #[test]
+    fn non_uniform_stays_within_the_same_distance_of_uniform() {
+        let response = random_response(40_000, 41);
+        let frames = 50_000;
+        let signal = random_signal(frames, 42);
+        let mut outputs = Vec::new();
+        for largest in [128, 8_192] {
+            let settings = ConvolutionSettings::new()
+                .with_partition_size(128)
+                .with_non_uniform_partitions(largest);
+            let mut engine = build_engine::<f32>(
+                core::slice::from_ref(&response),
+                1,
+                ConvolutionRouting::Parallel,
+                settings,
+            );
+            let mut buffer = to_buffer::<f32>(core::slice::from_ref(&signal));
+            run_pattern(&mut engine, &mut buffer, &[61, 1, 300]);
+            outputs.push(buffer.channel(0).to_vec());
+        }
+        let mut power = 0.0f64;
+        let mut worst = 0.0f64;
+        for (&uniform, &non_uniform) in outputs[0].iter().zip(&outputs[1]) {
+            worst = worst.max((uniform - non_uniform).abs() as f64);
+            power += uniform as f64 * uniform as f64;
+        }
+        let rms = (power / frames as f64).sqrt();
+        assert!(worst / rms < 4e-6, "the schemes differ by {}", worst / rms);
+    }
+
+    #[test]
+    fn non_uniform_output_does_not_depend_on_block_sizes() {
+        let patterns: [&[usize]; 6] = [
+            &[1],
+            &[64],
+            &[128],
+            &[7, 300, 1, 33, 129],
+            &[1_000],
+            &[4_096],
+        ];
+        let responses = [
+            random_response(30_000, 1),
+            random_response(25_000, 2),
+            random_response(30_000, 3),
+            random_response(10, 4),
+        ];
+        let input = [random_signal(40_000, 5), random_signal(40_000, 6)];
+        for zero_latency in [true, false] {
+            for routing in [ConvolutionRouting::Parallel, ConvolutionRouting::TrueStereo] {
+                let settings = ConvolutionSettings::new()
+                    .with_partition_size(128)
+                    .with_non_uniform_partitions(4_096)
+                    .with_zero_latency(zero_latency);
+                let used = match routing {
+                    ConvolutionRouting::Parallel => &responses[..2],
+                    ConvolutionRouting::TrueStereo => &responses[..],
+                };
+                let mut reference = None;
+                for pattern in patterns {
+                    let mut engine = build_engine::<f32>(used, 2, routing, settings);
+                    let mut buffer = to_buffer::<f32>(&input);
+                    run_pattern(&mut engine, &mut buffer, pattern);
+                    let bits: Vec<u32> = buffer
+                        .iter_channels()
+                        .flat_map(|channel| channel.iter().map(|s| s.to_bits()))
+                        .collect();
+                    match &reference {
+                        None => reference = Some(bits),
+                        Some(expected) => assert!(
+                            *expected == bits,
+                            "blocks of {pattern:?} changed the output ({routing:?}, {settings:?})"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_uniform_latency_is_none_or_one_partition() {
+        for (zero_latency, expected) in [(true, 0), (false, 256)] {
+            let settings = ConvolutionSettings::new()
+                .with_partition_size(256)
+                .with_non_uniform_partitions(2_048)
+                .with_zero_latency(zero_latency);
+            // Long enough that the 2 048 band is built; a single tap at 2.
+            let mut taps = vec![0.0; 4_096];
+            taps[2] = 1.0;
+            let response = vec![taps];
+            let mut engine =
+                build_engine::<f64>(&response, 1, ConvolutionRouting::Parallel, settings);
+            assert_eq!(engine.latency(), expected);
+            assert_eq!(engine.latency_samples(), expected);
+            assert_eq!(engine.largest_partition_size(), 2_048);
+            let mut buffer = AudioBuffer::<f64>::new(1, 600);
+            buffer.channel_mut(0)[0] = 1.0;
+            engine.process(&mut buffer);
+            for (frame, &sample) in buffer.channel(0).iter().enumerate() {
+                let wanted = if frame == expected + 2 { 1.0 } else { 0.0 };
+                assert!((sample - wanted).abs() < 1e-15, "frame {frame}: {sample}");
+            }
+        }
+    }
+
+    /// A NaN at the input lives in a band's state for at most twice its
+    /// partition and the response's length; it does not poison the engine.
+    #[test]
+    fn non_uniform_recovers_from_nan() {
+        let response = random_response(20_000, 51);
+        let settings = ConvolutionSettings::new()
+            .with_partition_size(64)
+            .with_non_uniform_partitions(2_048);
+        let mut engine = build_engine::<f32>(
+            core::slice::from_ref(&response),
+            1,
+            ConvolutionRouting::Parallel,
+            settings,
+        );
+        let mut spoiled = AudioBuffer::<f32>::new(1, 2_048);
+        spoiled.channel_mut(0)[0] = f32::NAN;
+        engine.process(&mut spoiled);
+        assert!(spoiled.channel(0).iter().any(|s| s.is_nan()));
+
+        // A spectrum holding the NaN stays in a band's ring for the
+        // band's own `partitions` periods, on top of twice the partition
+        // it took to wash out of the window: the largest band asks for
+        // about (9 + 3) * 2 048 silent samples here. Sixteen periods is
+        // generous, and keeps every boundary where a fresh engine's is.
+        let mut silence = constant(16 * 2_048, 0.0);
+        engine.process(&mut silence);
+        // The last full period of the largest band is clean.
+        assert!(
+            silence.channel(0)[16 * 2_048 - 2_048..]
+                .iter()
+                .all(|&s| s == 0.0)
+        );
+
+        // From there the engine is indistinguishable from a fresh one.
+        let signal = random_signal(30_000, 52);
+        let mut buffer = to_buffer::<f32>(core::slice::from_ref(&signal));
+        run_pattern(&mut engine, &mut buffer, &[61, 1, 300]);
+        let mut fresh = build_engine::<f32>(&[response], 1, ConvolutionRouting::Parallel, settings);
+        let mut reference = to_buffer::<f32>(core::slice::from_ref(&signal));
+        run_pattern(&mut fresh, &mut reference, &[61, 1, 300]);
+        assert_eq!(buffer.channel(0), reference.channel(0));
+    }
+
+    /// A crossfade between non-uniform engines mixes each one's own output,
+    /// the old one's tail included, as it does between uniform engines.
+    #[test]
+    fn a_crossfade_between_non_uniform_engines_mixes_their_outputs() {
+        let settings = ConvolutionSettings::new()
+            .with_partition_size(64)
+            .with_non_uniform_partitions(2_048);
+        let responses = [random_response(10_000, 61), random_response(8_000, 62)];
+        let engine = |response: &Vec<f64>| {
+            build_engine::<f32>(
+                core::slice::from_ref(response),
+                1,
+                ConvolutionRouting::Parallel,
+                settings,
+            )
+        };
+        let (mut convolution, mut loader) = Convolution::<f32>::from_engine(engine(&responses[0]));
+        convolution.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 64,
+            num_channels: 1,
+        });
+
+        // A few blocks on the first engine alone, so its tail sounds under
+        // the fade; the swap is taken at the start of the next block.
+        let signal = random_signal(1_111, 63);
+        let mut out = Vec::new();
+        let mut played = 0;
+        let mut run = |convolution: &mut Convolution<f32>, frames: usize| {
+            let mut buffer = AudioBuffer::<f32>::new(1, frames);
+            for (sample, &value) in buffer
+                .channel_mut(0)
+                .iter_mut()
+                .zip(&signal[played..played + frames])
+            {
+                *sample = value as f32;
+            }
+            convolution.process(&mut buffer);
+            played += frames;
+            out.extend_from_slice(buffer.channel(0));
+        };
+        run(&mut convolution, 50);
+        run(&mut convolution, 64);
+        loader
+            .load_with_crossfade(engine(&responses[1]), 200)
+            .unwrap();
+        run(&mut convolution, 7);
+        run(&mut convolution, 100);
+        run(&mut convolution, 90);
+        run(&mut convolution, 800);
+        assert_eq!(played, signal.len());
+
+        // From index 114 on, for 200 samples, the output is the old
+        // engine's fading into the new one's; the new one started from
+        // silence when it took over.
+        for (index, &sample) in out.iter().enumerate() {
+            let old = direct_at(&signal, &responses[0], index);
+            let expected = if index < 114 {
+                old
+            } else {
+                let new = direct_at(&signal[114..], &responses[1], index - 114);
+                let step = index - 114 + 1;
+                if step < 200 {
+                    let gain = step as f64 / 200.0;
+                    old * (1.0 - gain) + new * gain
+                } else {
+                    new
+                }
+            };
+            assert!(
+                (sample as f64 - expected).abs() < 1e-4,
+                "frame {index}: {sample} vs {expected}"
+            );
+        }
+        assert!(!convolution.is_crossfading());
+        assert_eq!(loader.collect(), 1);
+    }
+
+    /// Every band starts half a period late, so two bands never do their
+    /// boundary work in the same block of `partition_size` samples, and
+    /// the inverse transform always lands in the block after the boundary.
+    #[test]
+    fn band_boundaries_are_staggered_and_the_inverse_is_deferred() {
+        // Response long enough for five bands: 256 to 4 096.
+        let response = random_response(8_192, 71);
+        let settings = ConvolutionSettings::new()
+            .with_partition_size(128)
+            .with_non_uniform_partitions(4_096);
+        let mut engine =
+            build_engine::<f64>(&[response], 1, ConvolutionRouting::Parallel, settings);
+        assert_eq!(engine.bands.len(), 5);
+        for band in &engine.bands {
+            assert_eq!(band.fill, band.size / 2, "band of {}", band.size);
+        }
+        let mut due_blocks = 0;
+        for step in 0..64 {
+            let mut block = AudioBuffer::<f64>::new(1, 128);
+            block.channel_mut(0)[0] = 0.5;
+            engine.process(&mut block);
+            let boundaries = engine.bands.iter().filter(|band| band.fill == 0).count();
+            assert!(
+                boundaries <= 1,
+                "{boundaries} bands bounded in block {step}"
+            );
+            let dues = engine.bands.iter().filter(|band| band.inverse_due).count();
+            // The band that bounded at this block's end owes its inverse
+            // to the next block; at most one can.
+            assert!(dues <= 1, "{dues} inverses due after block {step}");
+            due_blocks += usize::from(boundaries == 0);
+        }
+        assert!(due_blocks > 0, "no band ever bounded");
+    }
+
     #[test]
     fn the_output_does_not_depend_on_block_sizes() {
         let patterns: [&[usize]; 6] = [
@@ -1345,6 +1975,24 @@ mod tests {
                 Err(ConvolutionError::PartitionSize(size))
             );
         }
+        // A largest partition that is not a power of two at least twice
+        // the first, or is too big, is refused; one equal to the first is
+        // the uniform scheme.
+        for largest in [64, 192, 384, MAX_PARTITION_SIZE * 2] {
+            assert_eq!(
+                build(&one, 1, parallel, ok.with_non_uniform_partitions(largest)),
+                Err(ConvolutionError::PartitionSize(largest)),
+                "largest {largest}"
+            );
+        }
+        assert_eq!(
+            build(&one, 1, parallel, ok.with_non_uniform_partitions(128)),
+            Ok(())
+        );
+        assert_eq!(
+            build(&one, 1, parallel, ok.with_non_uniform_partitions(256)),
+            Ok(())
+        );
         for bad in [f32::NAN, f32::INFINITY] {
             assert_eq!(
                 build(&[vec![0.5, bad]], 1, parallel, ok),
