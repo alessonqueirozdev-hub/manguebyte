@@ -124,8 +124,9 @@ Everything a standalone audio application needs, short of a user interface.
   `manguebyte-web` or Parabolic (TECH_DEBT 104)
 - ✅ Convolution: uniformly partitioned, with zero latency or a latency of
   one partition, true stereo, and responses swapped with a crossfade while
-  playing. A non-uniformly partitioned scheme, cheaper for long responses
-  at small block sizes, is not started
+  playing; a non-uniformly partitioned scheme (ADR 0028) doubles partition
+  sizes in bands up to a caller-set largest, for long responses at small
+  block sizes
 - ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
 - ✅ Wavetable oscillator: band-limited by a mip-map, with morphing between
   frames and phase modulation

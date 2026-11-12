@@ -37,6 +37,54 @@ glide, tested with numbers:
   stereo spread and feedback, from a fixed pool of 64.
 - `FormantFilter`: vowels A-E-I-O-U from parallel resonances, morphed.
 
+## Convolution
+
+`ConvolutionEngine` convolves each channel with a response in the
+frequency domain, and `Convolution` wraps one for a host: responses are
+swapped in, off the audio thread through `ConvolutionLoader`, with a
+crossfade so a tail never clicks. `ConvolutionRouting::Parallel` gives
+every channel the response of its index; `TrueStereo` runs the four paths
+of two channels.
+
+- **Latency:** `ConvolutionSettings::with_zero_latency` plays the first
+  `partition_size` taps by a direct head, so the response's first sample
+  reaches the output at the first frame; without it the output is one
+  partition late.
+- **Partitioning:** uniformly partitioned by default. With
+  `with_non_uniform_partitions(largest)` the first partition size covers
+  one partition of the tail and bands of doubling sizes take the rest, up
+  to `largest`, so a long response at a small block size pays a few big
+  transforms instead of thousands of small products (ADR 0028). A 3 s
+  response at 48 kHz in blocks of 64 is about 2 250 products of a 64-tap
+  partition a block in the uniform scheme, against 24 spread over sizes
+  128 to 8 192 in the non-uniform one.
+- **Guarantees, each with a test:** the output is the same bit for bit
+  however the host cuts its blocks (1 to 4 096 frames, irregular
+  patterns), equal to direct convolution within 2e-6 of the reference's
+  RMS for `f32` and 1e-13 for `f64` in both schemes; nothing allocates,
+  frees or locks while processing, in either scheme, while engines are
+  swapped or mid-crossfade; and a NaN in the input washes out — a band's
+  state forgets it in at most its number of partitions plus three of its
+  own periods.
+
+Measured (`examples/convolution_speed.rs`, release build, ten seconds of
+stereo noise at 48 kHz through a 3 s response in blocks of 64, best of
+three runs, on a 12th Gen Intel Core i3-1215U — figures on another
+machine, or this one busier, will differ):
+
+| processor | type | real time |
+|---|---|---:|
+| convolution, 3 s stereo, uniform, no latency | f32 | 0.6x |
+| convolution, 3 s stereo, non-uniform, no latency | f32 | 1.7x |
+| convolution, 3 s stereo, uniform, latency of one partition | f32 | 0.2x |
+| convolution, 3 s stereo, non-uniform, latency of one partition | f32 | 2.5x |
+| FIR, 63 taps, direct | f32 | 63x |
+| convolution, 3 s stereo, uniform, no latency | f64 | 0.1x |
+| convolution, 3 s stereo, non-uniform, no latency | f64 | 3.1x |
+| convolution, 3 s stereo, uniform, latency of one partition | f64 | 0.2x |
+| convolution, 3 s stereo, non-uniform, latency of one partition | f64 | 4.1x |
+| FIR, 63 taps, direct | f64 | 99x |
+
 ## Transport and tempo map
 
 A host tells a processor where its transport is (`Transport`, in the
