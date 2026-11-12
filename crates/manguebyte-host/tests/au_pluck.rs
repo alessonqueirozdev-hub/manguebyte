@@ -414,7 +414,8 @@ fn the_one_interface_lists_restores_and_runs_it() {
     assert_eq!(entry.id, pluck_codes().to_string());
     assert_eq!(entry.name, Pluck::INFO.name);
     assert_eq!(entry.vendor, Pluck::INFO.vendor);
-    assert_eq!(entry.version, "0.1.0");
+    // Through the unit's version number, `0xMMMMmmbb`, and back.
+    assert_eq!(entry.version, Pluck::INFO.version);
     assert_eq!(entry.kind, Kind::Instrument);
     assert_eq!(entry.categories, ["Synthesizer"]);
     assert!(library.as_au().is_some());

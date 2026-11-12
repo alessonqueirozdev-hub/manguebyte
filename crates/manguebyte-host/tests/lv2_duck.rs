@@ -54,8 +54,10 @@ fn the_bundle_describes_the_plugin_without_running_it() {
     assert_eq!(info.uri, DUCK);
     assert_eq!(info.name, Duck::INFO.name);
     assert_eq!(info.vendor, Duck::INFO.vendor);
-    // 0.1.0 as the wrapper writes it: minor 2 × 1 + 2, micro 2.
-    assert_eq!(info.version, "4.2");
+    // The version as the wrapper writes it: minor 2 × (1000 × major +
+    // minor) + 2, micro 2 × patch + 2, or + 1 before a release. So 0.1.0
+    // is 4.2 and 0.2.0 is 6.2.
+    assert_eq!(info.version, lv2_version(Duck::INFO.version));
     assert!(info.classes.is_empty(), "an effect: {:?}", info.classes);
     assert_eq!(
         info.required_features,
@@ -547,4 +549,19 @@ fn notes_have_nowhere_to_go_in_an_effect_and_are_counted() {
     finish(&mut plugin, processor);
     assert_eq!(plugin.undeliverable_events(), 3);
     assert_same_bits(&audio, &input, "an effect with a quiet sidechain");
+}
+
+/// `version`, a semantic version with three numbers, as `minor.micro`
+/// the way `manguebyte-lv2` writes it into the bundle.
+fn lv2_version(version: &str) -> String {
+    let (release, pre_release) = match version.split_once('-') {
+        Some((release, _)) => (release, true),
+        None => (version, false),
+    };
+    let numbers: Vec<u64> = release.split('.').map(|n| n.parse().unwrap()).collect();
+    let [major, minor, patch] = numbers[..] else {
+        panic!("not three numbers: {version}");
+    };
+    let micro = 2 * patch + if pre_release { 1 } else { 2 };
+    format!("{}.{micro}", 2 * (1_000 * major + minor) + 2)
 }

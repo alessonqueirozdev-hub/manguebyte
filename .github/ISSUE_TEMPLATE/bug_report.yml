@@ -26,7 +26,7 @@ body:
     attributes:
       label: Version
       description: The crate versions, or the commit of `main`.
-      placeholder: manguebyte 0.1.0
+      placeholder: manguebyte 0.2.0
     validations:
       required: true
   - type: input

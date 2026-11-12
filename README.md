@@ -165,7 +165,7 @@ Manguebyte is on [crates.io](https://crates.io/crates/manguebyte):
 
 ```toml
 [dependencies]
-manguebyte = "0.1"
+manguebyte = "0.2"
 ```
 
 To follow its newest work instead, depend on the repository:
