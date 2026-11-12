@@ -184,15 +184,15 @@ impl Headers {
 
     /// Everything but the vendor: the identification and setup headers,
     /// the comment header without its vendor, and the fields of the pages.
-    fn without_vendor(&self) -> (&[u8], &[u8], &[u8], &[u8], &[[u8; 18]]) {
+    fn without_vendor(&self) -> ([&[u8]; 4], &[[u8; 18]]) {
         let comment = &self.packets[1];
-        (
-            &self.packets[0],
+        let bytes = [
+            &self.packets[0][..],
             &comment[..7],
             &comment[11 + self.vendor().len()..],
-            &self.packets[2],
-            &self.pages,
-        )
+            &self.packets[2][..],
+        ];
+        (bytes, &self.pages)
     }
 }
 
