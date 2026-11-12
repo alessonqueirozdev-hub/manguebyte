@@ -6,11 +6,11 @@
 //! ```
 //!
 //! It reports the mean time per block, which sets the average load, and the
-//! median time of the blocks at each place within a partition, the largest
-//! of which is the block with the most work and decides whether a block can
-//! miss its deadline. The slowest single block is also shown, but on a busy
-//! machine it mostly measures other programs. Read all of them as rough
-//! figures.
+//! median time of the blocks at each place within the longest partition,
+//! the largest of which is the block with the most work and decides
+//! whether a block can miss its deadline. The slowest single block is also
+//! shown, but on a busy machine it mostly measures other programs. Read
+//! all of them as rough figures.
 
 use std::time::Instant;
 
@@ -46,24 +46,34 @@ fn a_two_second_stereo_response_in_blocks_of_64() {
         (ConvolutionRouting::TrueStereo, 4),
     ] {
         let responses: Vec<Vec<f32>> = (0..responses).map(|seed| room(len, seed)).collect();
-        for (partition, zero_latency) in [
-            (64, true),
-            (128, true),
-            (256, true),
-            (64, false),
-            (128, false),
-            (256, false),
+        for (partition, zero_latency, largest) in [
+            (64, true, 64),
+            (128, true, 128),
+            (256, true, 256),
+            (64, false, 64),
+            (128, false, 128),
+            (256, false, 256),
+            // Non-uniform: bands doubling from twice the partition to
+            // 8 192 samples, so the tail costs a few big transforms
+            // instead of 1 500 small ones.
+            (64, true, 8_192),
+            (64, false, 8_192),
+            (128, true, 8_192),
+            (128, false, 8_192),
         ] {
             let settings = ConvolutionSettings::new()
                 .with_partition_size(partition)
+                .with_non_uniform_partitions(largest)
                 .with_zero_latency(zero_latency);
             let mut engine = ConvolutionEngine::new(&responses, 2, routing, settings).unwrap();
             let mut buffer = AudioBuffer::<f32>::new(2, BLOCK);
-            // Blocks fall at the same place in each partition every
-            // `phases` blocks. The median time at each place is robust to
-            // other programs taking the processor now and then; the
-            // largest of those medians is the block that does the most work.
-            let phases = (partition / BLOCK).max(1);
+            // Blocks fall at the same place in the longest partition
+            // every `phases` blocks, so each of a non-uniform scheme's
+            // band boundaries has its own bucket. The median time at each
+            // place is robust to other programs taking the processor now
+            // and then; the largest of those medians is the block that
+            // does the most work.
+            let phases = (largest / BLOCK).max(1);
             let mut times = vec![Vec::with_capacity(blocks / phases + 1); phases];
             let start = Instant::now();
             for block in 0..blocks {
@@ -76,22 +86,38 @@ fn a_two_second_stereo_response_in_blocks_of_64() {
             }
             let elapsed = start.elapsed().as_secs_f64();
             let mut slowest = 0.0f64;
-            let medians: Vec<String> = times
+            let mut medians: Vec<f64> = times
                 .iter_mut()
                 .map(|phase| {
                     phase.sort_by(f64::total_cmp);
                     slowest = slowest.max(phase[phase.len() - 1]);
-                    format!("{:.0}", phase[phase.len() / 2])
+                    phase[phase.len() / 2]
                 })
                 .collect();
+            medians.sort_by(f64::total_cmp);
+            // With a few places they are all worth seeing; with many,
+            // only the busiest are.
+            let shown: Vec<String> = if medians.len() <= 8 {
+                medians
+                    .iter()
+                    .map(|median| format!("{median:.0}"))
+                    .collect()
+            } else {
+                let top = medians.len() - 4;
+                medians[top..]
+                    .iter()
+                    .map(|median| format!("{median:.0}"))
+                    .collect()
+            };
             println!(
-                "{routing:?}, partition {partition}, latency {}: {:.1}% of one core, \
-                 mean {:.1} us per block, median by place in the partition [{}] us, \
-                 slowest block seen {:.0} us",
+                "{routing:?}, partition {partition}, largest {largest}, latency {}: \
+                 {:.1}% of one core, mean {:.1} us per block, {} largest \
+                 medians by place [{}] us, slowest block seen {:.0} us",
                 engine.latency(),
                 100.0 * elapsed / seconds as f64,
                 1e6 * elapsed / blocks as f64,
-                medians.join(", "),
+                shown.len(),
+                shown.join(", "),
                 slowest,
             );
             assert!(

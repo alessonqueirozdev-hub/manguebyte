@@ -5,12 +5,15 @@
 //! ```
 //!
 //! Ten seconds of stereo noise at 48 kHz go through a
-//! [`ConvolutionEngine`] with a two-second response per channel, in blocks
-//! of 256 frames, with no latency (a direct head of one partition) and with
-//! a latency of one partition, and through a [`FirFilter`] of 63 taps,
-//! which runs directly. Each figure is the best of several runs. The direct
-//! head is a dot product and the partitions are products of spectra, the
-//! two loops `manguebyte_core::vector` speeds up.
+//! [`ConvolutionEngine`] with a three-second response per channel, in
+//! blocks of 64 frames, with no latency (a direct head of one partition)
+//! and with a latency of one partition, in the uniform scheme and the
+//! non-uniform one, and through a [`FirFilter`] of 63 taps, which runs
+//! directly. Each figure is the best of several runs. The direct head is
+//! a dot product and the partitions are products of spectra, the two
+//! loops `manguebyte_core::vector` speeds up. The uniform scheme's
+//! 2 249 partitions of 64 samples against the non-uniform one's 24, of
+//! sizes doubling up to 8 192, is where the difference comes from.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -23,7 +26,11 @@ use manguebyte_dsp::{
 
 const RATE: f64 = 48_000.0;
 const SECONDS: f64 = 10.0;
-const BLOCK: usize = 256;
+const RESPONSE_SECONDS: f64 = 3.0;
+const BLOCK: usize = 64;
+/// The largest partition of the non-uniform scheme: the bands double
+/// from 128 to 8 192.
+const LARGEST: usize = 8_192;
 
 fn noise<S: Sample>(len: usize, seed: u64) -> Vec<S> {
     let mut state = seed | 1;
@@ -66,7 +73,7 @@ fn speed<S: Sample>(processor: &mut dyn Processor<S>) -> f64 {
 fn rows<S: Sample>(name: &str) {
     let response: Vec<Vec<S>> = (0..2)
         .map(|c| {
-            noise::<S>((2.0 * RATE) as usize, c + 1)
+            noise::<S>((RESPONSE_SECONDS * RATE) as usize, c + 1)
                 .into_iter()
                 .enumerate()
                 // A decaying tail, as a room's.
@@ -75,20 +82,24 @@ fn rows<S: Sample>(name: &str) {
         })
         .collect();
     for zero_latency in [true, false] {
-        let settings = ConvolutionSettings::new()
-            .with_partition_size(BLOCK)
-            .with_zero_latency(zero_latency);
-        let mut engine =
-            ConvolutionEngine::new(&response, 2, ConvolutionRouting::Parallel, settings).unwrap();
-        println!(
-            "| convolution, 2 s stereo, {} | {name} | {:.1}x |",
-            if zero_latency {
-                "no latency"
-            } else {
-                "latency of one partition"
-            },
-            speed(&mut engine)
-        );
+        for (scheme, largest) in [("uniform", BLOCK), ("non-uniform", LARGEST)] {
+            let settings = ConvolutionSettings::new()
+                .with_partition_size(BLOCK)
+                .with_non_uniform_partitions(largest)
+                .with_zero_latency(zero_latency);
+            let mut engine =
+                ConvolutionEngine::new(&response, 2, ConvolutionRouting::Parallel, settings)
+                    .unwrap();
+            println!(
+                "| convolution, {RESPONSE_SECONDS} s stereo, {scheme}, {} | {name} | {:.1}x |",
+                if zero_latency {
+                    "no latency"
+                } else {
+                    "latency of one partition"
+                },
+                speed(&mut engine)
+            );
+        }
     }
     let taps: Vec<f64> = noise(63, 99);
     let mut fir = FirFilter::<S>::with_mode(&taps, FirMode::Direct).unwrap();
