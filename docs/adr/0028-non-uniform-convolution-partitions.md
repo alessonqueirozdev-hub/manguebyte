@@ -56,8 +56,9 @@ direct head plays taps 0 to `b - 1` and every band's first partition starts
 at its own size; `b` in partition mode, where every band's output is the
 same `b` frames late as the smallest partitions', so `latency()` stays `0`
 or `b` whichever the scheme. A band's partitions never overlap the next
-band's: a middle band covers `[s - delta, 2 s - delta)`, and the last one
-runs to the response's end.
+band's: a middle band covers `[s - delta, 2 s - delta)` — that is
+`[s, 2 s)` in zero-latency mode and `[s - b, 2 s - b)` in partition mode —
+and the last one runs to the response's end.
 
 **3. Each band's boundaries land half a period after every smaller
 band's.** A band starts — from construction and from every `clear` — with
@@ -82,6 +83,16 @@ band's pending is written only there, so output keeps reading the previous
 partition's pending until the inverse has run: each band plays a partition
 late, exactly like the smallest partitions' own pending, and the `off`
 layout absorbs it into `delta`.
+
+The staggering and the deferral count input samples, not host callbacks:
+with host blocks held to the `partition_size` phase, a callback also holds
+at most one band's boundary work. With blocks out of that phase — an
+odd-sized block, or one split where an event arrived — a callback that
+holds the pieces on both sides of a boundary does the band's forward
+transform and the inverse it deferred, so the deferral does not help
+there; the busiest callback still costs about one forward and one inverse
+of the largest band, and a callback wider than a band period can see more
+than one band's boundary work.
 
 Everything else is unchanged: `process` still splits host blocks at the
 smallest partition's boundaries, so block sizes 1 to 4 096 and irregular
@@ -127,10 +138,12 @@ scheme already pays — while the product count drops from `r / b` to about
 `log2(largest / b) + (r - largest) / largest`.
 
 The cost model a caller should keep in mind: the largest band's boundary
-block does one forward and one inverse transform of `2 * largest` points,
-spread as one per piece, so `largest` is limited by the deadline's worst
-block, not by the mean load; for a long tail at small `b` it is still the
-mean that dominates, and the ratio of them is the point of the scheme.
+work is one forward and one inverse transform of `2 * largest` points,
+spread as one per `partition_size` piece — and both in the same host
+callback when the host's blocks fall out of that phase — so `largest` is
+limited by the deadline's worst callback, not by the mean load; for a
+long tail at small `b` it is still the mean that dominates, and the ratio
+of them is the point of the scheme.
 
 Verified: output equals the uniform scheme's and direct convolution's to
 the measured error (within 2e-6 of the RMS for `f32`, 1e-13 for `f64`),
