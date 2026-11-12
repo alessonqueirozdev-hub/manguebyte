@@ -113,7 +113,10 @@ pub const MAX_LOADER_CAPACITY: usize = 1_024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConvolutionSettings {
     partition_size: usize,
-    largest_partition_size: usize,
+    /// The largest partition asked for, if any: `None` is the uniform
+    /// scheme, which is the default and which `with_partition_size` never
+    /// leaves or enters on its own.
+    largest_partition_size: Option<usize>,
     zero_latency: bool,
 }
 
@@ -124,11 +127,11 @@ impl Default for ConvolutionSettings {
 }
 
 impl ConvolutionSettings {
-    /// Partitions of 128 samples, with no latency.
+    /// Partitions of 128 samples, with no latency, in the uniform scheme.
     pub const fn new() -> Self {
         Self {
             partition_size: 128,
-            largest_partition_size: 128,
+            largest_partition_size: None,
             zero_latency: true,
         }
     }
@@ -143,33 +146,37 @@ impl ConvolutionSettings {
     ///
     /// With non-uniform partitions this is the size of the first, smallest
     /// partitions, which the cost of short responses and of the direct head
-    /// follows. While the scheme is uniform, the largest partition follows
-    /// this size.
+    /// follows. It does not change whether the scheme is uniform or not:
+    /// only [`with_non_uniform_partitions`](Self::with_non_uniform_partitions)
+    /// asks for growth.
     #[must_use]
     pub const fn with_partition_size(mut self, frames: usize) -> Self {
-        if self.largest_partition_size == self.partition_size {
-            self.largest_partition_size = frames;
-        }
         self.partition_size = frames;
         self
     }
 
     /// Lets the partition size grow past the first partitions, doubling
-    /// from band to band up to `largest` samples: response taps `[s, 2s)`
-    /// are convolved in partitions of `s`. `largest` must be a power of
-    /// two at least twice `partition_size`, up to [`MAX_PARTITION_SIZE`];
-    /// equal to `partition_size` (the default) is the uniform scheme.
+    /// from band to band up to `largest` samples: in zero-latency mode
+    /// response taps `[s, 2s)` are convolved in partitions of `s`, and in
+    /// partition mode taps `[s - partition_size, 2s - partition_size)`.
+    /// `largest` must be a power of two at least twice `partition_size`,
+    /// up to [`MAX_PARTITION_SIZE`]; `largest` equal to `partition_size`
+    /// asks for a growth that cannot start, so the scheme stays uniform.
     ///
     /// For a long response the tail is convolved in a few large partitions
     /// instead of hundreds of small ones, which is cheaper per sample at
     /// small block sizes. The latency is unchanged. The price is that the
     /// largest transforms still land inside one block each, so the busiest
     /// block grows with `largest`; the work is staggered so that at most
-    /// one band of partitions starts and one ends in any block of
-    /// `partition_size` samples.
+    /// one band of partitions starts and one ends in any `partition_size`
+    /// samples of input. With host blocks out of that phase — after an
+    /// odd-sized block, say — a band's forward transform and the inverse
+    /// it deferred can land in the same host callback; the busiest
+    /// callback still costs about one forward and one inverse transform
+    /// of the largest band.
     #[must_use]
     pub const fn with_non_uniform_partitions(mut self, largest: usize) -> Self {
-        self.largest_partition_size = largest;
+        self.largest_partition_size = Some(largest);
         self
     }
 
@@ -186,9 +193,9 @@ impl ConvolutionSettings {
         self.partition_size
     }
 
-    /// The largest partition in samples: `partition_size` when the scheme
-    /// is uniform.
-    pub const fn largest_partition_size(&self) -> usize {
+    /// The largest partition asked for, in samples: `None` while the
+    /// scheme stays uniform, which is the default.
+    pub const fn largest_partition_size(&self) -> Option<usize> {
         self.largest_partition_size
     }
 
@@ -227,6 +234,15 @@ pub enum ConvolutionError {
     /// The partition size is not a power of two from 1 to
     /// [`MAX_PARTITION_SIZE`].
     PartitionSize(usize),
+    /// The largest partition a non-uniform scheme was asked to reach is
+    /// not a power of two from twice the partition size to
+    /// [`MAX_PARTITION_SIZE`].
+    LargestPartition {
+        /// The largest partition asked for.
+        largest: usize,
+        /// The partition size it is measured against.
+        partition: usize,
+    },
     /// A sample of the response is not-a-number or infinite.
     NotFinite,
 }
@@ -245,6 +261,10 @@ impl fmt::Display for ConvolutionError {
             Self::PartitionSize(size) => write!(
                 f,
                 "partition size {size} is not a power of two from 1 to {MAX_PARTITION_SIZE}"
+            ),
+            Self::LargestPartition { largest, partition } => write!(
+                f,
+                "largest partition size {largest} is not a power of two from twice the partition size {partition} to {MAX_PARTITION_SIZE}"
             ),
             Self::NotFinite => write!(
                 f,
@@ -430,8 +450,10 @@ impl<S: Sample> Band<S> {
     /// boundary work when a partition completes: whatever is left of the
     /// older partitions' share, then the forward transform, whose spectrum
     /// goes to the ring. The last product and the inverse transform are
-    /// owed to the next block (`inverse_due`), so two transforms of the
-    /// band's size never land in one block.
+    /// owed to the next piece of input (`inverse_due`), so two transforms
+    /// of the band's size never land in one `partition_size` piece. A host
+    /// callback holding pieces on both sides of the boundary still sees
+    /// both.
     fn advance(&mut self, count: usize, paths: &[Path]) {
         self.fill += count;
         if self.fill == self.size {
@@ -515,8 +537,9 @@ impl<S: Sample> ConvolutionEngine<S> {
     /// Fails if there is no response or all are empty, if the number of
     /// responses does not fit `routing` and `channels` (see
     /// [`ConvolutionRouting`]) or `channels` is more than [`MAX_CHANNELS`],
-    /// if the partition size is not a power of two up to
-    /// [`MAX_PARTITION_SIZE`], or if a sample is not finite.
+    /// if the partition size — or a largest partition asked for with
+    /// [`ConvolutionSettings::with_non_uniform_partitions`] — is not a
+    /// power of two in its range, or if a sample is not finite.
     pub fn new<R: AsRef<[S]>>(
         responses: &[R],
         channels: usize,
@@ -528,10 +551,20 @@ impl<S: Sample> ConvolutionEngine<S> {
             return Err(ConvolutionError::PartitionSize(block));
         }
         let largest = settings.largest_partition_size;
-        if largest != block
-            && (!largest.is_power_of_two() || largest < 2 * block || largest > MAX_PARTITION_SIZE)
-        {
-            return Err(ConvolutionError::PartitionSize(largest));
+        if let Some(largest) = largest {
+            // A `largest` equal to the partition size asks for a growth
+            // that cannot start, so it is accepted: the scheme stays
+            // uniform. Anything else out of range is refused.
+            if largest != block
+                && (!largest.is_power_of_two()
+                    || largest < 2 * block
+                    || largest > MAX_PARTITION_SIZE)
+            {
+                return Err(ConvolutionError::LargestPartition {
+                    largest,
+                    partition: block,
+                });
+            }
         }
         let count_error = ConvolutionError::ChannelCount {
             responses: responses.len(),
@@ -590,7 +623,7 @@ impl<S: Sample> ConvolutionEngine<S> {
         } else {
             0
         };
-        let non_uniform = largest != block;
+        let non_uniform = largest.is_some_and(|largest| largest != block);
         // In a non-uniform scheme the first, smallest partitions cover one
         // partition of the response after the head; the bands take over
         // from there.
@@ -635,7 +668,7 @@ impl<S: Sample> ConvolutionEngine<S> {
         // to the end of the response.
         let delta = block - head_len;
         let mut bands = Vec::new();
-        if non_uniform {
+        if let Some(largest) = largest.filter(|l| *l > block) {
             let mut size = 2 * block;
             while size <= largest {
                 let offset = size - delta;
@@ -1466,9 +1499,15 @@ mod tests {
 
     /// Response length, first partition and largest partition, for the
     /// non-uniform scheme: short and long responses, a scheme of one band,
-    /// and one where the largest size never engages.
-    const NUP_CASES: [(usize, usize, usize); 8] = [
+    /// one where the largest size never engages, responses that end on a
+    /// band's edge (256 taps ends the 128 band in zero-latency mode, 192
+    /// in partition mode), and a partition of one sample, where bands of
+    /// 2 and 4 are still real bands.
+    const NUP_CASES: [(usize, usize, usize); 11] = [
         (1, 1, 2),
+        (192, 64, 256),
+        (256, 64, 256),
+        (300, 1, 4),
         (700, 64, 256),
         (1_000, 32, 1_024),
         (4_097, 64, 512),
@@ -1616,6 +1655,61 @@ mod tests {
         }
     }
 
+    /// The scheme is uniform while `with_non_uniform_partitions` was never
+    /// called, and `with_partition_size` never drags a `largest` along, so
+    /// the order of the two calls cannot change the engine built.
+    #[test]
+    fn the_non_uniform_request_does_not_depend_on_call_order() {
+        let response = [random_response(600, 76)];
+        let mut engines = Vec::new();
+        for largest_first in [false, true] {
+            let settings = if largest_first {
+                ConvolutionSettings::new()
+                    .with_non_uniform_partitions(512)
+                    .with_partition_size(64)
+            } else {
+                ConvolutionSettings::new()
+                    .with_partition_size(64)
+                    .with_non_uniform_partitions(512)
+            };
+            engines.push(build_engine::<f32>(
+                &response,
+                1,
+                ConvolutionRouting::Parallel,
+                settings,
+            ));
+        }
+        for engine in &engines {
+            assert_eq!(engine.largest_partition_size(), 512);
+        }
+        let input = [random_signal(2_000, 77)];
+        let outputs: Vec<Vec<f32>> = engines
+            .iter_mut()
+            .map(|engine| {
+                let mut buffer = to_buffer::<f32>(&input);
+                engine.process(&mut buffer);
+                buffer.channel(0).to_vec()
+            })
+            .collect();
+        assert_eq!(outputs[0], outputs[1], "the order changed the engine");
+
+        // A `largest` that happens to equal the default partition size
+        // still asks for growth when the partition size is set after it;
+        // before, it was dragged down and the engine came out uniform.
+        let dragged = build_engine::<f32>(
+            &response,
+            1,
+            ConvolutionRouting::Parallel,
+            ConvolutionSettings::new()
+                .with_non_uniform_partitions(128)
+                .with_partition_size(32),
+        );
+        assert_eq!(dragged.largest_partition_size(), 128);
+        // One smallest partition, one partition of the 64 band and four of
+        // the 128 band ([64, 128) and [128, 600) of the taps).
+        assert_eq!(dragged.num_partitions(), 1 + 1 + 4);
+    }
+
     /// A NaN at the input lives in a band's state for at most twice its
     /// partition and the response's length; it does not poison the engine.
     #[test]
@@ -1675,7 +1769,8 @@ mod tests {
                 settings,
             )
         };
-        let (mut convolution, mut loader) = Convolution::<f32>::from_engine(engine(&responses[0]));
+        let (mut convolution, mut loader) =
+            Convolution::<f32>::from_engine(engine(first, &responses[0]));
         convolution.prepare(&ProcessSpec {
             sample_rate: 48_000.0,
             max_block_size: 64,
@@ -1976,15 +2071,28 @@ mod tests {
             );
         }
         // A largest partition that is not a power of two at least twice
-        // the first, or is too big, is refused; one equal to the first is
-        // the uniform scheme.
+        // the first, or is too big, is refused — including a smaller one,
+        // which the old `PartitionSize` variant reported with a message
+        // that did not fit. One equal to the partition size asks for a
+        // growth that cannot start, so it keeps the uniform scheme.
         for largest in [64, 192, 384, MAX_PARTITION_SIZE * 2] {
             assert_eq!(
                 build(&one, 1, parallel, ok.with_non_uniform_partitions(largest)),
-                Err(ConvolutionError::PartitionSize(largest)),
+                Err(ConvolutionError::LargestPartition {
+                    largest,
+                    partition: 128
+                }),
                 "largest {largest}"
             );
         }
+        assert_eq!(
+            ConvolutionError::LargestPartition {
+                largest: 64,
+                partition: 128
+            }
+            .to_string(),
+            "largest partition size 64 is not a power of two from twice the partition size 128 to 65536"
+        );
         assert_eq!(
             build(&one, 1, parallel, ok.with_non_uniform_partitions(128)),
             Ok(())
