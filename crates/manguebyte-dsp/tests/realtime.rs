@@ -765,6 +765,7 @@ fn convolution_engine(
     len: usize,
     routing: ConvolutionRouting,
     zero_latency: bool,
+    non_uniform: bool,
 ) -> ConvolutionEngine<f32> {
     let count = match routing {
         ConvolutionRouting::Parallel => 2,
@@ -773,6 +774,7 @@ fn convolution_engine(
     let responses: Vec<Vec<f32>> = (0..count).map(|seed| room(len, seed)).collect();
     let settings = ConvolutionSettings::new()
         .with_partition_size(64)
+        .with_non_uniform_partitions(if non_uniform { 2_048 } else { 64 })
         .with_zero_latency(zero_latency);
     ConvolutionEngine::new(&responses, 2, routing, settings).unwrap()
 }
@@ -781,11 +783,19 @@ fn convolution_engine(
 fn convolution_fir_filters_the_expander_and_the_wavetable_do_not_use_the_heap() {
     check(
         "ConvolutionEngine",
-        convolution_engine(5_000, ConvolutionRouting::Parallel, true),
+        convolution_engine(5_000, ConvolutionRouting::Parallel, true, false),
     );
     check(
         "ConvolutionEngine, true stereo with latency",
-        convolution_engine(3_000, ConvolutionRouting::TrueStereo, false),
+        convolution_engine(3_000, ConvolutionRouting::TrueStereo, false, false),
+    );
+    check(
+        "ConvolutionEngine, non-uniform",
+        convolution_engine(30_000, ConvolutionRouting::Parallel, true, true),
+    );
+    check(
+        "ConvolutionEngine, non-uniform true stereo with latency",
+        convolution_engine(12_000, ConvolutionRouting::TrueStereo, false, true),
     );
     check("Convolution", {
         let (convolution, mut loader) = Convolution::<f32>::new();
@@ -795,6 +805,7 @@ fn convolution_fir_filters_the_expander_and_the_wavetable_do_not_use_the_heap() 
                 2_000,
                 ConvolutionRouting::TrueStereo,
                 true,
+                false,
             ))
             .unwrap();
         convolution
@@ -918,7 +929,10 @@ fn swapping_impulse_responses_while_playing_does_not_use_the_heap() {
             } else {
                 ConvolutionRouting::TrueStereo
             };
-            let mut engine = convolution_engine(500 + 300 * index, routing, index % 3 != 0);
+            // Every third engine is non-uniform, so band boundaries and
+            // deferred transforms land inside the watched crossfades too.
+            let mut engine =
+                convolution_engine(500 + 600 * index, routing, index % 3 != 0, index % 3 == 0);
             loop {
                 if give_up.load(Ordering::Relaxed) {
                     return (index, loader.in_flight());
