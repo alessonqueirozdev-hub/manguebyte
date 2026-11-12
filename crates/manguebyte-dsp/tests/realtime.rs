@@ -105,16 +105,32 @@ const SPEC: ProcessSpec = ProcessSpec {
 
 /// Prepares a processor, then runs it over blocks of several sizes with the
 /// allocator watched.
-fn check<P: Processor<f32>>(what: &str, mut processor: P) {
+fn check<P: Processor<f32>>(what: &str, processor: P) {
+    check_for(what, processor, 832);
+}
+
+/// Prepares a processor, then runs it for at least `frames` frames over
+/// blocks of several sizes with the allocator watched, and resets it.
+///
+/// Processors with long internal periods — a non-uniform convolution's
+/// largest band, say — ask for enough frames to cross them twice here,
+/// so the boundary work happens under the watch.
+fn check_for<P: Processor<f32>>(what: &str, mut processor: P, frames: usize) {
     processor.prepare(&SPEC);
     let mut buffer = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
     assert_no_heap_use(what, || {
-        for frames in [256, 1, 64, 255, 256] {
-            buffer.set_num_frames(frames);
+        let mut played = 0usize;
+        for piece in [256usize, 1, 64, 255, 256].into_iter().cycle() {
+            if played >= frames {
+                break;
+            }
+            let piece = piece.min(frames - played);
+            buffer.set_num_frames(piece);
             for channel in buffer.iter_channels_mut() {
                 channel.fill(0.25);
             }
             processor.process(&mut buffer);
+            played += piece;
         }
         processor.reset();
         buffer.set_num_frames(256);
@@ -772,10 +788,12 @@ fn convolution_engine(
         ConvolutionRouting::TrueStereo => 4,
     };
     let responses: Vec<Vec<f32>> = (0..count).map(|seed| room(len, seed)).collect();
-    let settings = ConvolutionSettings::new()
+    let mut settings = ConvolutionSettings::new()
         .with_partition_size(64)
-        .with_non_uniform_partitions(if non_uniform { 2_048 } else { 64 })
         .with_zero_latency(zero_latency);
+    if non_uniform {
+        settings = settings.with_non_uniform_partitions(2_048);
+    }
     ConvolutionEngine::new(&responses, 2, routing, settings).unwrap()
 }
 
@@ -789,13 +807,19 @@ fn convolution_fir_filters_the_expander_and_the_wavetable_do_not_use_the_heap() 
         "ConvolutionEngine, true stereo with latency",
         convolution_engine(3_000, ConvolutionRouting::TrueStereo, false, false),
     );
-    check(
+    check_for(
         "ConvolutionEngine, non-uniform",
         convolution_engine(30_000, ConvolutionRouting::Parallel, true, true),
+        // The largest band (2 048 samples) reaches its first boundary
+        // after 1 024 frames and the next every 2 048 after that: enough
+        // frames for each band to cross two boundaries under the watch,
+        // so the deferred inverse and the boundary sums run inside it.
+        4_096,
     );
-    check(
+    check_for(
         "ConvolutionEngine, non-uniform true stereo with latency",
         convolution_engine(12_000, ConvolutionRouting::TrueStereo, false, true),
+        4_096,
     );
     check("Convolution", {
         let (convolution, mut loader) = Convolution::<f32>::new();
@@ -930,9 +954,11 @@ fn swapping_impulse_responses_while_playing_does_not_use_the_heap() {
                 ConvolutionRouting::TrueStereo
             };
             // Every third engine is non-uniform, so band boundaries and
-            // deferred transforms land inside the watched crossfades too.
+            // deferred transforms land inside the watched crossfades too;
+            // `index % 4` picks the latency, so the non-uniform ones are
+            // a mix of zero-latency and one-partition-latency engines.
             let mut engine =
-                convolution_engine(500 + 600 * index, routing, index % 3 != 0, index % 3 == 0);
+                convolution_engine(500 + 600 * index, routing, index % 4 != 0, index % 3 == 0);
             loop {
                 if give_up.load(Ordering::Relaxed) {
                     return (index, loader.in_flight());

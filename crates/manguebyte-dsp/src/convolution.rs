@@ -36,15 +36,25 @@
 //!
 //! [`ConvolutionSettings::with_non_uniform_partitions`] asks for a scheme
 //! that is cheaper on long responses: after the first partitions the size
-//! doubles from band to band, so taps `[s, 2s)` of the response are
-//! convolved in partitions of `s`, up to a largest size where the tail runs
-//! on. Each band is a uniform convolution of its own, all computed on the
+//! doubles from band to band, up to a largest size where the tail runs on.
+//! In zero-latency mode taps `[s, 2s)` of the response are convolved in
+//! partitions of `s`; in partition mode every band runs `partition_size`
+//! samples late, so the band of size `s` covers taps
+//! `[s - partition_size, 2s - partition_size)` instead, after the smallest
+//! partitions' first `partition_size` taps.
+//!
+//! Each band is a uniform convolution of its own, all computed on the
 //! audio thread as everything here is: the bands' boundaries are staggered
 //! half a period apart, so at most one band's forward transform and one
-//! band's inverse transform land in a block of `partition_size` samples,
-//! and the inverse is deferred to the block after the boundary. The output
-//! stays the same bit for bit however the host slices the blocks, and the
-//! latency is the same as the uniform scheme's.
+//! band's inverse transform land in any `partition_size` samples of input,
+//! and each boundary's inverse is deferred to the piece after it. The
+//! staggering counts input samples, not host callbacks: with host blocks
+//! out of the `partition_size` phase — after an odd-sized block, or one
+//! split by events — a band's forward transform and the inverse it
+//! deferred can land in the same callback, which then costs about one
+//! forward and one inverse of the largest band. The output stays the same
+//! bit for bit however the host slices the blocks, and the latency is the
+//! same as the uniform scheme's.
 //!
 //! [`Convolution`] is the processor to put in a chain. It runs one engine
 //! and takes a new one from a [`ConvolutionLoader`] on another thread, with
@@ -1753,15 +1763,12 @@ mod tests {
         assert_eq!(buffer.channel(0), reference.channel(0));
     }
 
-    /// A crossfade between non-uniform engines mixes each one's own output,
-    /// the old one's tail included, as it does between uniform engines.
-    #[test]
-    fn a_crossfade_between_non_uniform_engines_mixes_their_outputs() {
-        let settings = ConvolutionSettings::new()
-            .with_partition_size(64)
-            .with_non_uniform_partitions(2_048);
+    /// Plays a `first`-settings engine, swaps to a `second`-settings one
+    /// with a crossfade mid-signal, and checks every output frame against
+    /// the fading mix of the two direct convolutions.
+    fn check_crossfade_between(first: ConvolutionSettings, second: ConvolutionSettings) {
         let responses = [random_response(10_000, 61), random_response(8_000, 62)];
-        let engine = |response: &Vec<f64>| {
+        let engine = |settings: ConvolutionSettings, response: &Vec<f64>| {
             build_engine::<f32>(
                 core::slice::from_ref(response),
                 1,
@@ -1798,7 +1805,7 @@ mod tests {
         run(&mut convolution, 50);
         run(&mut convolution, 64);
         loader
-            .load_with_crossfade(engine(&responses[1]), 200)
+            .load_with_crossfade(engine(second, &responses[1]), 200)
             .unwrap();
         run(&mut convolution, 7);
         run(&mut convolution, 100);
@@ -1832,6 +1839,67 @@ mod tests {
         assert_eq!(loader.collect(), 1);
     }
 
+    /// A crossfade between non-uniform engines mixes each one's own output,
+    /// the old one's tail included, as it does between uniform engines.
+    #[test]
+    fn a_crossfade_between_non_uniform_engines_mixes_their_outputs() {
+        let non_uniform = ConvolutionSettings::new()
+            .with_partition_size(64)
+            .with_non_uniform_partitions(2_048);
+        check_crossfade_between(non_uniform, non_uniform);
+    }
+
+    /// The two engines of a crossfade may split the response differently —
+    /// a uniform one and a non-uniform one, in either order — and the fade
+    /// still mixes their own outputs frame by frame.
+    #[test]
+    fn a_crossfade_between_schemes_mixes_their_outputs() {
+        let uniform = ConvolutionSettings::new().with_partition_size(64);
+        let non_uniform = ConvolutionSettings::new()
+            .with_partition_size(64)
+            .with_non_uniform_partitions(2_048);
+        check_crossfade_between(uniform, non_uniform);
+        check_crossfade_between(non_uniform, uniform);
+    }
+
+    /// The framework promises its processors work at every sample rate
+    /// from 8 kHz to 384 kHz; the convolution's own state knows nothing of
+    /// the rate, but the claim is that a `Convolution` prepared at either
+    /// end of the range still matches direct convolution.
+    #[test]
+    fn non_uniform_matches_direct_convolution_at_the_sample_rate_ends() {
+        for (index, rate) in [8_000.0, 384_000.0].into_iter().enumerate() {
+            let response = random_response(4_000, 80 + index as u64);
+            let settings = ConvolutionSettings::new()
+                .with_partition_size(64)
+                .with_non_uniform_partitions(1_024);
+            let engine = build_engine::<f32>(
+                core::slice::from_ref(&response),
+                1,
+                ConvolutionRouting::Parallel,
+                settings,
+            );
+            let (mut convolution, _loader) = Convolution::<f32>::from_engine(engine);
+            convolution.prepare(&ProcessSpec {
+                sample_rate: rate,
+                max_block_size: 512,
+                num_channels: 1,
+            });
+            let signal = random_signal(5_000, 82);
+            let mut buffer = to_buffer::<f32>(core::slice::from_ref(&signal));
+            run_pattern(&mut convolution, &mut buffer, &[61, 1, 300]);
+
+            let (mut worst, mut power) = (0.0f64, 0.0f64);
+            for (frame, &got) in buffer.channel(0).iter().enumerate() {
+                let expected = direct_at(&signal, &response, frame);
+                worst = worst.max((got as f64 - expected).abs());
+                power += expected * expected;
+            }
+            let relative = worst / (power / signal.len() as f64).sqrt();
+            assert!(relative < 2e-6, "at {rate} Hz: {relative:e}");
+        }
+    }
+
     /// Every band starts half a period late, so two bands never do their
     /// boundary work in the same block of `partition_size` samples, and
     /// the inverse transform always lands in the block after the boundary.
@@ -1848,23 +1916,30 @@ mod tests {
         for band in &engine.bands {
             assert_eq!(band.fill, band.size / 2, "band of {}", band.size);
         }
-        let mut due_blocks = 0;
+        let mut boundaries: Vec<usize> = vec![0; engine.bands.len()];
         for step in 0..64 {
             let mut block = AudioBuffer::<f64>::new(1, 128);
             block.channel_mut(0)[0] = 0.5;
             engine.process(&mut block);
-            let boundaries = engine.bands.iter().filter(|band| band.fill == 0).count();
-            assert!(
-                boundaries <= 1,
-                "{boundaries} bands bounded in block {step}"
-            );
+            for (index, band) in engine.bands.iter().enumerate() {
+                boundaries[index] += usize::from(band.fill == 0);
+            }
+            let bounding = engine.bands.iter().filter(|band| band.fill == 0).count();
+            assert!(bounding <= 1, "{bounding} bands bounded in block {step}");
             let dues = engine.bands.iter().filter(|band| band.inverse_due).count();
             // The band that bounded at this block's end owes its inverse
             // to the next block; at most one can.
             assert!(dues <= 1, "{dues} inverses due after block {step}");
-            due_blocks += usize::from(boundaries == 0);
         }
-        assert!(due_blocks > 0, "no band ever bounded");
+        // The stretch is long enough for the 4 096 band to bound twice;
+        // every shorter band must have bounded at least once too, or the
+        // asserts above proved nothing.
+        for (index, &count) in boundaries.iter().enumerate() {
+            assert!(
+                count > 0,
+                "band {index} never reached a boundary in the measured stretch"
+            );
+        }
     }
 
     #[test]
