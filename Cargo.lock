@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "aratu-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte",
  "manguebyte-au",
@@ -122,7 +122,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cargo-mangue"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte",
  "serde_json",
@@ -588,7 +588,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "mangue-divisions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte",
  "manguebyte-au",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "mangue-duck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mangue-pluck",
  "manguebyte",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "mangue-identity-probe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte",
  "manguebyte-gui",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "mangue-pluck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte",
  "manguebyte-au",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-analysis",
  "manguebyte-au",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-analysis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-au"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-clap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-sys",
  "manguebyte-core",
@@ -689,11 +689,11 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "manguebyte-devices"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "coremidi",
  "cpal",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-dsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-midi",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-formats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "windows-sys 0.61.2",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-gfx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "harfrust",
  "skrifa",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-clap",
  "manguebyte-core",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aratu-bridge",
  "clap-sys",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-lv2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -792,18 +792,18 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-midi"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "manguebyte-osc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
 ]
 
 [[package]]
 name = "manguebyte-params"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "serde_json",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-pro-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-devices",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-sampler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-standalone"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-devices",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -872,14 +872,14 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-ump-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "manguebyte-vst3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-analysis",
  "manguebyte-core",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "manguebyte-window"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "manguebyte-gfx",
  "manguebyte-plugin",

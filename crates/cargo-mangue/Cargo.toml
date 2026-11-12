@@ -27,7 +27,7 @@ serde_json = "1"
 # The plugin templates are compiled and their own tests run as part of this
 # crate's tests, so a template that stops building fails here and not on the
 # machine of whoever runs `cargo mangue new`.
-manguebyte = { path = "../manguebyte", version = "0.1.0", default-features = false, features = ["clap", "vst3", "lv2"] }
+manguebyte = { path = "../manguebyte", version = "0.2.0", default-features = false, features = ["clap", "vst3", "lv2"] }
 
 [lints]
 workspace = true

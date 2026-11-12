@@ -98,12 +98,101 @@ fn ffmpeg_and_libvorbis_decode_what_the_encoder_writes_as_this_crate_does() {
             assert!(worst <= tolerance, "{name}: {decoder}: {worst}");
         }
         // The encoder still writes these bytes: when it changes, the files
-        // are made again with `dump_files_for_other_software`.
+        // are made again with `dump_files_for_other_software`. Only the
+        // vendor, which names the version of this crate, may differ.
         let again = encode(&source, rate, &VorbisOptions::new(quality));
+        let (theirs, ours) = (Headers::split(bytes), Headers::split(&again));
         assert!(
-            again == bytes,
-            "{name}: the encoder no longer writes the file in data/"
+            theirs.vendor().starts_with(b"manguebyte-formats "),
+            "{name}: the vendor of the file in data/"
         );
+        assert_eq!(ours.vendor(), VENDOR.as_bytes(), "{name}: the vendor");
+        assert!(
+            ours.without_vendor() == theirs.without_vendor(),
+            "{name}: the encoder no longer writes the headers in data/"
+        );
+        assert!(
+            again[ours.audio..] == bytes[theirs.audio..],
+            "{name}: the encoder no longer writes the audio in data/"
+        );
+    }
+}
+
+/// The vendor the encoder writes, as its source gives it.
+const VENDOR: &str = concat!("manguebyte-formats ", env!("CARGO_PKG_VERSION"));
+
+/// The three header packets of an Ogg Vorbis stream, the fields of the
+/// pages they are on, and where the pages of audio after them start.
+struct Headers {
+    /// Identification, comment and setup.
+    packets: [Vec<u8>; 3],
+    /// Bytes 4 to 22 of each page of headers: the version, the flags, the
+    /// granule position, the serial number and the page number, which the
+    /// length of the vendor does not change.
+    pages: Vec<[u8; 18]>,
+    /// The offset of the first page of audio.
+    audio: usize,
+}
+
+impl Headers {
+    fn split(bytes: &[u8]) -> Self {
+        let mut packets: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut pages = Vec::new();
+        let ranges = common::ogg_pages(bytes);
+        for (index, range) in ranges.iter().enumerate() {
+            let page = &bytes[range.clone()];
+            pages.push(page[4..22].try_into().unwrap());
+            let segments = usize::from(page[26]);
+            let mut at = 27 + segments;
+            for &lacing in &page[27..27 + segments] {
+                let length = usize::from(lacing);
+                packets
+                    .last_mut()
+                    .unwrap()
+                    .extend_from_slice(&page[at..at + length]);
+                at += length;
+                if length < 255 {
+                    packets.push(Vec::new());
+                }
+            }
+            if packets.len() > 3 {
+                // The setup header ends a page of its own.
+                assert_eq!(packets.len(), 4, "audio on a page of headers");
+                assert!(packets[3].is_empty());
+                packets.pop();
+                return Self {
+                    packets: packets.try_into().unwrap(),
+                    pages,
+                    audio: ranges
+                        .get(index + 1)
+                        .expect("audio after the headers")
+                        .start,
+                };
+            }
+        }
+        panic!("fewer than three header packets");
+    }
+
+    /// The vendor in the comment header (section 5.2.1 of the Vorbis I
+    /// specification): its length in four bytes after the packet type and
+    /// "vorbis", then the text.
+    fn vendor(&self) -> &[u8] {
+        let comment = &self.packets[1];
+        let length = u32::from_le_bytes(comment[7..11].try_into().unwrap()) as usize;
+        &comment[11..11 + length]
+    }
+
+    /// Everything but the vendor: the identification and setup headers,
+    /// the comment header without its vendor, and the fields of the pages.
+    fn without_vendor(&self) -> (&[u8], &[u8], &[u8], &[u8], &[[u8; 18]]) {
+        let comment = &self.packets[1];
+        (
+            &self.packets[0],
+            &comment[..7],
+            &comment[11 + self.vendor().len()..],
+            &self.packets[2],
+            &self.pages,
+        )
     }
 }
 

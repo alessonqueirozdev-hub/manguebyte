@@ -254,7 +254,9 @@ right) before it was kept.
 Both decoders give every file its exact length. FFmpeg's own decoder comes
 within 1.8e-7 of this crate's; libvorbis within 4.6e-5, the rounding to
 16 bits. `tests/vorbis_encoder.rs` checks both, and that the encoder still
-writes these bytes: when it changes, the files are made again.
+writes these bytes, all but the vendor in the comment header, which names
+the version of this crate that wrote the file: when the rest changes, the
+files are made again.
 
 The first version of the six-channel file had a residue of type 2, the
 six channels interleaved, which the specification allows and which this

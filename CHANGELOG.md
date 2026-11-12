@@ -7,6 +7,14 @@ break the API.
 
 ## Unreleased
 
+## [0.2.0] - 2026-11-12
+
+The second release on crates.io: 27 crates, two of them new,
+`manguebyte-state` (application state with undo and redo) and
+`manguebyte-ump-io` (the systems' own MIDI 2.0 output, for
+`manguebyte-devices`). Before 1.0 a minor version may break the API:
+Breaking, below, lists what code written against 0.1.0 may need.
+
 ### Core
 
 - `pool`: rendering independent jobs (voices, divisions, chains of
@@ -1799,12 +1807,12 @@ Floating panels for an effect chain, which Parabolic asked for:
   struct literals of them must name the new fields. `Zone` gained `hue`
   and `RowCx` a hover. Every default colour and size changed, and the
   focus ring no longer shows after a press.
-- In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`
-  on it without a wildcard arm needs an arm for it; `AccessState` gains
-  `selected`, `AccessEntry` and `testing::Found` gain `item`, and
-  `Sizes` gains `scroll_bar`, `scroll_line` and `list_row`, so struct
-  literals of them must name the new fields. The new `Widget` methods
-  have defaults.
+- In `manguebyte-ui`: `Arrange` has two new variants, `Adaptive` and
+  `Scroll`, so a `match` on it without a wildcard arm needs arms for
+  them; `AccessState` gains `selected`, `AccessEntry` and
+  `testing::Found` gain `item`, and `Sizes` gains `scroll_bar`,
+  `scroll_line` and `list_row`, so struct literals of them must name the
+  new fields. The new `Widget` methods have defaults.
 - `AudioBuffer::apply_gain_ramp` works the gain of frame `i` out as
   `start + step * i` instead of adding `step` frame after frame, so a ramp
   no longer drifts on a long block, and its samples can differ in the last
