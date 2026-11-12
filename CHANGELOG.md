@@ -7,6 +7,22 @@ break the API.
 
 ## Unreleased
 
+### DSP
+
+- `ConvolutionEngine` can partition a response non-uniformly (ADR 0028):
+  `ConvolutionSettings::with_non_uniform_partitions(largest)` gives the
+  bands after the first partition sizes doubling to `largest`, so a long
+  response at a small block size costs a few big transforms where the
+  uniform scheme pays thousands of small products (a three-second stereo
+  response at 48 kHz in blocks of 64 runs at 1.7 to 4.1 times real time
+  where the uniform scheme reaches 0.1 to 0.6, on a Core i3-1215U —
+  `examples/convolution_speed.rs`). `largest` equal to the partition size
+  keeps the uniform scheme, which is still the default; latency stays none
+  or one partition, output is the same bit for bit however the host splits
+  its blocks, and swapping responses with a crossfade works between
+  schemes. Measured against direct convolution to 2e-6 of the RMS in
+  `f32` and 1e-13 in `f64`.
+
 ## [0.2.0] - 2026-11-12
 
 The second release on crates.io: 27 crates, two of them new,
@@ -130,19 +146,6 @@ Breaking, below, lists what code written against 0.1.0 may need.
 
 ### DSP
 
-- `ConvolutionEngine` can partition a response non-uniformly (ADR 0028):
-  `ConvolutionSettings::with_non_uniform_partitions(largest)` gives the
-  bands after the first partition sizes doubling to `largest`, so a long
-  response at a small block size costs a few big transforms where the
-  uniform scheme pays thousands of small products (a three-second stereo
-  response at 48 kHz in blocks of 64 runs at 1.7 to 4.1 times real time
-  where the uniform scheme reaches 0.1 to 0.6, on a Core i3-1215U —
-  `examples/convolution_speed.rs`). `largest` equal to the partition size
-  keeps the uniform scheme, which is still the default; latency stays none
-  or one partition, output is the same bit for bit however the host splits
-  its blocks, and swapping responses with a crossfade works between
-  schemes. Measured against direct convolution to 2e-6 of the RMS in
-  `f32` and 1e-13 in `f64`.
 - `PartialBank` can sound blown rather than computed (ADR 0026), without
   touching what its gains, rotations and ramps mean. `set_air` puts
   narrow-band noise of a set depth and bandwidth around a partial, its
