@@ -81,6 +81,7 @@ impl SideInfo {
 }
 
 /// Reads the side information that follows the header and its CRC.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn side_info(header: &FrameHeader, bytes: &[u8]) -> Result<SideInfo, Mp3Error> {
     let malformed = || Mp3Error::Malformed("side information ends early");
     let mut bits = BitReader::new(bytes, 0, header.side_info_len() * 8);
@@ -363,6 +364,7 @@ impl Layer3 {
     /// Reads the scalefactors of an MPEG-1 granule (2.4.2.7). With `scfsi`
     /// set for a group of bands, granule 1 keeps the scalefactors granule 0
     /// read for it.
+    #[allow(clippy::needless_range_loop)]
     fn read_scalefactors(
         &mut self,
         gi: &GranuleInfo,
@@ -412,6 +414,7 @@ impl Layer3 {
 
     /// Reads the scalefactors of an MPEG-2 granule (13818-3, 2.4.3.2), whose
     /// widths come from `scalefac_compress` in one of six ways.
+    #[allow(clippy::needless_range_loop)]
     fn read_lsf_scalefactors(
         &mut self,
         gi: &GranuleInfo,
@@ -965,6 +968,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn intensity_positions_split_the_left_channel_band_by_band() {
         // MPEG-1, long blocks. The right channel has values up to band 5,
         // so bands 6 and up are coded by intensity. Its scalefactors are
@@ -998,6 +1002,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn short_blocks_are_coded_by_intensity_window_by_window() {
         let header = joint_stereo(true, 1);
         let bands = &SHORT_BANDS[header.rate_index];

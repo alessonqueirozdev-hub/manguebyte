@@ -11,13 +11,38 @@ use manguebyte::prelude::*;
 use manguebyte_host::clap::ClapLibrary;
 use manguebyte_host::vst3::Vst3Module;
 
-/// This package's own shared library, which cargo builds next to the test.
-fn built_library() -> PathBuf {
+/// The shared library cargo built for `package` in this test's build.
+///
+/// Cargo used to put it beside the test executable, in
+/// `target/<profile>/deps`. Since Rust 1.100 every unit has a folder of its
+/// own, `target/<profile>/build/<package>/<hash>/out`, and the library is
+/// also copied up to `target/<profile>`. Older copies can sit in either
+/// place, so the newest one found is this build's.
+fn built_library(package: &str) -> PathBuf {
+    let file = format!("{DLL_PREFIX}{}{DLL_SUFFIX}", package.replace('-', "_"));
     let executable = std::env::current_exe().expect("the test executable has a path");
-    let folder = executable.parent().expect("it is in a folder");
-    let file = folder.join(format!("{DLL_PREFIX}mangue_divisions{DLL_SUFFIX}"));
-    assert!(file.is_file(), "cargo has not built {}", file.display());
-    file
+    let mut candidates: Vec<PathBuf> = executable
+        .ancestors()
+        .skip(1)
+        .map(|folder| folder.join(&file))
+        .collect();
+    let units = executable
+        .ancestors()
+        .find(|folder| folder.file_name().is_some_and(|name| name == "build"))
+        .and_then(|build| std::fs::read_dir(build.join(package)).ok());
+    candidates.extend(
+        units
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|unit| unit.path().join("out").join(&file)),
+    );
+    candidates
+        .into_iter()
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| panic!("cargo has not built {file} for {}", executable.display()))
 }
 
 const NAMES: [&str; 4] = ["Great", "Swell", "Choir", "Pedal"];
@@ -49,7 +74,8 @@ fn play(channels: &[u8], run: Run<'_>) -> (f32, [f32; 4]) {
 fn as_a_clap_plugin_each_division_has_a_port() {
     // SAFETY: this package's own library, whose entry point is the
     // framework's CLAP wrapper.
-    let library = unsafe { ClapLibrary::load(built_library()) }.expect("it loads");
+    let library =
+        unsafe { ClapLibrary::load(built_library("mangue-divisions")) }.expect("it loads");
     let id = library.descriptors()[0].id.clone();
     let mut plugin = library.create(&id).unwrap();
     let names: Vec<&str> = plugin
@@ -71,7 +97,7 @@ fn as_a_clap_plugin_each_division_has_a_port() {
 #[test]
 fn as_a_vst3_plugin_each_division_has_a_bus() {
     // SAFETY: as above, for the framework's VST 3 wrapper.
-    let module = unsafe { Vst3Module::load(built_library()) }.expect("it loads");
+    let module = unsafe { Vst3Module::load(built_library("mangue-divisions")) }.expect("it loads");
     let mut plugin = module.create(module.classes()[0].id).unwrap();
     let names: Vec<&str> = plugin
         .audio_outputs()

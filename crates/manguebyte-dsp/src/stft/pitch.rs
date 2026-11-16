@@ -161,6 +161,7 @@ impl<S: Sample> SpectralProcessor<S> for PitchShift {
         self.shifted = vec![Complex::ZERO; bins];
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn process_frame(&mut self, frame: SpectralFrame<'_, S>) {
         let bins = self.bins;
         let start = frame.channel * bins;

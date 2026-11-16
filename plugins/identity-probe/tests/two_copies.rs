@@ -46,13 +46,38 @@ const COPIES: [(&str, &str, &str); 2] = [
     ("parabolic.bbbbbbbbbbbbbbbbbbbbbbbbbb", "Copy B", "Vendor B"),
 ];
 
-/// The library cargo built for this package, beside the test executable.
-fn built_library() -> PathBuf {
+/// The shared library cargo built for `package` in this test's build.
+///
+/// Cargo used to put it beside the test executable, in
+/// `target/<profile>/deps`. Since Rust 1.100 every unit has a folder of its
+/// own, `target/<profile>/build/<package>/<hash>/out`, and the library is
+/// also copied up to `target/<profile>`. Older copies can sit in either
+/// place, so the newest one found is this build's.
+fn built_library(package: &str) -> PathBuf {
+    let file = format!("{DLL_PREFIX}{}{DLL_SUFFIX}", package.replace('-', "_"));
     let executable = std::env::current_exe().expect("the test executable has a path");
-    let folder = executable.parent().expect("it is in a folder");
-    let file = folder.join(format!("{DLL_PREFIX}mangue_identity_probe{DLL_SUFFIX}"));
-    assert!(file.is_file(), "cargo has not built {}", file.display());
-    file
+    let mut candidates: Vec<PathBuf> = executable
+        .ancestors()
+        .skip(1)
+        .map(|folder| folder.join(&file))
+        .collect();
+    let units = executable
+        .ancestors()
+        .find(|folder| folder.file_name().is_some_and(|name| name == "build"))
+        .and_then(|build| std::fs::read_dir(build.join(package)).ok());
+    candidates.extend(
+        units
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|unit| unit.path().join("out").join(&file)),
+    );
+    candidates
+        .into_iter()
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| panic!("cargo has not built {file} for {}", executable.display()))
 }
 
 /// `identity` appended to `bytes`, as the probe reads it.
@@ -75,7 +100,7 @@ fn copies_folder() -> PathBuf {
 /// Writes the copies: two with an identity and one without, each in a
 /// folder of its own under the same file name.
 fn make_copies() -> ([PathBuf; 2], PathBuf) {
-    let engine = std::fs::read(built_library()).unwrap();
+    let engine = std::fs::read(built_library("mangue-identity-probe")).unwrap();
     // Folders that runs which ended long ago left behind: a copy a run
     // still had loaded on Windows could not be removed then.
     let hour = std::time::Duration::from_secs(3600);

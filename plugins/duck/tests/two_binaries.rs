@@ -1136,23 +1136,43 @@ fn random_gui_calls(duck_path: &Path, pluck_path: &Path, seeds: std::ops::RangeI
     }
 }
 
-/// The folder cargo builds this test's executable and its dependencies'
-/// shared libraries in.
-fn deps_folder() -> PathBuf {
-    std::env::current_exe()
-        .expect("the test executable has a path")
-        .parent()
-        .expect("the test executable is in a folder")
-        .to_owned()
+/// The shared library cargo built for `package` in this test's build.
+///
+/// Cargo used to put it beside the test executable, in
+/// `target/<profile>/deps`. Since Rust 1.100 every unit has a folder of its
+/// own, `target/<profile>/build/<package>/<hash>/out`, and the library is
+/// also copied up to `target/<profile>`. Older copies can sit in either
+/// place, so the newest one found is this build's.
+fn built_library(package: &str) -> PathBuf {
+    let file = format!("{DLL_PREFIX}{}{DLL_SUFFIX}", package.replace('-', "_"));
+    let executable = std::env::current_exe().expect("the test executable has a path");
+    let mut candidates: Vec<PathBuf> = executable
+        .ancestors()
+        .skip(1)
+        .map(|folder| folder.join(&file))
+        .collect();
+    let units = executable
+        .ancestors()
+        .find(|folder| folder.file_name().is_some_and(|name| name == "build"))
+        .and_then(|build| std::fs::read_dir(build.join(package)).ok());
+    candidates.extend(
+        units
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|unit| unit.path().join("out").join(&file)),
+    );
+    candidates
+        .into_iter()
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| panic!("cargo has not built {file} for {}", executable.display()))
 }
 
-/// The plugin binaries cargo builds beside this test's executable.
+/// The plugin binaries cargo builds for this test.
 fn debug_binaries() -> (PathBuf, PathBuf) {
-    duck_and_pluck(
-        &deps_folder(),
-        &format!("{DLL_PREFIX}mangue_duck{DLL_SUFFIX}"),
-        &format!("{DLL_PREFIX}mangue_pluck{DLL_SUFFIX}"),
-    )
+    (built_library("mangue-duck"), built_library("mangue-pluck"))
 }
 
 /// The bundles `scripts/bundle-clap.sh` makes.
