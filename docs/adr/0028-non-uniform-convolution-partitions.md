@@ -11,10 +11,10 @@ deadline sets it: a host that asks for blocks of 64 frames wants small
 partitions, so that the direct head stays short and the transforms stay
 small. A three-second stereo response at 48 kHz in blocks of 64 then costs
 about 2 250 products of 130-point spectra every 64 frames — which on a
-12th-generation Intel Core i3-1215U runs slower than the audio arrives
-(`examples/convolution_speed.rs` measures 0.1 to 0.6 of real time), and a
-large share of the cost is the bookkeeping of thousands of tiny partitions,
-not the convolution itself.
+12th-generation Intel Core i3-1215U barely keeps up or falls behind —
+`examples/convolution_speed.rs` measures 0.8 times real time in `f64`
+and about 3 in `f32` — and a large share of the cost is the bookkeeping
+of thousands of tiny partitions, not the convolution itself.
 
 The standard way out is a partition size that grows with the tap position:
 the beginning of the response, where the deadline is, stays in small
@@ -122,7 +122,8 @@ smaller scheme and, for a response under `2 * b`, to the uniform one.
   a second core; it also buys a thread's worth of state, a polling
   contract per band, and a fallback path for when the worker is late — a
   lot to keep honest on every platform for a problem the ladder already
-  halves twice over on this machine (0.1–0.6 of real time made 1.7–4.1).
+  makes several times faster on this machine (2.9–3.0 of real time made
+  21–26 in `f32`, 0.8 made 17–18 in `f64`).
   The engine keeps the option open: bands depend on no state outside
   themselves, so a worker could take one later without the scheme changing.
 

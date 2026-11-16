@@ -14,8 +14,8 @@ break the API.
   bands after the first partition sizes doubling to `largest`, so a long
   response at a small block size costs a few big transforms where the
   uniform scheme pays thousands of small products (a three-second stereo
-  response at 48 kHz in blocks of 64 runs at 1.7 to 4.1 times real time
-  where the uniform scheme reaches 0.1 to 0.6, on a Core i3-1215U —
+  response at 48 kHz in blocks of 64 runs at 17 to 26 times real time
+  where the uniform scheme reaches 0.8 to 3.0, on a Core i3-1215U —
   `examples/convolution_speed.rs`). `largest` equal to the partition size
   keeps the uniform scheme, which is still the default; latency stays none
   or one partition, output is the same bit for bit however the host splits

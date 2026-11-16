@@ -67,23 +67,34 @@ of two channels.
   state forgets it in at most its number of partitions plus three of its
   own periods.
 
-Measured (`examples/convolution_speed.rs`, release build, ten seconds of
-stereo noise at 48 kHz through a 3 s response in blocks of 64, best of
-three runs, on a 12th Gen Intel Core i3-1215U — figures on another
-machine, or this one busier, will differ):
+Measured (`examples/convolution_speed.rs`, release build, two-second
+segments of stereo noise at 48 kHz through a 3 s response in blocks of
+64, each figure the best of each row's fifteen interleaved timings over
+five runs, on a 12th Gen Intel Core i3-1215U with the heavy-suite queue
+empty and no build of ours running — other processes still came and went
+on this shared machine, so single runs moved by up to half and the best
+is what is printed; figures on another machine will differ):
 
 | processor | type | real time |
 |---|---|---:|
-| convolution, 3 s stereo, uniform, no latency | f32 | 0.6x |
-| convolution, 3 s stereo, non-uniform, no latency | f32 | 1.7x |
-| convolution, 3 s stereo, uniform, latency of one partition | f32 | 0.2x |
-| convolution, 3 s stereo, non-uniform, latency of one partition | f32 | 2.5x |
-| FIR, 63 taps, direct | f32 | 63x |
-| convolution, 3 s stereo, uniform, no latency | f64 | 0.1x |
-| convolution, 3 s stereo, non-uniform, no latency | f64 | 3.1x |
-| convolution, 3 s stereo, uniform, latency of one partition | f64 | 0.2x |
-| convolution, 3 s stereo, non-uniform, latency of one partition | f64 | 4.1x |
-| FIR, 63 taps, direct | f64 | 99x |
+| convolution, 3 s stereo, uniform, no latency | f32 | 2.9x |
+| convolution, 3 s stereo, non-uniform, no latency | f32 | 26.0x |
+| convolution, 3 s stereo, uniform, latency of one partition | f32 | 3.0x |
+| convolution, 3 s stereo, non-uniform, latency of one partition | f32 | 21.0x |
+| FIR, 63 taps, direct | f32 | 794.6x |
+| convolution, 3 s stereo, uniform, no latency | f64 | 0.8x |
+| convolution, 3 s stereo, non-uniform, no latency | f64 | 16.6x |
+| convolution, 3 s stereo, uniform, latency of one partition | f64 | 0.8x |
+| convolution, 3 s stereo, non-uniform, latency of one partition | f64 | 17.6x |
+| FIR, 63 taps, direct | f64 | 417.2x |
+
+The two latency modes are within noise of each other: the direct head
+the latency-free mode adds is one 64-tap dot product beside ~2 250
+spectral products in the uniform scheme and a handful of transforms in
+the other. The uniform scheme costs `f64` about four times what it costs
+`f32` — thousands of small products, where the wider lane and doubled
+memory traffic hurt most — so the ladder buys more there, about
+twentyfold against about eight.
 
 ## Transport and tempo map
 
