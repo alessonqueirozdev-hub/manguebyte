@@ -721,6 +721,14 @@ Breaking, below, lists what code written against 0.1.0 may need.
   from an earlier block, a held job, a job let go during a block or as it
   closes, both panics) and under load
   (`every_job_is_lent_after_a_block_that_missed_none`).
+- A NaN delay time no longer reaches a delay line's buffer index
+  arithmetic (issue [#23](https://github.com/alessonqueirozdev-hub/manguebyte/issues/23),
+  TECH_DEBT 29). `DelayLine::read` and the `Delay` setters clamped with
+  `f64::clamp`, which passes a NaN through; they now use the same rule as
+  `read_nearest` and `read_cubic`. A NaN delay reads the most recent
+  sample, `Delay::set_time` takes a NaN as the shortest time,
+  `set_feedback` as no feedback and `set_mix` as all dry, so a NaN from a
+  modulator or a host parameter can no longer make every later output NaN.
 ### Application state
 
 - `manguebyte-state`, a new crate for what an editor edits, undoes, saves
