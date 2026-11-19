@@ -501,7 +501,6 @@ impl FrameEncoder {
 
     /// Looks for the best linear predictor for the samples in `slot`, and
     /// returns its estimated cost with it.
-    #[allow(clippy::needless_range_loop)]
     fn search_lpc(
         &mut self,
         slot: usize,

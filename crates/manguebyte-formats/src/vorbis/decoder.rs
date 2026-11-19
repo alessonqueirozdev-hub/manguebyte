@@ -588,7 +588,6 @@ impl Vectors<'_> {
 
 /// The partitioned decoding that the three residue types share, with the
 /// values of each vector laid out as in format 0 or format 1.
-#[allow(clippy::needless_range_loop)]
 fn decode_partitions(
     residue: &Residue,
     format: u16,

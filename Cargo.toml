@@ -45,3 +45,8 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+# Since Rust 1.100 this lint also flags a loop whose index is used for more
+# than indexing. In the codecs and the filters that index is the band, the
+# granule or the bin a specification numbers, often across several arrays
+# at once, and an iterator would hide it.
+needless_range_loop = "allow"

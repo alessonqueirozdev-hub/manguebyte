@@ -794,7 +794,6 @@ struct Prototype {
 }
 
 impl Prototype {
-    #[allow(clippy::needless_range_loop)]
     fn new(family: Family, order: usize) -> Self {
         let n = order as f64;
         // Butterworth poles lie on the unit circle. For type I, `sinh μ`

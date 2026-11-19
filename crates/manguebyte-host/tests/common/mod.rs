@@ -88,8 +88,10 @@ pub fn heap_calls_during(work: impl FnOnce()) -> usize {
 ///
 /// The example plugins are dev-dependencies of this crate. Cargo compiles
 /// every crate type of a library in one go, so building the `rlib` these
-/// tests link also writes the `cdylib` a host loads, into the same folder
-/// as the test executable: `target/<profile>/deps`. For a package in the
+/// tests link also writes the `cdylib` a host loads. Before Rust 1.100 that
+/// was the folder of the test executable, `target/<profile>/deps`; since
+/// then every unit has a folder of its own,
+/// `target/<profile>/build/<package>/<hash>/out`. For a package in the
 /// workspace the file carries no hash: `mangue_pluck.dll`,
 /// `libmangue_pluck.so`, `libmangue_pluck.dylib`.
 pub fn built_library(crate_name: &str) -> PathBuf {
@@ -118,6 +120,25 @@ pub fn built_library(crate_name: &str) -> PathBuf {
         .map(|entry| entry.path());
     if let Some(hashed) = hashed {
         return hashed;
+    }
+
+    // Cargo's layout since Rust 1.100: the plugin's own unit folders,
+    // `build/<package>/<hash>/out`, beside this test's. The newest is this
+    // build's.
+    let units = executable
+        .ancestors()
+        .find(|folder| folder.file_name().is_some_and(|name| name == "build"))
+        .and_then(|build| std::fs::read_dir(build.join(crate_name.replace('_', "-"))).ok());
+    let newest = units
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|unit| unit.path().join("out").join(&file))
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path);
+    if let Some(newest) = newest {
+        return newest;
     }
 
     // A copy cargo places one level up when the plugin itself was built.

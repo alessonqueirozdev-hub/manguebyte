@@ -133,7 +133,6 @@ impl CeltEncoder {
     /// or 960), held in `input` one channel after the other with full
     /// scale at 1, into a frame of the size `budget` gives, from 2 to 1275
     /// bytes.
-    #[allow(clippy::needless_range_loop)]
     pub(crate) fn encode(
         &mut self,
         input: &[f32],
