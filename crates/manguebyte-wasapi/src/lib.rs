@@ -158,6 +158,7 @@ impl fmt::Debug for Stream {
 
 /// The device's identifier as WASAPI knows it: `cpal` writes the same
 /// one after `"wasapi:"`, and either form is taken.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn endpoint_id(id: &str) -> &str {
     id.strip_prefix("wasapi:").unwrap_or(id)
 }
@@ -171,6 +172,7 @@ fn frames_in(period: i64, sample_rate: u32) -> u32 {
 
 /// `frames` at `sample_rate` as a period in 100 ns units, rounded to the
 /// nearest, which is what WASAPI expects to turn back into whole frames.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn period_of(frames: u32, sample_rate: u32) -> i64 {
     if sample_rate == 0 {
         return 0;
