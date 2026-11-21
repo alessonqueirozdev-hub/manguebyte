@@ -90,6 +90,8 @@ mod device;
 mod drift;
 mod duplex;
 mod error;
+#[cfg(windows)]
+mod exclusive;
 mod external;
 mod host;
 mod hotplug;
@@ -112,7 +114,7 @@ pub use external::{
     AudioBackend, BackendCallback, BackendEndpoint, BackendFormat, BackendRequest, BackendStream,
     StreamStatus,
 };
-pub use host::{AudioHost, HostInfo, audio_hosts};
+pub use host::{AudioHost, HostInfo, WASAPI_EXCLUSIVE, audio_hosts};
 pub use hotplug::{
     DEFAULT_POLL_INTERVAL, DeviceEvent, DeviceSnapshot, DeviceSummary, DeviceWatcher, LossCause,
     MIN_POLL_INTERVAL, STALL_TIMEOUT,

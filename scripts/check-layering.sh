@@ -23,6 +23,7 @@ audio_crates=(
     manguebyte-osc
     manguebyte-analysis
     manguebyte-ump-io
+    manguebyte-wasapi
     manguebyte-devices
     manguebyte-graph
     manguebyte-plugin

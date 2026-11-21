@@ -29,6 +29,7 @@ manguebyte-dsp = { path = "crates/manguebyte-dsp", version = "0.2.0" }
 manguebyte-formats = { path = "crates/manguebyte-formats", version = "0.2.0" }
 manguebyte-devices = { path = "crates/manguebyte-devices", version = "0.2.0" }
 manguebyte-ump-io = { path = "crates/manguebyte-ump-io", version = "0.2.0" }
+manguebyte-wasapi = { path = "crates/manguebyte-wasapi", version = "0.2.0" }
 manguebyte-osc = { path = "crates/manguebyte-osc", version = "0.2.0" }
 manguebyte-analysis = { path = "crates/manguebyte-analysis", version = "0.2.0" }
 manguebyte-host = { path = "crates/manguebyte-host", version = "0.2.0" }

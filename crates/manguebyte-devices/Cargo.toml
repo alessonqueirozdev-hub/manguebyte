@@ -43,6 +43,12 @@ manguebyte-ump-io = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 coremidi = "0.9"
 
+# WASAPI's exclusive mode, whose COM calls cannot live in this crate, which
+# forbids `unsafe`. A workspace crate, on the `windows` crate `cpal` already
+# brings.
+[target.'cfg(windows)'.dependencies]
+manguebyte-wasapi.workspace = true
+
 [[example]]
 name = "midi2_output"
 required-features = ["midi"]

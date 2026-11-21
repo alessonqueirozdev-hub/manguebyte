@@ -7,6 +7,20 @@ break the API.
 
 ## Unreleased
 
+### Devices
+
+- WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`
+  (`manguebyte_devices::WASAPI_EXCLUSIVE`) follows WASAPI in
+  `audio_hosts` on Windows, with the same output devices by the same
+  identifiers, so a saved setup moves between the two by its `host` line.
+  A device plays for this program alone, without the Windows mixer, on a
+  period down to its shortest (3 ms on the development machine's Realtek
+  output, where shared mode adds about 10 ms of its own); the buffer sizes
+  offered start there. Output only. Drivers that refuse it, Windows'
+  Bluetooth audio among them, are reported, not worked around.
+- `manguebyte-wasapi`, a new crate: the COM calls behind that host, which
+  `manguebyte-devices` cannot make since it forbids `unsafe`.
+
 ## [0.2.0] - 2026-11-12
 
 The second release on crates.io: 27 crates, two of them new,

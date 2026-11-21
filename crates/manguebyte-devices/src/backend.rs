@@ -222,20 +222,28 @@ impl Backend for SystemBackend {
     }
 
     fn device_info(&self, direction: Direction, id: &str) -> Result<DeviceInfo, DeviceError> {
+        let host = self.host();
         let devices = match direction {
-            Direction::Output => self.host().output_devices()?,
-            Direction::Input => self.host().input_devices()?,
+            Direction::Output => host.output_devices()?,
+            Direction::Input => host.input_devices()?,
         };
-        devices
+        let info = devices
             .into_iter()
             .find(|device| device.id == id)
-            .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))
+            .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))?;
+        #[cfg(windows)]
+        if host.is_exclusive() {
+            return Ok(crate::exclusive::describe(info));
+        }
+        Ok(info)
     }
 
     fn concurrent_streams(&self) -> bool {
         // Every host runs several streams, except ASIO, whose drivers are
-        // loaded one per process.
-        self.host().name() != "ASIO"
+        // loaded one per process, and exclusive WASAPI, where a device
+        // must be let go before it is opened again.
+        let host = self.host();
+        host.name() != "ASIO" && !host.is_exclusive()
     }
 
     fn start(
@@ -244,6 +252,10 @@ impl Backend for SystemBackend {
         make: &mut dyn FnMut(OpenedFormat) -> EngineCallback,
         on_error: ErrorSink,
     ) -> Result<Started, DeviceError> {
+        #[cfg(windows)]
+        if self.host().is_exclusive() {
+            return crate::exclusive::start(request, make, on_error);
+        }
         let report = move |error| on_error(error);
         let block = request.duplex.max_block_size.max(1);
         let input = request

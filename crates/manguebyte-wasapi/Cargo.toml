@@ -1,0 +1,32 @@
+[package]
+name = "manguebyte-wasapi"
+description = "WASAPI exclusive-mode output for manguebyte-devices: the device to one program, without the Windows mixer and its period."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# The same `windows` crate (MIT OR Apache-2.0) that `cpal` uses for its
+# shared-mode WASAPI, at the version it pins, so nothing new is built or
+# downloaded. Only the features `cpal` already turns on are named.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
+[lints]
+workspace = true

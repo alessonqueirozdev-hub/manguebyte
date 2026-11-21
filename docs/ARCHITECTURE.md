@@ -51,8 +51,9 @@ nothing beside or above it.
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges, and a transport source over a streamed file | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
-| `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager, hot-plug and devices changed under a running engine; MIDI ports in and out, MIDI 2.0 out unchanged where the system and the port speak it; the `AudioBackend` seam for backends from other crates | core, midi, dsp (its `Resampler`), ump-io, `cpal`, `midir` |
+| `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager, hot-plug and devices changed under a running engine; MIDI ports in and out, MIDI 2.0 out unchanged where the system and the port speak it; the `AudioBackend` seam for backends from other crates | core, midi, dsp (its `Resampler`), ump-io, wasapi (Windows), `cpal`, `midir` |
 | `manguebyte-ump-io` | The systems' own Universal MIDI Packet output (CoreMIDI's event lists, the ALSA sequencer's UMP events), the foreign calls `manguebyte-devices` cannot make, opened at run time | `libc` |
+| `manguebyte-wasapi` | WASAPI's exclusive-mode output, the COM calls `manguebyte-devices` cannot make, behind its `"WASAPI exclusive"` host | `windows` |
 | `manguebyte-pro-io` | ASIO drivers spoken to directly, as a backend for the device manager. Under the GPLv3, opt-in, and depended on by no other crate (`scripts/check-layering.sh` checks) | core, devices |
 | `manguebyte-plugin` | `Plugin` trait, the notes and MIDI a plugin sends out, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |

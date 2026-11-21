@@ -701,6 +701,7 @@ dependencies = [
  "manguebyte-dsp",
  "manguebyte-midi",
  "manguebyte-ump-io",
+ "manguebyte-wasapi",
  "midir",
 ]
 
@@ -887,6 +888,13 @@ dependencies = [
  "manguebyte-params",
  "manguebyte-plugin",
  "vst3",
+]
+
+[[package]]
+name = "manguebyte-wasapi"
+version = "0.2.0"
+dependencies = [
+ "windows",
 ]
 
 [[package]]

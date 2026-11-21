@@ -4,6 +4,10 @@ use crate::device::{Direction, list, summaries};
 use crate::hotplug::DeviceSummary;
 use crate::{DeviceError, DeviceInfo, InputDevice, OutputDevice};
 
+/// The name of the host that plays WASAPI's output devices exclusively, as
+/// [`audio_hosts`] lists it on Windows and [`AudioHost::by_name`] takes it.
+pub const WASAPI_EXCLUSIVE: &str = "WASAPI exclusive";
+
 /// An audio host that can be used on this system, as listed by
 /// [`audio_hosts`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,15 +71,31 @@ pub struct HostInfo {
 /// or `bindgen`, but a program that uses it is under the GPLv3 as a whole.
 ///
 /// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+///
+/// # WASAPI exclusive
+///
+/// On Windows, `"WASAPI exclusive"` follows WASAPI in the list: the same
+/// output devices, each played by this program alone, without the Windows
+/// mixer and its period, down to the device's shortest period (often
+/// 3 ms). Nothing else plays on a device while it is held so, and it has
+/// no inputs. Some drivers refuse it; Bluetooth ones do.
 pub fn audio_hosts() -> Vec<HostInfo> {
     let default = cpal::default_host().id();
-    cpal::available_hosts()
-        .into_iter()
-        .map(|id| HostInfo {
+    let mut hosts = Vec::new();
+    for id in cpal::available_hosts() {
+        hosts.push(HostInfo {
             name: id.name().to_owned(),
             is_default: id == default,
-        })
-        .collect()
+        });
+        #[cfg(windows)]
+        if id == cpal::HostId::Wasapi {
+            hosts.push(HostInfo {
+                name: WASAPI_EXCLUSIVE.to_owned(),
+                is_default: false,
+            });
+        }
+    }
+    hosts
 }
 
 /// One audio host, chosen by name or the system's default.
@@ -96,6 +116,8 @@ pub fn audio_hosts() -> Vec<HostInfo> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioHost {
     id: cpal::HostId,
+    /// WASAPI's devices, played exclusively.
+    exclusive: bool,
 }
 
 impl AudioHost {
@@ -103,6 +125,7 @@ impl AudioHost {
     pub fn default_host() -> Self {
         Self {
             id: cpal::default_host().id(),
+            exclusive: false,
         }
     }
 
@@ -114,21 +137,40 @@ impl AudioHost {
     /// server.
     pub fn by_name(name: &str) -> Result<Self, DeviceError> {
         let unavailable = || DeviceError::HostUnavailable(name.to_owned());
+        #[cfg(windows)]
+        if name.trim().eq_ignore_ascii_case(WASAPI_EXCLUSIVE) {
+            return Ok(Self {
+                id: cpal::HostId::Wasapi,
+                exclusive: true,
+            });
+        }
         let id: cpal::HostId = name.trim().parse().map_err(|_| unavailable())?;
         if !cpal::available_hosts().contains(&id) {
             return Err(unavailable());
         }
-        Ok(Self { id })
+        Ok(Self {
+            id,
+            exclusive: false,
+        })
     }
 
     /// The host's name, such as `"WASAPI"`.
     pub fn name(&self) -> &'static str {
-        self.id.name()
+        if self.exclusive {
+            WASAPI_EXCLUSIVE
+        } else {
+            self.id.name()
+        }
     }
 
     /// Whether this is the system's default host.
     pub fn is_default(&self) -> bool {
-        cpal::default_host().id() == self.id
+        !self.exclusive && cpal::default_host().id() == self.id
+    }
+
+    /// Whether this host plays WASAPI's devices exclusively.
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 
     /// Lists the host's output devices.
@@ -136,8 +178,11 @@ impl AudioHost {
         list(&self.backend()?, Direction::Output)
     }
 
-    /// Lists the host's input devices.
+    /// Lists the host's input devices. The exclusive host has none.
     pub fn input_devices(&self) -> Result<Vec<DeviceInfo>, DeviceError> {
+        if self.exclusive {
+            return Ok(Vec::new());
+        }
         list(&self.backend()?, Direction::Input)
     }
 
@@ -160,6 +205,9 @@ impl AudioHost {
         &self,
         direction: Direction,
     ) -> Result<(Vec<DeviceSummary>, Option<String>), DeviceError> {
+        if self.exclusive && direction == Direction::Input {
+            return Ok((Vec::new(), None));
+        }
         summaries(&self.backend()?, direction)
     }
 
@@ -189,6 +237,22 @@ mod tests {
 
         let found = AudioHost::by_name(&listed.name.to_lowercase()).unwrap();
         assert_eq!(found, default);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_exclusive_host_follows_wasapi_and_is_found_by_name() {
+        let hosts = audio_hosts();
+        let names: Vec<&str> = hosts.iter().map(|host| host.name.as_str()).collect();
+        let wasapi = names.iter().position(|&name| name == "WASAPI").unwrap();
+        assert_eq!(names[wasapi + 1], "WASAPI exclusive");
+        assert!(!hosts[wasapi + 1].is_default);
+
+        let exclusive = AudioHost::by_name(" wasapi EXCLUSIVE ").unwrap();
+        assert!(exclusive.is_exclusive() && !exclusive.is_default());
+        assert_eq!(exclusive.name(), "WASAPI exclusive");
+        assert_ne!(exclusive, AudioHost::by_name("WASAPI").unwrap());
+        assert!(exclusive.input_devices().unwrap().is_empty());
     }
 
     #[test]
