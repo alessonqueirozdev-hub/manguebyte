@@ -4,6 +4,8 @@
 //! its WASAPI identifier (`{0.0.0.00000000}.{…}`), so that no test takes a
 //! device nobody chose. The buffers are left as they come, silent.
 
+#![cfg(windows)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
