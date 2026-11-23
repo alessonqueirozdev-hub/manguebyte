@@ -42,9 +42,11 @@ Issues #7, #22 and #24 are kept for outside contributors; #23 belongs to LukoOG.
 
 ## How to test
 
-```
-bash scripts/cloud-setup.sh --test     # = ./scripts/check.sh
-```
+The work happens on GitHub, driven by `gh` from Alesson's PC, with no clone
+kept on its disk. The CI is the proof: `.github/workflows/ci.yml` (29 jobs,
+all required on `main`) runs on every pull request and on `ci/**` branches.
+`gh pr checks <n>`, `gh run view <id> --log-failed`. With a clone,
+`./scripts/check.sh` runs the same checks.
 
 ## Environment variables
 
