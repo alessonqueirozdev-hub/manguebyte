@@ -154,10 +154,10 @@ impl<S: Sample> DelayLine<S> {
     /// A delay between two samples is interpolated linearly, whichever
     /// interpolation the line is set to.
     ///
-    /// `delay` is clamped to `1.0..=max_delay`.
+    /// `delay` is clamped to `1.0..=max_delay`. A Nan delay reads the most recent value.
     #[inline]
     pub fn read(&self, delay: f64) -> S {
-        let delay = delay.clamp(1.0, self.max_delay.max(1) as f64);
+        let delay = limit(delay, 1.0, self.max_delay.max(1) as f64);
         let whole = delay as usize;
         let fraction = S::from_f64(delay - whole as f64);
         let newer = self.buffer[self.write.wrapping_sub(whole) & self.mask];
@@ -327,20 +327,20 @@ impl<S: Sample> Delay<S> {
         }
     }
 
-    /// Sets the delay time in seconds, clamped to the maximum.
+    /// Sets the delay time in seconds, clamped to the maximum. a Nan sets the shortest time
     pub fn set_time(&mut self, seconds: f64) {
-        self.time_seconds = seconds.clamp(0.0, self.max_seconds);
+        self.time_seconds = limit(seconds, 0.0, self.max_seconds);
     }
 
     /// Sets how much of the delayed signal is fed back in, clamped to
     /// `0.0..=0.99` so the echoes always die away.
     pub fn set_feedback(&mut self, feedback: f64) {
-        self.feedback = S::from_f64(feedback.clamp(0.0, 0.99));
+        self.feedback = S::from_f64(limit(feedback, 0.0, 0.99));
     }
 
     /// Sets the dry/wet balance: `0.0` is all dry, `1.0` all delayed.
     pub fn set_mix(&mut self, mix: f64) {
-        self.mix = S::from_f64(mix.clamp(0.0, 1.0));
+        self.mix = S::from_f64(limit(mix, 0.0, 1.0));
     }
 
     /// Sets how a delay time between two samples is read. The default is
@@ -923,11 +923,6 @@ mod tests {
                         1e30,
                         f64::INFINITY,
                     ] {
-                        // `read` is older than this test and is left exactly
-                        // as it was: it hands not-a-number back.
-                        if delay.is_nan() && mode == DelayInterpolation::Linear {
-                            continue;
-                        }
                         let read = line.read_interpolated(delay);
                         assert!(
                             read.is_finite() && read.abs() < 100.0,
@@ -1034,6 +1029,64 @@ mod tests {
             for block in [1, 7, 100, 255] {
                 assert!(render(block) == reference, "{mode:?}, blocks of {block}");
             }
+        }
+    }
+
+    #[test]
+    fn a_nan_read_gives_the_most_recent_sample() {
+        let mut line = DelayLine::<f64>::new(16);
+        for n in 0..50 {
+            line.push(f64::from(n));
+            assert_eq!(line.read(f64::NAN), f64::from(n));
+        }
+    }
+
+    #[test]
+    fn a_nan_time_keeps_the_output_finite() {
+        stays_finite_after(|d| d.set_time(f64::NAN));
+
+        let mut delay = Delay::<f64>::new(0.1);
+        delay.set_time(f64::NAN);
+        assert!(delay.time_seconds.is_finite(), "a NaN time is not stored");
+    }
+
+    #[test]
+    fn a_nan_feedback_keeps_the_output_finite() {
+        stays_finite_after(|d| d.set_feedback(f64::NAN));
+    }
+
+    #[test]
+    fn a_nan_mix_keeps_the_output_finite() {
+        stays_finite_after(|d| d.set_mix(f64::NAN));
+    }
+
+    /// Runs a delay with real settings, applies `bad`, and checks that the
+    /// output stays finite afterwards.
+    fn stays_finite_after(bad: impl Fn(&mut Delay<f64>)) {
+        let mut delay = Delay::<f64>::new(0.1)
+            .with_time(0.01)
+            .with_feedback(0.5)
+            .with_mix(0.5);
+        delay.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 512,
+            num_channels: 1,
+        });
+
+        let mut signal = AudioBuffer::<f64>::new(1, 512);
+        signal.channel_mut(0)[0] = 1.0;
+        delay.process(&mut signal);
+
+        bad(&mut delay);
+
+        // Several more blocks, so a NaN would have time to spread through the feedback.
+        for _ in 0..8 {
+            let mut block = AudioBuffer::<f64>::new(1, 512);
+            delay.process(&mut block);
+            assert!(
+                block.peak().is_finite(),
+                "after {block:?} the output is not finite"
+            );
         }
     }
 }

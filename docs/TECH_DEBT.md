@@ -37,7 +37,6 @@ Each item is scored from 1 to 5 on three axes:
 | 21 | `Resampler` and `Oversampled` run a plain loop per tap. Polyphase tables for fixed ratios and SIMD would make them several times faster | Code | 3 | 1 | 3 | 12 |
 | 27 | The VST 3 wrapper puts every parameter point of a frame before the notes of the same frame, and does not reset the plugin on `setProcessing(false)`; neither is wrong by the specification, but both differ from what `Harness` does | Code | 2 | 2 | 1 | 20 |
 | 28 | Processors keep a NaN in their state until `reset`: one non-finite input sample silences a phaser, a chorus with feedback, the filters and the reverb. The framework has no crate-wide rule for recovering | Architecture | 3 | 3 | 3 | 18 |
-| 29 | `DelayLine::read` and `Delay::set_time` pass a NaN delay through; the newer read methods treat it as the shortest delay | Code | 1 | 2 | 1 | 15 |
 | 30 | The host, the OSC bridge and the streaming bridges are tested on Windows by their authors and in CI on three systems, but no hosted plugin from another vendor has been loaded yet, and the scanner has listed only the framework's own plugins and fakes built by its tests | Test | 3 | 3 | 2 | 24 |
 | 32 | `FlacError` and `FormatError` are exhaustive, so invalid encoder options are reported as `io::ErrorKind::InvalidInput`; a dedicated variant needs a breaking change before 1.0 | Code | 1 | 2 | 1 | 15 |
 | 33 | `AudioReader` cannot open a FLAC file whose first frame header is damaged; a `StreamingPlayer` loop change is not exact to the sample without a seek; the bridges' worker threads poll every 1 to 20 ms instead of being woken | Code | 2 | 2 | 2 | 16 |
@@ -159,6 +158,7 @@ Each item is scored from 1 to 5 on three axes:
 | A build without the audio backend was never exercised | CI builds and tests the facade with `--no-default-features` |
 | `ParamSmoother` in `f32` stalled short of its target on long exponential ramps and never reported finishing | State is kept in `f64`; a regression test covers a two-second ramp at 96 kHz |
 | Device code duplicated an eleven-arm match per stream direction | One `with_sample_type!` macro shared by output, input and duplex |
+| Both `DelayLine::read` and `Delay::set_time` passed a NaN delay through; the newer read methods treat it as the shortest delay | Both use `limit`, as the newer read methods do: a Nan reads the most recent samples and sets the shortest time; `set_feedback` and `set_mix` likewise turn a NaN into 0 (issue #23) |
 
 ## Remediation plan
 
