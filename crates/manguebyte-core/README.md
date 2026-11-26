@@ -126,6 +126,10 @@ for _voice in 0..64 {
 governor.end_block(128, allowance.spent(), allowance.limited());
 ```
 
+The framework's `Synth` and `Sampler` spend such a budget themselves
+(`process_governed`), and render everything in a block a wrapper marks as
+offline.
+
 `cargo run --release -p manguebyte-dsp --example governor_organ` plays a
 synthetic organ of `PartialBank` pipes asked for twice what the machine
 fits, on the real clock, and prints the loads it measured. In one run on

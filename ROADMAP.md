@@ -266,9 +266,12 @@ Everything a standalone audio application needs, short of a user interface.
   on the real clock only on one loaded laptop, where on a real-time
   thread it held a synthetic organ asked for twice what fits at the
   target with no late block (at normal priority it kept nearly every
-  block in time but thinned the organ far more than needed). No
-  instrument of the framework spends a budget yet, and the wrappers do
-  not turn it off for a host's offline render (TECH_DEBT item 111)
+  block in time but thinned the organ far more than needed). `Synth`
+  (with the organ voices in three tiers), `Sampler` and `PartialBank`
+  spend a budget when asked to, and the CLAP and VST 3 wrappers mark a
+  host's offline render, which is rendered whole; tested with fake
+  clocks only. The Audio Unit and LV2 wrappers do not mark it yet
+  (TECH_DEBT item 111)
 - ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 

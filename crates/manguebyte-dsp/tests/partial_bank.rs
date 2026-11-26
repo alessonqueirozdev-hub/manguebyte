@@ -515,3 +515,163 @@ fn changing_the_frequency_keeps_the_phase() {
     // Hard left: nothing on the right.
     assert!(r.iter().chain(&r2).all(|&x| x.abs() < 1e-7));
 }
+
+/// A bank of `count` steady partials that share no frequency.
+fn limited_bank(count: usize) -> PartialBank {
+    let mut bank = PartialBank::new(count);
+    bank.set_sample_rate(RATE);
+    bank.set_len(count);
+    for i in 0..count {
+        bank.set(
+            i,
+            Partial {
+                freq_hz: 55.0 * (i + 1) as f64,
+                gain: 0.5 / (i + 1) as f32,
+                pan: (i % 3) as f32 - 1.0,
+            },
+        );
+    }
+    bank
+}
+
+/// Renders `frames` frames in blocks of `block`, calling `at` before every
+/// block with the frame it starts on; blocks also end on `cuts`.
+fn render_cut(
+    bank: &mut PartialBank,
+    frames: usize,
+    block: usize,
+    cuts: &[usize],
+    mut at: impl FnMut(&mut PartialBank, usize),
+) -> (Vec<f32>, Vec<f32>) {
+    let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
+    let mut start = 0;
+    while start < frames {
+        at(bank, start);
+        let next_cut = cuts.iter().copied().find(|&cut| cut > start);
+        let end = (start + block).min(frames).min(next_cut.unwrap_or(frames));
+        bank.render_add(&mut left[start..end], &mut right[start..end]);
+        start = end;
+    }
+    (left, right)
+}
+
+#[test]
+fn a_limit_that_drops_nothing_changes_nothing() {
+    let render = |limit: Option<usize>| {
+        let mut bank = limited_bank(40);
+        if let Some(limit) = limit {
+            bank.set_partial_limit(limit, 64);
+        }
+        assert_eq!(bank.rendered_partials(), 48);
+        render_cut(&mut bank, 2_000, 100, &[], |_, _| {})
+    };
+    let plain = render(None);
+    for limit in [48, 40 + 8, 1_000, usize::MAX] {
+        assert!(render(Some(limit)) == plain, "{limit}");
+    }
+}
+
+#[test]
+fn dropped_partials_fade_out_cost_nothing_and_leave_the_rest_as_a_smaller_bank() {
+    const FADE: usize = 300;
+    let mut bank = limited_bank(64);
+    let (left, _) = render_cut(&mut bank, 1_024, 128, &[], |bank, at| {
+        if at == 0 {
+            bank.set_partial_limit(20, FADE);
+            assert_eq!(bank.partial_limit(), 20);
+        }
+        assert_eq!(bank.rendered_partials(), if at < FADE { 64 } else { 32 });
+    });
+    // What the rest sounds like alone, and what the dropped ones would.
+    let mut kept = limited_bank(32);
+    let (kept, _) = render_cut(&mut kept, 1_024, 128, &[], |_, _| {});
+    let mut all = limited_bank(64);
+    let (all, _) = render_cut(&mut all, 1_024, 128, &[], |_, _| {});
+    for frame in 0..1_024 {
+        let gain = 1.0 - ((frame + 1).min(FADE) as f32 / FADE as f32);
+        let expected = kept[frame] + gain * (all[frame] - kept[frame]);
+        assert!(
+            (left[frame] - expected).abs() < 1e-5,
+            "frame {frame}: {} against {expected}",
+            left[frame]
+        );
+    }
+    // Once they are gone, a bank of the rest alone, bit for bit.
+    assert!(same_bits(&left[FADE..], &kept[FADE..]));
+}
+
+#[test]
+fn partials_come_back_over_the_fade_and_the_cuts_of_blocks_change_nothing() {
+    // Limits given on these frames, with a ramp under way on a partial that
+    // is dropped for a while.
+    let changes = [
+        (64, 16, 200),
+        (150, 48, 100),
+        (400, 0, 256),
+        (1_000, usize::MAX, 128),
+        (1_500, 17, 0),
+        (1_600, 64, 90),
+    ];
+    let cuts: Vec<usize> = changes.iter().map(|&(at, ..)| at).collect();
+    let run = |block| {
+        let mut bank = limited_bank(64);
+        let output = render_cut(&mut bank, 2_048, block, &cuts, |bank, at| {
+            if at == 0 {
+                bank.ramp_to(50, 0.4, 1_800);
+                bank.ramp_to(3, 0.0, 1_800);
+            }
+            for &(when, limit, fade) in &changes {
+                if at == when {
+                    bank.set_partial_limit(limit, fade);
+                }
+            }
+        });
+        assert_eq!(bank.rendered_partials(), 64);
+        assert!((bank.gain(50) - 0.4).abs() < 1e-4, "{}", bank.gain(50));
+        output
+    };
+    let reference = run(2_048);
+    for block in [1, 7, 64, 100, 333] {
+        let output = run(block);
+        assert!(
+            same_bits(&output.0, &reference.0) && same_bits(&output.1, &reference.1),
+            "blocks of {block}"
+        );
+    }
+    // With nothing left to render, silence.
+    assert!(reference.0[700..1_000].iter().all(|&sample| sample == 0.0));
+    assert!(
+        reference.0[1_200..1_500]
+            .iter()
+            .any(|&sample| sample != 0.0)
+    );
+}
+
+#[test]
+fn a_voiced_bank_drops_partials_whatever_the_blocks() {
+    let run = |block| {
+        let mut bank = limited_bank(32);
+        for i in 0..32 {
+            bank.set_air(
+                i,
+                manguebyte_dsp::PartialAir {
+                    depth: 0.05,
+                    bandwidth_hz: 40.0,
+                },
+            );
+        }
+        render_cut(&mut bank, 1_024, block, &[200, 600], |bank, at| {
+            if at == 200 {
+                bank.set_partial_limit(16, 100);
+            }
+            if at == 600 {
+                bank.set_partial_limit(32, 100);
+            }
+        })
+    };
+    let reference = run(1_024);
+    assert!(reference.0.iter().all(|sample| sample.is_finite()));
+    for block in [1, 31, 64, 500] {
+        assert!(run(block) == reference, "blocks of {block}");
+    }
+}

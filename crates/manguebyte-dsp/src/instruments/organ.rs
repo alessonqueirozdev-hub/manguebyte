@@ -67,6 +67,17 @@ const LEAKAGE_DB: f64 = -40.0;
 /// How long a change of drawbars takes to be heard in full.
 const DRAWBAR_GLIDE_SECONDS: f64 = 0.01;
 
+/// The tier without the leakage and the click's noise, and the one that also
+/// plays only the loudest drawbars.
+const CLEAN_TIER: usize = 1;
+const THIN_TIER: usize = 2;
+
+/// How many drawbars the thinnest tier keeps.
+const THIN_DRAWBARS: usize = 3;
+
+/// Below this gain, a drawbar the thinnest tier leaves out stops its wheel.
+const DROPPED_GAIN: f64 = 1e-4;
+
 /// Which harmonic the percussion sounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PercussionHarmonic {
@@ -377,6 +388,12 @@ impl Contact {
         self.value
     }
 
+    /// Whether another sample leaves it as it is.
+    #[inline]
+    fn is_settled(&self) -> bool {
+        self.wait == 0 && self.value == if self.closing { 1.0 } else { 0.0 }
+    }
+
     fn is_open(&self) -> bool {
         !self.closing && self.value == 0.0
     }
@@ -391,6 +408,15 @@ struct OrganTone {
     /// The drawbars' gains as heard, gliding to the settings'.
     gains: [f64; DRAWBARS],
     targets: [f64; DRAWBARS],
+    /// The gains the settings call for, of which a cheaper tier takes only
+    /// some as its targets.
+    registration: [f64; DRAWBARS],
+    /// The tier of quality a budget asks for, 0 for all of it.
+    tier: usize,
+    /// How much of the leakage and the click's noise is heard, 1 on tier 0
+    /// and 0 below it, and how much it moves a sample on its way.
+    dirt: f64,
+    dirt_step: f64,
     glide: f64,
     leaks: [Wheel; 2],
     leak_gain: f64,
@@ -422,6 +448,10 @@ impl OrganTone {
             contacts: [Contact::OPEN; DRAWBARS],
             gains: [0.0; DRAWBARS],
             targets: [0.0; DRAWBARS],
+            registration: [0.0; DRAWBARS],
+            tier: 0,
+            dirt: 1.0,
+            dirt_step: 1.0,
             glide: 1.0,
             leaks: [Wheel::STILL; 2],
             leak_gain: 0.0,
@@ -456,7 +486,8 @@ impl OrganTone {
     }
 
     fn configure(&mut self, params: &OrganParams) {
-        self.targets = params.drawbar_gains();
+        self.registration = params.drawbar_gains();
+        self.retarget();
         self.leak_gain = params.leakage * db(LEAKAGE_DB);
         self.level = params.level;
         if let Some(percussion) = params.percussion {
@@ -473,6 +504,46 @@ impl OrganTone {
         } else {
             self.percussion_gain = 0.0;
         }
+    }
+
+    /// The drawbars' targets: the registration, or its loudest drawbars on
+    /// the thinnest tier (the lower of two as loud).
+    fn retarget(&mut self) {
+        self.targets = self.registration;
+        if self.tier >= THIN_TIER {
+            for (index, target) in self.targets.iter_mut().enumerate() {
+                let gain = self.registration[index];
+                let louder = self
+                    .registration
+                    .iter()
+                    .enumerate()
+                    .filter(|&(other, &value)| value > gain || (value == gain && other < index))
+                    .count();
+                if louder >= THIN_DRAWBARS {
+                    *target = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Moves to `tier`: the drawbars glide as when they are moved, and the
+    /// leakage and noise fade over `fade_frames`. With 0, all at once.
+    fn set_tier(&mut self, tier: usize, fade_frames: usize) {
+        self.tier = tier;
+        self.retarget();
+        if fade_frames == 0 {
+            self.dirt = self.dirt_goal();
+            self.gains = self.targets;
+            if self.dirt == 0.0 {
+                self.noise_level = 0.0;
+            }
+        } else {
+            self.dirt_step = 1.0 / fade_frames as f64;
+        }
+    }
+
+    fn dirt_goal(&self) -> f64 {
+        if self.tier < CLEAN_TIER { 1.0 } else { 0.0 }
     }
 
     /// Presses the key. `percussion` is the level its percussion starts
@@ -547,13 +618,27 @@ impl OrganTone {
         let mut sum = 0.0;
         let mut wheel_values = [0.0; DRAWBARS];
         let mut contact_sum = 0.0;
+        let thin = self.tier >= THIN_TIER;
+        // The wheel the percussion sounds, which turns while it does.
+        let struck = (self.percussion > 0.0).then_some(self.percussion_wheel);
         let drawbars = self
             .wheels
             .iter_mut()
             .zip(&mut self.contacts)
             .zip(self.gains.iter_mut().zip(&self.targets))
             .zip(&mut wheel_values);
-        for (((wheel, contact), (gain, target)), heard) in drawbars {
+        for (index, (((wheel, contact), (gain, target)), heard)) in drawbars.enumerate() {
+            let dropped = thin && *target == 0.0 && *gain < DROPPED_GAIN && struck != Some(index);
+            if dropped {
+                // Only its contact goes on, so that the note can end.
+                *gain = 0.0;
+                contact_sum += if contact.is_settled() {
+                    contact.value
+                } else {
+                    contact.next()
+                };
+                continue;
+            }
             let value = wheel.next();
             *heard = value;
             let contact = contact.next();
@@ -568,12 +653,24 @@ impl OrganTone {
                 * wheel_values[self.percussion_wheel];
             self.percussion = flush(self.percussion * self.percussion_fall);
         }
-        let leak = self.leaks[0].next() + self.leaks[1].next();
-        sum += self.leak_gain * leak * contact_sum / DRAWBARS as f64;
-        if self.noise_level > 0.0 {
-            let noise = self.noise.next();
-            sum += self.noise_level * self.noise_filter.process_sample(0, noise);
-            self.noise_level = flush(self.noise_level * self.noise_fall);
+        let goal = self.dirt_goal();
+        if self.dirt != goal {
+            self.dirt = if goal > self.dirt {
+                (self.dirt + self.dirt_step).min(goal)
+            } else {
+                (self.dirt - self.dirt_step).max(goal)
+            };
+        }
+        if self.dirt > 0.0 {
+            let leak = self.leaks[0].next() + self.leaks[1].next();
+            sum += self.leak_gain * leak * contact_sum / DRAWBARS as f64 * self.dirt;
+            if self.noise_level > 0.0 {
+                let noise = self.noise.next();
+                sum += self.noise_level * self.noise_filter.process_sample(0, noise) * self.dirt;
+                self.noise_level = flush(self.noise_level * self.noise_fall);
+            }
+        } else {
+            self.noise_level = 0.0;
         }
         self.level_now += (self.level - self.level_now) * self.glide;
         sum * self.gain * self.level_now
@@ -589,6 +686,9 @@ impl Tone for OrganTone {
         self.contacts = [Contact::OPEN; DRAWBARS];
         self.percussion = 0.0;
         self.noise_level = 0.0;
+        self.tier = 0;
+        self.dirt = 1.0;
+        self.retarget();
         Processor::<f64>::reset(&mut self.noise_filter);
     }
 }
@@ -620,6 +720,18 @@ impl Tone for OrganTone {
 /// bend and [`Expression::Tuning`] retune every wheel of the note. For the
 /// rotating speaker the organ is usually heard through, put a
 /// [`RotarySpeaker`](super::RotarySpeaker) after the synth.
+///
+/// # A budget
+///
+/// In a [`Synth`](crate::Synth) that spends a budget
+/// ([`Synth::process_governed`](crate::Synth::process_governed)), the voice
+/// renders at three tiers, which cost [`FULL_COST`](Self::FULL_COST),
+/// [`CLEAN_COST`](Self::CLEAN_COST) and [`THIN_COST`](Self::THIN_COST)
+/// units: whole; without the leakage and the click's noise, which fade out
+/// as the budget asks; and with only the three loudest drawbars besides,
+/// the others gliding out as moved drawbars do. A voice whose key is down
+/// can be suspended and taken up again, without the percussion it had; one
+/// released is stolen.
 ///
 /// ```
 /// use manguebyte_core::AudioBuffer;
@@ -663,6 +775,17 @@ impl OrganVoice {
     pub fn new(params: OrganParams) -> Self {
         Self::with_manual(params, &OrganManual::new())
     }
+
+    /// The cost units of a voice rendered whole
+    /// ([`Voice::tier_cost`](crate::Voice::tier_cost) of tier 0).
+    pub const FULL_COST: f64 = 12.0;
+
+    /// The cost units of a voice without leakage or click noise (tier 1).
+    pub const CLEAN_COST: f64 = 11.0;
+
+    /// The cost units of a voice with its three loudest drawbars alone
+    /// (tier 2).
+    pub const THIN_COST: f64 = 9.0;
 
     /// A voice on the given manual. Every voice of one organ should share
     /// it.
@@ -712,6 +835,20 @@ impl OrganVoice {
     /// The manual this voice plays on.
     pub fn manual(&self) -> &OrganManual {
         &self.manual
+    }
+
+    /// Moves the age of the percussion's trigger on, while a chord can
+    /// still join it.
+    fn age_trigger(&mut self, frames: usize) {
+        if self.owner {
+            self.age = self.age.saturating_add(frames as u32);
+            let age = if self.age > self.chord_frames {
+                u32::MAX
+            } else {
+                self.age
+            };
+            self.manual.0.since_trigger.store(age, Ordering::Relaxed);
+        }
     }
 
     fn let_go(&mut self) {
@@ -805,21 +942,44 @@ impl<S: Sample> Voice<S> for OrganVoice {
     }
 
     fn render(&mut self, buffer: &mut AudioBuffer<S>) {
-        let frames = buffer.num_frames() as u32;
-        if self.owner {
-            self.age = self.age.saturating_add(frames);
-            let age = if self.age > self.chord_frames {
-                u32::MAX
-            } else {
-                self.age
-            };
-            self.manual.0.since_trigger.store(age, Ordering::Relaxed);
-        }
+        self.age_trigger(buffer.num_frames());
         if !self.tones.is_active() {
             return;
         }
         let tones = &mut self.tones;
         add_to_every_channel(buffer, || tones.next(OrganTone::next));
+    }
+
+    fn tier_count(&self) -> usize {
+        THIN_TIER + 1
+    }
+
+    fn tier_cost(&self, tier: usize) -> f64 {
+        match tier {
+            0 => Self::FULL_COST,
+            CLEAN_TIER => Self::CLEAN_COST,
+            _ => Self::THIN_COST,
+        }
+    }
+
+    fn set_tier(&mut self, tier: usize, fade_frames: usize) {
+        self.tones.now.set_tier(tier, fade_frames);
+        self.tones.old.set_tier(tier, fade_frames);
+    }
+
+    fn audibility(&self) -> f32 {
+        (self.tones.now.gain * self.tones.now.level) as f32
+    }
+
+    fn can_suspend(&self) -> bool {
+        self.held
+    }
+
+    fn skip_suspended(&mut self, frames: usize) {
+        self.age_trigger(frames);
+        self.tones.now.percussion = 0.0;
+        self.tones.now.noise_level = 0.0;
+        self.tones.drop_fading();
     }
 
     fn expression(&mut self, expression: Expression, value: f64) {

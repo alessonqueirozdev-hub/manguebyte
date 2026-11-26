@@ -1,5 +1,7 @@
 //! A bank of sine partials for additive synthesis.
 
+use core::ops::Range;
+
 use manguebyte_core::vector::{Backend, PartialModulators, Partials};
 
 use crate::partial_voicing::{PartialAir, PartialAttack, VOICE_FRAMES, Voicing, WindJitter};
@@ -114,6 +116,12 @@ pub struct Partial {
 /// The arrays of the voicing come with [`new`](Self::new), used or not:
 /// 140 bytes a partial, on top of the bank's own 40.
 ///
+/// # A budget
+///
+/// A bank can drop partials to spend less, a group of 16 at a time, fading
+/// them out and back in: see
+/// [`set_partial_limit`](Self::set_partial_limit).
+///
 /// # Real time
 ///
 /// [`new`](Self::new) allocates, once; nothing else does. Every setter and
@@ -160,6 +168,15 @@ pub struct PartialBank {
     backend: Backend,
     /// Air, attacks and wind.
     voice: Voicing,
+    /// How many partials a budget lets sound.
+    limit: usize,
+    /// For each group, how far it is on its way to silence, in frames of
+    /// the fade: 0 is full level and `fade` is silent, and not rendered.
+    depth: Vec<usize>,
+    /// The frames the groups' fades last.
+    fade: usize,
+    /// Whether some group is not at full level.
+    thinned: bool,
 }
 
 /// The pan gains of the centre, `cos(π/4)`.
@@ -197,6 +214,10 @@ impl PartialBank {
             since_normalised: 0,
             backend: Backend::detect(),
             voice: Voicing::new(room, 44_100.0),
+            limit: usize::MAX,
+            depth: vec![0; room / GROUP],
+            fade: 1,
+            thinned: false,
         }
     }
 
@@ -268,6 +289,74 @@ impl PartialBank {
     /// The backend the bank renders on, [`Backend::detect`] unless set.
     pub fn backend(&self) -> Backend {
         self.backend
+    }
+
+    /// Renders only the partials below `partials`, rounded up to a multiple
+    /// of 16: how an instrument drops partials to stay within a budget (see
+    /// [`manguebyte_core::governor`]). Order the partials from the one that
+    /// would be missed most to the one missed least, as harmonics that fall
+    /// in level are in the order of their number. `usize::MAX` lets them all
+    /// sound, as a new bank does.
+    ///
+    /// The groups of 16 that leave or come back fade out or in along a
+    /// straight line over `fade_frames` frames rendered, from wherever they
+    /// are; with 0 they go or come at once. A group that has faded out is not
+    /// rendered: its phasors stand still, while its gains, ramps and
+    /// modulators move on as if it sounded, which is all it still costs.
+    /// While every group sounds in full, the output is that of a bank with
+    /// no limit, bit for bit.
+    ///
+    /// ```
+    /// use manguebyte_dsp::PartialBank;
+    ///
+    /// let mut bank = PartialBank::new(64);
+    /// bank.set_len(64);
+    /// // The upper half leaves over 256 frames.
+    /// bank.set_partial_limit(32, 256);
+    /// assert_eq!(bank.rendered_partials(), 64);
+    /// let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+    /// bank.render_add(&mut left, &mut right);
+    /// assert_eq!(bank.rendered_partials(), 32);
+    /// ```
+    pub fn set_partial_limit(&mut self, partials: usize, fade_frames: usize) {
+        let fade = fade_frames.max(1);
+        let kept = partials.div_ceil(GROUP);
+        for (group, depth) in self.depth.iter_mut().enumerate() {
+            // The same level on the new length of fade.
+            *depth = (*depth as u128 * fade as u128 / self.fade as u128) as usize;
+            if fade_frames == 0 {
+                *depth = usize::from(group >= kept);
+            }
+        }
+        self.limit = partials;
+        self.fade = fade;
+        self.update_thinned();
+    }
+
+    /// The limit last given to
+    /// [`set_partial_limit`](Self::set_partial_limit), `usize::MAX` if none
+    /// was.
+    pub fn partial_limit(&self) -> usize {
+        self.limit
+    }
+
+    /// How many partials the next frame renders, in whole groups of 16:
+    /// those in use whose group has not faded out. What the bank costs, as a
+    /// number of units for a budget.
+    pub fn rendered_partials(&self) -> usize {
+        let kept = self.limit.div_ceil(GROUP);
+        self.depth
+            .iter()
+            .take(self.len.div_ceil(GROUP))
+            .enumerate()
+            .filter(|&(group, &depth)| group < kept || depth < self.fade)
+            .count()
+            * GROUP
+    }
+
+    fn update_thinned(&mut self) {
+        let kept = self.limit.div_ceil(GROUP);
+        self.thinned = kept < self.depth.len() || self.depth.iter().any(|&depth| depth > 0);
     }
 
     /// Renders on `backend` from now on. The output is the same on every
@@ -678,53 +767,163 @@ impl PartialBank {
             }
             if self.voice.on {
                 n = n.min(VOICE_FRAMES - within);
-                let voice = &mut self.voice;
-                let (cos_step, sin_step) = if voice.shifting {
-                    (&voice.cos_turn[..used], &voice.sin_turn[..used])
-                } else {
-                    (&self.cos_step[..used], &self.sin_step[..used])
-                };
-                self.backend.add_modulated_partials(
-                    &mut left[at..at + n],
-                    &mut right[at..at + n],
-                    &mut Partials {
-                        cos: &mut self.cos[..used],
-                        sin: &mut self.sin[..used],
-                        gain: &mut self.gain[..used],
-                        cos_step,
-                        sin_step,
-                        gain_step: &self.gain_step[..used],
-                        left_gain: &self.left_gain[..used],
-                        right_gain: &self.right_gain[..used],
-                    },
-                    &mut PartialModulators {
-                        re: &mut voice.mod_re[..used],
-                        im: &mut voice.mod_im[..used],
-                        re_step: &voice.mod_re_step[..used],
-                        im_step: &voice.mod_im_step[..used],
-                    },
-                );
+            }
+            if self.thinned {
+                // So that no fade ends inside a piece.
+                n = n.min(self.next_fade_end(used));
+            }
+            let (left, right) = (&mut left[at..at + n], &mut right[at..at + n]);
+            if self.thinned {
+                self.render_limited(left, right, used);
             } else {
-                self.backend.add_partials(
-                    &mut left[at..at + n],
-                    &mut right[at..at + n],
-                    &mut Partials {
-                        cos: &mut self.cos[..used],
-                        sin: &mut self.sin[..used],
-                        gain: &mut self.gain[..used],
-                        cos_step: &self.cos_step[..used],
-                        sin_step: &self.sin_step[..used],
-                        gain_step: &self.gain_step[..used],
-                        left_gain: &self.left_gain[..used],
-                        right_gain: &self.right_gain[..used],
-                    },
-                );
+                self.render_partials(0..used, left, right);
             }
             if self.ramping > 0 {
                 self.advance_ramps(n);
             }
             self.since_normalised = (self.since_normalised + n) % Self::NORMALISE_FRAMES;
             at += n;
+        }
+    }
+
+    /// Adds the partials of `range`, whole groups, to `left` and `right`,
+    /// of at most [`NORMALISE_FRAMES`](Self::NORMALISE_FRAMES) frames.
+    fn render_partials(&mut self, range: Range<usize>, left: &mut [f32], right: &mut [f32]) {
+        if self.voice.on {
+            let voice = &mut self.voice;
+            let (cos_step, sin_step) = if voice.shifting {
+                (
+                    &voice.cos_turn[range.clone()],
+                    &voice.sin_turn[range.clone()],
+                )
+            } else {
+                (&self.cos_step[range.clone()], &self.sin_step[range.clone()])
+            };
+            self.backend.add_modulated_partials(
+                left,
+                right,
+                &mut Partials {
+                    cos: &mut self.cos[range.clone()],
+                    sin: &mut self.sin[range.clone()],
+                    gain: &mut self.gain[range.clone()],
+                    cos_step,
+                    sin_step,
+                    gain_step: &self.gain_step[range.clone()],
+                    left_gain: &self.left_gain[range.clone()],
+                    right_gain: &self.right_gain[range.clone()],
+                },
+                &mut PartialModulators {
+                    re: &mut voice.mod_re[range.clone()],
+                    im: &mut voice.mod_im[range.clone()],
+                    re_step: &voice.mod_re_step[range.clone()],
+                    im_step: &voice.mod_im_step[range],
+                },
+            );
+        } else {
+            self.backend.add_partials(
+                left,
+                right,
+                &mut Partials {
+                    cos: &mut self.cos[range.clone()],
+                    sin: &mut self.sin[range.clone()],
+                    gain: &mut self.gain[range.clone()],
+                    cos_step: &self.cos_step[range.clone()],
+                    sin_step: &self.sin_step[range.clone()],
+                    gain_step: &self.gain_step[range.clone()],
+                    left_gain: &self.left_gain[range.clone()],
+                    right_gain: &self.right_gain[range],
+                },
+            );
+        }
+    }
+
+    /// The frames until the first fade of a group in use ends,
+    /// `usize::MAX` with none under way.
+    fn next_fade_end(&self, used: usize) -> usize {
+        let kept = self.limit.div_ceil(GROUP);
+        self.depth
+            .iter()
+            .take(used / GROUP)
+            .enumerate()
+            .map(|(group, &depth)| {
+                if group < kept {
+                    depth
+                } else {
+                    self.fade.saturating_sub(depth)
+                }
+            })
+            .filter(|&frames| frames > 0)
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
+    /// [`render_add`](Self::render_add)'s piece under a limit: the groups
+    /// at full level together, then each fading group by itself, and the
+    /// silent ones not at all.
+    fn render_limited(&mut self, left: &mut [f32], right: &mut [f32], used: usize) {
+        let frames = left.len();
+        let kept = self.limit.div_ceil(GROUP);
+        let fade = self.fade;
+        let groups = used / GROUP;
+        let full = |bank: &Self, group: usize| group < kept && bank.depth[group] == 0;
+        let mut group = 0;
+        while group < groups {
+            if full(self, group) {
+                let first = group;
+                while group < groups && full(self, group) {
+                    group += 1;
+                }
+                self.render_partials(first * GROUP..group * GROUP, left, right);
+                continue;
+            }
+            let wanted = group < kept;
+            let depth = self.depth[group];
+            let range = group * GROUP..(group + 1) * GROUP;
+            if !wanted && depth >= fade {
+                self.skip_partials(range, frames);
+            } else {
+                let mut own = [[0.0f32; Self::NORMALISE_FRAMES]; 2];
+                let [own_left, own_right] = &mut own;
+                self.render_partials(range, &mut own_left[..frames], &mut own_right[..frames]);
+                let mut now = depth;
+                for frame in 0..frames {
+                    now = if wanted {
+                        now.saturating_sub(1)
+                    } else {
+                        (now + 1).min(fade)
+                    };
+                    let gain = (1.0 - now as f64 / fade as f64) as f32;
+                    left[frame] += own_left[frame] * gain;
+                    right[frame] += own_right[frame] * gain;
+                }
+                self.depth[group] = now;
+            }
+            group += 1;
+        }
+        // Groups past those in use have nothing to fade.
+        for group in groups..self.depth.len() {
+            self.depth[group] = if group < kept { 0 } else { fade };
+        }
+        self.update_thinned();
+    }
+
+    /// Moves on what the kernel would have moved of partials it does not
+    /// render, all but their phasors, by the same additions a frame, so that
+    /// a ramp ends where it would have.
+    fn skip_partials(&mut self, range: Range<usize>, frames: usize) {
+        let advance = |value: &mut f32, step: f32| {
+            if step != 0.0 {
+                for _ in 0..frames {
+                    *value += step;
+                }
+            }
+        };
+        for i in range {
+            advance(&mut self.gain[i], self.gain_step[i]);
+            if self.voice.on {
+                advance(&mut self.voice.mod_re[i], self.voice.mod_re_step[i]);
+                advance(&mut self.voice.mod_im[i], self.voice.mod_im_step[i]);
+            }
         }
     }
 

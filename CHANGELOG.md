@@ -7,6 +7,43 @@ break the API.
 
 ## Unreleased
 
+### Instruments and the processor budget
+
+The framework's own instruments can spend a `core::governor` budget (ADR
+0018). Nothing changes for one that is not asked to: `process_with` renders
+as before, and a budget that covers every voice, or an offline block, gives
+that output bit for bit.
+
+- `Synth::process_budgeted` renders within an `Allowance`, and
+  `Synth::process_governed` inside a `Governor`. Held, then louder, then
+  newer voices come first; each gets the best of its tiers that fits. A
+  voice with no room fades out over 6 ms, then waits to be faded back in if
+  it can, and is stolen if not; a new note with no room is silent.
+  `demoted_voices` and `suspended_voices` count them.
+- `Voice` has six new methods, all with defaults (one tier of one unit,
+  stolen when cut): `tier_count`, `tier_cost`, `set_tier`, `audibility`,
+  `can_suspend` and `skip_suspended`.
+- `OrganVoice` renders at three tiers: whole; without leakage and click
+  noise; with only its three loudest drawbars besides. A held key waits.
+- `PartialBank::set_partial_limit` drops partials in groups of 16, fading
+  them out and back, and renders none of the groups that have gone; its
+  output still does not depend on how blocks are cut.
+- `Sampler::process_budgeted` and `process_governed` demote voices from the
+  sinc to the cubic interpolator, crossing over 6 ms; suspend held loops and
+  steal the rest. `SamplerVoice` has the two tiers inside a `Synth`.
+- `ProcessContext::offline`: set by the CLAP wrapper (the `clap.render`
+  extension, which it now offers), the VST 3 wrapper (offline process
+  mode), the standalone runner's `Engine::set_offline` and the plugin
+  `Harness`, which renders offline unless `Harness::set_offline(false)`. The
+  instruments render everything in such a block, so a plugin that passes
+  them its context need do nothing. The Audio Unit and LV2 wrappers do not
+  set it yet.
+- `core::governor`: `Governor::govern`, `allowance` and `discard_block`,
+  `Allowance::absorb`, and `RenderPool::run_governed`, which gives the
+  pool's report to the governor.
+- A block in which a budget cuts voices spends more than it, by what their
+  fades cost.
+
 ### Devices
 
 - WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`

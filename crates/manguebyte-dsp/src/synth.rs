@@ -1,5 +1,4 @@
-use core::marker::PhantomData;
-
+use manguebyte_core::governor::{Allowance, Clock, Governor};
 use manguebyte_core::{AudioBuffer, ParamId, Sample};
 use manguebyte_midi::MidiMessage;
 
@@ -145,7 +144,96 @@ pub trait Voice<S: Sample = f32> {
     fn set_tuning(&mut self, tuning: &Tuning) {
         let _ = tuning;
     }
+
+    /// How many tiers of quality the voice can render its note at, for a
+    /// [`Synth`] spending a budget ([`Synth::process_budgeted`]): tier 0 is
+    /// full quality, and each one after it cheaper. At least 1, which is the
+    /// default: the voice is rendered whole or not at all.
+    fn tier_count(&self) -> usize {
+        1
+    }
+
+    /// What rendering the voice's note at `tier` costs a block, in the cost
+    /// units of the instrument (ADR 0018): only how the costs of its voices
+    /// and tiers compare matters, and a later tier must not cost more than
+    /// an earlier one. A cost that is not a finite number, or is below 0,
+    /// counts as 0. 1 by default, so a synth of such voices spends its
+    /// budget as a number of voices.
+    fn tier_cost(&self, tier: usize) -> f64 {
+        let _ = tier;
+        1.0
+    }
+
+    /// Renders at `tier`, below [`tier_count`](Self::tier_count), from the
+    /// next frame on. The voice crosses from what it was doing to the new
+    /// tier over `fade_frames` frames, so that nothing clicks; with 0 it
+    /// changes at once, which the synth asks only of a voice that has not
+    /// been heard since it changed. [`choke`](Self::choke) puts a voice back
+    /// on tier 0. Does nothing by default, which suits a voice of one tier.
+    fn set_tier(&mut self, tier: usize, fade_frames: usize) {
+        let _ = (tier, fade_frames);
+    }
+
+    /// How audible the note is next to the others, in any unit that grows
+    /// with it (a gain, say): when the budget does not cover every voice,
+    /// the synth gives it first to the keys held, then to the notes the
+    /// pedal holds, then to those released, and within each to the more
+    /// audible, and then to the newer. A voice that renders at full quality
+    /// counts as a quarter more audible than it says, so that two of nearly
+    /// the same audibility do not take turns. 1 by default.
+    fn audibility(&self) -> f32 {
+        1.0
+    }
+
+    /// Whether the note, with its key held, can be left unrendered for a
+    /// while and taken up again later, as the sustained tone of an organ
+    /// can. A synth that cannot afford such a voice suspends it: it fades it
+    /// out, stops rendering it, and fades it back in once the budget allows.
+    /// One that answers `false`, as by default, is stolen instead: faded
+    /// out, choked and free for another note.
+    fn can_suspend(&self) -> bool {
+        false
+    }
+
+    /// `frames` frames of the timeline went by while the voice was
+    /// suspended and not rendered, for what a voice must keep in time with
+    /// the others. Does nothing by default.
+    fn skip_suspended(&mut self, frames: usize) {
+        let _ = frames;
+    }
 }
+
+/// How long a [`Synth`] spending a budget takes to fade out a voice it can
+/// no longer afford and to fade it back in, and what it gives
+/// [`Voice::set_tier`] to cross-fade over, in seconds.
+pub const BUDGET_FADE_SECONDS: f64 = 0.006;
+
+/// How much more audible a voice rendering at full quality counts than it
+/// says it is, when a budget is shared out.
+const KEEP_BONUS: f32 = 1.25;
+
+/// What the budget gives a voice.
+#[derive(Debug, Clone, Copy)]
+struct Share {
+    /// The tier asked of the voice.
+    tier: usize,
+    /// Whether the voice is to be heard.
+    wanted: bool,
+    /// How far it is on the way to silence, in frames of the fade: 0 is full
+    /// level, and the fade's length is silent.
+    depth: usize,
+    /// A note not yet rendered, which starts as it is shared out, with no
+    /// fade.
+    fresh: bool,
+}
+
+/// What every voice has with no budget: all of it.
+const WHOLE: Share = Share {
+    tier: 0,
+    wanted: true,
+    depth: 0,
+    fresh: false,
+};
 
 /// A controller nobody has moved yet. MIDI values stop at 127.
 const UNMOVED: u8 = 0xFF;
@@ -174,6 +262,17 @@ enum Stage {
     Released,
 }
 
+/// A voice's place in the order a budget is shared out in.
+#[derive(Debug, Clone, Copy)]
+struct Rank {
+    /// Held, then held by the pedal, then released.
+    stage: u8,
+    audibility: f32,
+    /// When its note started: higher is newer.
+    started: u64,
+    index: usize,
+}
+
 #[derive(Debug)]
 struct Slot<V> {
     voice: V,
@@ -181,6 +280,105 @@ struct Slot<V> {
     stage: Stage,
     /// Value of the synth's clock when the note started. Lower is older.
     started: u64,
+    share: Share,
+}
+
+impl<V> Slot<V> {
+    /// Whether the budget has silenced the voice, so that it is not
+    /// rendered.
+    fn is_silenced(&self, fade: usize) -> bool {
+        self.stage != Stage::Idle && !self.share.wanted && self.share.depth >= fade
+    }
+
+    /// Stops the voice at once and frees it.
+    fn stop<S: Sample>(&mut self)
+    where
+        V: Voice<S>,
+    {
+        self.voice.choke();
+        self.stage = Stage::Idle;
+        self.share = WHOLE;
+    }
+
+    /// Whether a silenced voice waits for the budget instead of being
+    /// stolen.
+    fn may_wait<S: Sample>(&self) -> bool
+    where
+        V: Voice<S>,
+    {
+        matches!(self.stage, Stage::Held | Stage::Sustained) && self.voice.can_suspend()
+    }
+
+    /// What the voice costs on the tier it is on, if it makes sound.
+    fn cost<S: Sample>(&self, tier: usize) -> f64
+    where
+        V: Voice<S>,
+    {
+        let cost = self.voice.tier_cost(tier);
+        if cost.is_finite() { cost.max(0.0) } else { 0.0 }
+    }
+
+    /// Renders a voice that is fading out or back in, or is silenced, into
+    /// `piece`, through `scratch`. Returns the frames of `piece` it rendered.
+    fn render_fading<S: Sample>(
+        &mut self,
+        piece: &mut AudioBuffer<S>,
+        scratch: &mut AudioBuffer<S>,
+        fade: usize,
+    ) -> usize
+    where
+        V: Voice<S>,
+    {
+        let frames = piece.num_frames();
+        let mut done = 0;
+        while done < frames {
+            let wanted = self.share.wanted;
+            let left = if wanted {
+                self.share.depth
+            } else {
+                fade.saturating_sub(self.share.depth)
+            };
+            if left == 0 {
+                if wanted {
+                    piece.windowed(done..frames, |rest| self.voice.render(rest));
+                    return frames;
+                }
+                break;
+            }
+            let count = left.min(frames - done).min(scratch.capacity());
+            if count == 0 || scratch.num_channels() != piece.num_channels() {
+                // A synth that was not prepared for such blocks has nowhere
+                // to fade in: the voice changes at once.
+                self.share.depth = if wanted { 0 } else { fade };
+                continue;
+            }
+            scratch.set_num_frames(count);
+            scratch.clear();
+            self.voice.render(scratch);
+            let depth = self.share.depth;
+            for (out, from) in piece.iter_channels_mut().zip(scratch.iter_channels()) {
+                for (frame, (out, &sample)) in out[done..].iter_mut().zip(from).enumerate() {
+                    let depth = if wanted {
+                        depth.saturating_sub(frame + 1)
+                    } else {
+                        depth + frame + 1
+                    };
+                    let gain = 1.0 - depth as f64 / fade as f64;
+                    *out += sample * S::from_f64(gain);
+                }
+            }
+            self.share.depth = if wanted { depth - count } else { depth + count };
+            done += count;
+        }
+        if self.is_silenced(fade) {
+            if self.may_wait() {
+                self.voice.skip_suspended(frames - done);
+            } else {
+                self.stop();
+            }
+        }
+        done
+    }
 }
 
 /// A polyphonic instrument: a pool of [`Voice`]s and the logic that hands
@@ -221,6 +419,33 @@ struct Slot<V> {
 /// from it instead of starting a voice of its own.
 ///
 /// The output replaces whatever was in the buffer.
+///
+/// # A budget
+///
+/// A synth can render within the budget of a processor budget governor
+/// ([`manguebyte_core::governor`], ADR 0018), through
+/// [`process_governed`](Self::process_governed), or
+/// [`process_budgeted`](Self::process_budgeted) with an allowance of the
+/// caller's. Nothing changes unless one of them is called.
+///
+/// At the start of each block, and where a note starts or ends inside it,
+/// the budget is shared out in order of priority (see
+/// [`Voice::audibility`]): each voice gets the best of its
+/// [tiers](Voice::tier_count) that still fits. A voice that moves to
+/// another tier cross-fades itself ([`Voice::set_tier`]). One that no tier
+/// fits for is faded out over [`BUDGET_FADE_SECONDS`] and then suspended, to
+/// be faded back in later, if it [can be](Voice::can_suspend), and stolen if
+/// not; a new note that nothing fits for makes no sound at all. A voice
+/// fading out is rendered for as long as its fade lasts, over the budget if
+/// need be, and what it costs is counted as spent.
+///
+/// A block whose [`ProcessContext::offline`] is set renders everything,
+/// whatever the budget. While the budget covers every voice at tier 0, the
+/// output is that of [`process_with`](Processor::process_with), bit for
+/// bit. A budget that does not cover them is shared out where blocks start,
+/// so what is heard then depends on where the host cuts them, and with a
+/// governor on a real clock, on the machine. A call to `process_with` after
+/// a budget brings every voice back to full quality, with the same fades.
 ///
 /// ```
 /// use manguebyte_core::AudioBuffer;
@@ -273,7 +498,18 @@ pub struct Synth<V, S: Sample = f32> {
     voice_limit: usize,
     /// What every voice was last given by `set_tuning`.
     tuning: Tuning,
-    marker: PhantomData<S>,
+    sample_rate: f64,
+    /// Where a voice that is fading under a budget renders.
+    scratch: AudioBuffer<S>,
+    /// The voices in order of priority, as a budget is shared out; has room
+    /// for them all.
+    order: Vec<Rank>,
+    /// The fade of a voice the budget cuts, in frames.
+    fade: usize,
+    /// Whether some voice is not at full quality, for a budget's sake.
+    thinned: bool,
+    /// Whether notes started or ended since the budget was shared out.
+    changed: bool,
 }
 
 impl<S: Sample, V: Voice<S>> Synth<V, S> {
@@ -286,10 +522,12 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 note: NoteRef::new(0, 0),
                 stage: Stage::Idle,
                 started: 0,
+                share: WHOLE,
             })
             .collect();
         Self {
             voice_limit: slots.len(),
+            order: Vec::with_capacity(slots.len()),
             slots,
             clock: 0,
             sustain: [false; 16],
@@ -298,7 +536,11 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             bend_range: 2.0,
             legato: false,
             tuning: Tuning::default(),
-            marker: PhantomData,
+            sample_rate: 48_000.0,
+            scratch: AudioBuffer::new(0, 0),
+            fade: (BUDGET_FADE_SECONDS * 48_000.0) as usize,
+            thinned: false,
+            changed: false,
         }
     }
 
@@ -383,12 +625,228 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         self.voice_limit
     }
 
-    /// How many voices are sounding right now.
+    /// How many voices are sounding right now, not counting those a budget
+    /// has [suspended](Self::suspended_voices).
     pub fn active_voices(&self) -> usize {
         self.slots
             .iter()
-            .filter(|slot| slot.stage != Stage::Idle && slot.voice.is_active())
+            .filter(|slot| {
+                slot.stage != Stage::Idle && !slot.is_silenced(self.fade) && slot.voice.is_active()
+            })
             .count()
+    }
+
+    /// How many voices a [budget](Self#a-budget) has on a tier below full
+    /// quality, those still sounding.
+    pub fn demoted_voices(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.stage != Stage::Idle && slot.share.wanted && slot.share.tier > 0)
+            .count()
+    }
+
+    /// How many notes a [budget](Self#a-budget) has silenced, waiting to be
+    /// taken up again.
+    pub fn suspended_voices(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.is_silenced(self.fade))
+            .count()
+    }
+
+    /// Renders a block as [`process_with`](Processor::process_with) does,
+    /// within what is left of `allowance`, to which it adds what it spent,
+    /// marked [limited](Allowance::limited) if a voice got less than full
+    /// quality. See [a budget](Self#a-budget). Costs are units a block, as
+    /// [`Voice::tier_cost`] states them: a voice rendered for part of the
+    /// block spends that part of its cost. Real-time safe.
+    ///
+    /// Several instruments can share one allowance: each spends what those
+    /// before it left. A block whose [`ProcessContext::offline`] is set is
+    /// rendered whole whatever is left.
+    ///
+    /// ```
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_core::governor::Allowance;
+    /// use manguebyte_dsp::event::NoteRef;
+    /// use manguebyte_dsp::instruments::{OrganParams, OrganVoice};
+    /// use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth};
+    ///
+    /// let mut organ = Synth::new(OrganVoice::voices(8, OrganParams::full()));
+    /// organ.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 128, num_channels: 1 });
+    /// for key in [48, 55, 64, 67] {
+    ///     organ.note_on(NoteRef::new(0, key), 1.0);
+    /// }
+    /// // Room for two notes whole: the other two make do or wait.
+    /// let mut allowance = Allowance::new(2.0 * OrganVoice::FULL_COST);
+    /// let mut block = AudioBuffer::<f32>::new(1, 128);
+    /// organ.process_budgeted(&mut block, &ProcessContext::empty(), &mut allowance);
+    /// assert!(allowance.limited() && allowance.spent() <= allowance.budget());
+    /// assert_eq!(organ.active_voices() + organ.suspended_voices(), 4);
+    /// ```
+    pub fn process_budgeted(
+        &mut self,
+        buffer: &mut AudioBuffer<S>,
+        context: &ProcessContext<'_, S>,
+        allowance: &mut Allowance,
+    ) {
+        let budget = if context.offline {
+            f64::INFINITY
+        } else {
+            allowance.remaining()
+        };
+        buffer.clear();
+        let frames = buffer.num_frames();
+        // Cost units times frames.
+        let mut spent = 0.0;
+        let mut limited = false;
+        self.changed = true;
+        split_at_events(
+            self,
+            buffer,
+            context.events,
+            |synth, event| synth.handle_event(event),
+            |synth, piece| {
+                if core::mem::take(&mut synth.changed) {
+                    limited |= synth.share_out(budget);
+                }
+                spent += synth.render_shares(piece);
+            },
+        );
+        self.reclaim_finished();
+        if frames > 0 {
+            allowance.force(spent / frames as f64);
+        }
+        if limited {
+            allowance.mark_limited();
+        }
+        self.thinned = self.slots.iter().any(|slot| {
+            slot.stage != Stage::Idle
+                && (slot.share.depth > 0 || slot.share.tier > 0 || !slot.share.wanted)
+        });
+    }
+
+    /// Renders a block within `governor`'s budget, and has it learn from the
+    /// block: [`process_budgeted`](Self::process_budgeted) inside
+    /// [`Governor::govern`]. The governor takes the sample rate the synth
+    /// was prepared for. Offline ([`ProcessContext::offline`], or a
+    /// governor set offline) everything is rendered, the clock is not read
+    /// and nothing is learnt. Real-time safe.
+    ///
+    /// The governor should measure this synth alone. For several
+    /// instruments on one governor, call [`Governor::govern`] once and give
+    /// each the allowance.
+    pub fn process_governed<C: Clock>(
+        &mut self,
+        buffer: &mut AudioBuffer<S>,
+        context: &ProcessContext<'_, S>,
+        governor: &mut Governor<C>,
+    ) {
+        governor.set_sample_rate(self.sample_rate);
+        governor.govern(buffer.num_frames(), context.offline, |allowance| {
+            self.process_budgeted(buffer, context, allowance);
+        });
+    }
+
+    /// Shares `budget` out among the voices, the most important first.
+    /// Returns whether some voice got less than full quality.
+    fn share_out(&mut self, budget: f64) -> bool {
+        let fade = self.fade;
+        for slot in &mut self.slots {
+            if slot.is_silenced(fade) && !slot.may_wait() {
+                slot.stop();
+            }
+        }
+        self.order.clear();
+        // Each voice is asked once, so that the order cannot change while
+        // it is sorted.
+        for (index, slot) in self.slots.iter().enumerate() {
+            let stage = match slot.stage {
+                Stage::Idle => continue,
+                Stage::Held => 0,
+                Stage::Sustained => 1,
+                Stage::Released => 2,
+            };
+            let audibility = slot.voice.audibility();
+            let mut audibility = if audibility.is_nan() { 0.0 } else { audibility };
+            if slot.share.wanted && slot.share.tier == 0 {
+                audibility *= KEEP_BONUS;
+            }
+            // Within the room made for every voice: nothing grows.
+            self.order.push(Rank {
+                stage,
+                audibility,
+                started: slot.started,
+                index,
+            });
+        }
+        // Sorts in place, with no memory of its own.
+        self.order.sort_unstable_by(|a, b| {
+            a.stage
+                .cmp(&b.stage)
+                .then(b.audibility.total_cmp(&a.audibility))
+                .then(b.started.cmp(&a.started))
+                .then(a.index.cmp(&b.index))
+        });
+
+        let mut allowance = Allowance::new(budget);
+        let mut limited = false;
+        for rank in &self.order {
+            let slot = &mut self.slots[rank.index];
+            let fresh = core::mem::take(&mut slot.share.fresh);
+            if !slot.voice.is_active() {
+                continue;
+            }
+            let tiers = slot.voice.tier_count().max(1);
+            let fits = (0..tiers).find(|&tier| allowance.try_take(slot.cost(tier)));
+            match fits {
+                Some(tier) => {
+                    if tier != slot.share.tier {
+                        let unheard = fresh || slot.share.depth >= fade;
+                        slot.voice.set_tier(tier, if unheard { 0 } else { fade });
+                        slot.share.tier = tier;
+                    }
+                    slot.share.wanted = true;
+                    limited |= tier > 0;
+                }
+                None => {
+                    limited = true;
+                    slot.share.wanted = false;
+                    if fresh {
+                        slot.share.depth = fade;
+                        if !slot.may_wait() {
+                            slot.stop();
+                        }
+                    }
+                }
+            }
+        }
+        limited
+    }
+
+    /// Adds every voice to `piece` as its share says. Returns the cost units
+    /// spent, times the frames each was spent for.
+    fn render_shares(&mut self, piece: &mut AudioBuffer<S>) -> f64 {
+        let frames = piece.num_frames();
+        let mut spent = 0.0;
+        for slot in &mut self.slots {
+            if slot.stage == Stage::Idle {
+                continue;
+            }
+            let cost = if slot.voice.is_active() {
+                slot.cost(slot.share.tier)
+            } else {
+                0.0
+            };
+            let rendered = if slot.share.wanted && slot.share.depth == 0 {
+                slot.voice.render(piece);
+                frames
+            } else {
+                slot.render_fading(piece, &mut self.scratch, self.fade)
+            };
+            spent += cost * rendered as f64;
+        }
+        spent
     }
 
     /// Every voice, sounding or not, for setting them up.
@@ -419,6 +877,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         let velocity = velocity_in_range(velocity);
         self.reclaim_finished();
         self.clock += 1;
+        self.changed = true;
 
         if self.legato {
             // The newest note held on this channel, whatever its key.
@@ -449,11 +908,32 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             return;
         };
 
+        let fade = self.fade;
         let slot = &mut self.slots[index];
-        if same_note.is_none() {
+        // A voice a budget silenced has nothing to carry on with: struck
+        // again, it starts as one taken over.
+        let silenced = slot.is_silenced(fade);
+        if same_note.is_none() || silenced {
             // A fresh note always starts from a clean voice, whether the
             // voice was idle or is being taken over. See `Voice::choke`.
             slot.voice.choke();
+            if silenced {
+                // What the first choke may have kept to fade out was not
+                // heard, and must not be heard now.
+                slot.voice.choke();
+            }
+            // A voice still partly faded by a budget comes back up from
+            // where it is; any other starts at full level.
+            let depth = if slot.stage == Stage::Idle || silenced {
+                0
+            } else {
+                slot.share.depth
+            };
+            slot.share = Share {
+                depth,
+                fresh: depth == 0,
+                ..WHOLE
+            };
             // A clean voice knows nothing of the wheel or the controllers,
             // which were last moved while it was silent or playing a note
             // on another channel.
@@ -469,6 +949,8 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                     });
                 }
             }
+        } else {
+            slot.share.wanted = true;
         }
         slot.note = note;
         slot.stage = Stage::Held;
@@ -481,6 +963,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     pub fn note_off(&mut self, note: NoteRef, velocity: f32) {
         let velocity = velocity_in_range(velocity);
         let pedal_down = self.sustain[usize::from(note.channel & 0x0F)];
+        self.changed = true;
         for slot in &mut self.slots {
             if slot.stage == Stage::Held && note.matches(&slot.note) {
                 if pedal_down {
@@ -497,6 +980,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// safe.
     pub fn all_notes_off(&mut self) {
         self.sustain = [false; 16];
+        self.changed = true;
         for slot in &mut self.slots {
             if matches!(slot.stage, Stage::Held | Stage::Sustained) {
                 slot.stage = Stage::Released;
@@ -511,9 +995,9 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             EventKind::NoteOn { note, velocity } => self.note_on(note, velocity),
             EventKind::NoteOff { note, velocity } => self.note_off(note, velocity),
             EventKind::NoteChoke { note } => {
+                self.changed = true;
                 for slot in self.sounding(move |slot| note.matches(&slot.note)) {
-                    slot.voice.choke();
-                    slot.stage = Stage::Idle;
+                    slot.stop();
                 }
             }
             EventKind::NoteExpression {
@@ -570,9 +1054,9 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 controller: 120,
                 ..
             } => {
+                self.changed = true;
                 for slot in self.sounding(move |slot| slot.note.channel == channel) {
-                    slot.voice.choke();
-                    slot.stage = Stage::Idle;
+                    slot.stop();
                 }
             }
             MidiMessage::ControlChange {
@@ -581,6 +1065,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 ..
             } => {
                 self.sustain[usize::from(channel & 0x0F)] = false;
+                self.changed = true;
                 for slot in self.sounding(move |slot| slot.note.channel == channel) {
                     if slot.stage != Stage::Released {
                         slot.stage = Stage::Released;
@@ -638,6 +1123,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         if down {
             return;
         }
+        self.changed = true;
         for slot in &mut self.slots {
             if slot.stage == Stage::Sustained && slot.note.channel == channel {
                 slot.stage = Stage::Released;
@@ -661,6 +1147,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         for slot in &mut self.slots {
             if slot.stage == Stage::Released && !slot.voice.is_active() {
                 slot.stage = Stage::Idle;
+                slot.share = WHOLE;
             }
         }
     }
@@ -675,11 +1162,13 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// synth lands notes exactly as a new one would, so playing the same
     /// notes again gives the same output, bit for bit, reset or not.
     fn pick_voice(&self) -> Option<usize> {
-        let cost = |stage: Stage| match stage {
+        let cost = |slot: &Slot<V>| match slot.stage {
             Stage::Idle => 0,
-            Stage::Released => 1,
-            Stage::Sustained => 2,
-            Stage::Held => 3,
+            // A note a budget has silenced is not heard at all.
+            _ if slot.is_silenced(self.fade) => 1,
+            Stage::Released => 2,
+            Stage::Sustained => 3,
+            Stage::Held => 4,
         };
         self.slots[..self.voice_limit.min(self.slots.len())]
             .iter()
@@ -690,7 +1179,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 } else {
                     slot.started
                 };
-                (cost(slot.stage), age)
+                (cost(slot), age)
             })
             .map(|(index, _)| index)
     }
@@ -701,6 +1190,11 @@ impl<S: Sample, V: Voice<S>> Processor<S> for Synth<V, S> {
         for slot in &mut self.slots {
             slot.voice.prepare(spec);
         }
+        if spec.sample_rate.is_finite() && spec.sample_rate > 0.0 {
+            self.sample_rate = spec.sample_rate;
+        }
+        self.fade = ((BUDGET_FADE_SECONDS * self.sample_rate).round() as usize).max(1);
+        self.scratch = AudioBuffer::new(spec.num_channels, spec.max_block_size);
         self.reset();
     }
 
@@ -709,6 +1203,12 @@ impl<S: Sample, V: Voice<S>> Processor<S> for Synth<V, S> {
     }
 
     fn process_with(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
+        if self.thinned {
+            // Voices a budget thinned come back to full quality.
+            let mut allowance = Allowance::new(f64::INFINITY);
+            self.process_budgeted(buffer, context, &mut allowance);
+            return;
+        }
         buffer.clear();
         split_at_events(
             self,
@@ -718,6 +1218,7 @@ impl<S: Sample, V: Voice<S>> Processor<S> for Synth<V, S> {
             |synth, piece| {
                 for slot in &mut synth.slots {
                     if slot.stage != Stage::Idle {
+                        slot.share.fresh = false;
                         slot.voice.render(piece);
                     }
                 }
@@ -739,9 +1240,9 @@ impl<S: Sample, V: Voice<S>> Processor<S> for Synth<V, S> {
     fn reset(&mut self) {
         self.clock = 0;
         self.sustain = [false; 16];
+        self.thinned = false;
         for slot in &mut self.slots {
-            slot.voice.choke();
-            slot.stage = Stage::Idle;
+            slot.stop();
             slot.note = NoteRef::new(0, 0);
             slot.started = 0;
         }

@@ -695,3 +695,80 @@ fn the_real_clock_reads_forward() {
     assert_eq!(governor.stats().blocks, 1);
     assert!(governor.last_load() >= 0.0);
 }
+
+/// A clock the work moves while the governor times it.
+#[derive(Clone, Default)]
+struct SharedClock(std::rc::Rc<std::cell::Cell<(Duration, u64)>>);
+
+impl Clock for SharedClock {
+    fn now(&mut self) -> Duration {
+        let (now, reads) = self.0.get();
+        self.0.set((now, reads + 1));
+        now
+    }
+}
+
+impl SharedClock {
+    fn work(&self, time: Duration) {
+        let (now, reads) = self.0.get();
+        self.0.set((now + time, reads));
+    }
+
+    fn reads(&self) -> u64 {
+        self.0.get().1
+    }
+}
+
+#[test]
+fn govern_times_what_it_renders_and_offline_it_gives_everything() {
+    let clock = SharedClock::default();
+    let mut governor = Governor::with_clock(GovernorConfig::default(), clock.clone());
+    governor.set_sample_rate(RATE);
+    governor.govern(FRAMES, false, |allowance| {
+        assert_eq!(allowance.budget(), f64::INFINITY);
+        allowance.force(100.0);
+        clock.work(Duration::from_secs_f64(1.4 * deadline(FRAMES)));
+    });
+    assert!((governor.last_load() - 1.4).abs() < 1e-6);
+    let limited = governor.budget();
+    assert!((limited - 0.665 * 100.0 / 1.4).abs() < 1e-3, "{limited}");
+    assert_eq!(governor.allowance().budget(), limited);
+
+    // Offline, for one block or for good: unlimited whatever the maximum,
+    // no clock, nothing learnt, and what was noted of the block is dropped.
+    governor.set_max_budget(20.0);
+    let (reads, stats) = (clock.reads(), governor.stats());
+    governor.begin_block();
+    governor.note_missed(3);
+    let reads = reads + 1;
+    for offline in [true, false] {
+        governor.set_offline(!offline);
+        governor.govern(FRAMES, offline, |allowance| {
+            assert_eq!(allowance.budget(), f64::INFINITY);
+            allowance.force(500.0);
+            clock.work(Duration::from_secs(1));
+        });
+    }
+    assert_eq!(governor.allowance().budget(), f64::INFINITY);
+    governor.set_offline(false);
+    assert_eq!((clock.reads(), governor.stats()), (reads, stats));
+    assert_eq!(governor.allowance().budget(), 20.0);
+    // The missed jobs noted before the offline blocks count for nothing.
+    governor.govern(FRAMES, false, |allowance| allowance.force(20.0));
+    assert_eq!(governor.stats().missed_blocks, 0);
+}
+
+#[test]
+fn an_allowance_gathers_what_its_parts_spent() {
+    let mut block = Allowance::new(10.0);
+    let mut parts = [Allowance::new(5.0), Allowance::new(5.0)];
+    assert!(parts[0].try_take(4.0));
+    parts[1].force(8.0);
+    block.absorb(&parts[0]);
+    assert_eq!((block.spent(), block.limited()), (4.0, false));
+    assert!(!parts[0].try_take(2.0));
+    block.absorb(&parts[1]);
+    block.absorb(&parts[0]);
+    assert_eq!((block.spent(), block.limited()), (16.0, true));
+    assert_eq!(block.remaining(), 0.0);
+}

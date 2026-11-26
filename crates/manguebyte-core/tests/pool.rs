@@ -366,6 +366,53 @@ fn a_stalled_worker_costs_the_audio_thread_at_most_the_wait_limit() {
     assert_eq!((stats.blocks, stats.overruns, stats.missed_jobs), (3, 2, 2));
 }
 
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "it measures wall-clock times, which Miri does not keep"
+)]
+fn a_governed_run_tells_the_governor_what_the_pool_missed() {
+    use manguebyte_core::governor::{Governor, GovernorConfig};
+
+    let gate = Arc::new(Gate::default());
+    gate.armed.store(true, Ordering::SeqCst);
+    let jobs = (0..8)
+        .map(|_| Stall {
+            gate: Arc::clone(&gate),
+            renders: 0,
+        })
+        .collect();
+    let limit = Duration::from_millis(2);
+    let mut pool = RenderPool::new(jobs, PoolConfig::with_workers(1).wait_limit(limit));
+    let mut governor = Governor::new(GovernorConfig::default());
+    governor.set_sample_rate(48_000.0);
+
+    governor.begin_block();
+    let report = pool.run_governed(8, &mut governor);
+    // A second of audio: only the missed job makes the block late.
+    governor.end_block(48_000, 8.0, false);
+    assert_eq!(report.missed, 1, "{report:?}");
+    assert_eq!(governor.stats().missed_blocks, 1);
+    assert!(governor.last_load() >= 1.0);
+
+    // Once the worker is done, a complete block is only what the clock says.
+    let start = Instant::now();
+    while !gate.over.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(5));
+    }
+    pool.set_wait_limit(Duration::from_secs(10));
+    while pool
+        .job((0..8).find(|&index| !pool.was_rendered(index)).unwrap())
+        .is_none()
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    governor.begin_block();
+    assert!(pool.run_governed(8, &mut governor).is_complete());
+    governor.end_block(48_000, 8.0, false);
+    assert_eq!(governor.stats().missed_blocks, 1);
+}
+
 struct Tally(u64);
 
 impl Job for Tally {

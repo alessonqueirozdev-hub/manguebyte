@@ -182,6 +182,12 @@ impl<T: Tone> Handover<T> {
         self.now.silence();
     }
 
+    /// Forgets the fading note, unheard: for a voice a budget suspends.
+    pub(crate) fn drop_fading(&mut self) {
+        self.old.silence();
+        self.fade = 0.0;
+    }
+
     /// Whether either note is making sound.
     pub(crate) fn is_active(&self) -> bool {
         self.now.is_sounding() || self.fade > 0.0

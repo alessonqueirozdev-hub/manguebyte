@@ -21,6 +21,14 @@
 //! through the few atomics on [`Instance`]. The editor's state
 //! ([`Gui`](crate::gui::Gui)) is the main thread's alone.
 //!
+//! # Offline render
+//!
+//! The plugin offers `clap.render`. While the host has it in
+//! `CLAP_RENDER_OFFLINE`, every block's context says it is rendered offline
+//! (`ProcessContext::offline`), so the framework's instruments render
+//! everything, whatever their budget. It has no hard real-time requirement,
+//! so either mode is accepted; any other is refused.
+//!
 //! # Telling the host what changed
 //!
 //! Before each block, and in `flush`, the host is sent what it did not do
@@ -86,6 +94,10 @@ use clap_sys::ext::note_name::{CLAP_EXT_NOTE_NAME, clap_note_name, clap_plugin_n
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
 use clap_sys::ext::posix_fd_support::CLAP_EXT_POSIX_FD_SUPPORT;
+use clap_sys::ext::render::{
+    CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME, clap_plugin_render,
+    clap_plugin_render_mode,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
 use clap_sys::ext::timer_support::CLAP_EXT_TIMER_SUPPORT;
@@ -345,6 +357,10 @@ impl<P: Plugin> Vtables<P> {
     const TAIL: &'static clap_plugin_tail = &clap_plugin_tail {
         get: Some(tail_get::<P>),
     };
+    const RENDER: &'static clap_plugin_render = &clap_plugin_render {
+        has_hard_realtime_requirement: Some(render_has_hard_realtime_requirement),
+        set: Some(render_set::<P>),
+    };
     const PORTS_CONFIG: &'static clap_plugin_audio_ports_config = &clap_plugin_audio_ports_config {
         count: Some(ports_config_count::<P>),
         get: Some(ports_config_get::<P>),
@@ -449,6 +465,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 .map(|_| AtomicBool::new(true))
                 .collect(),
             active: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
             has_voice_info: voices.is_some(),
             voices: Mutex::new(voices),
             flags: Arc::new(SharedFlags::new(&*params)),
@@ -522,6 +539,9 @@ pub(crate) struct Instance<P: Plugin> {
     /// Whether the plugin is active, so that ports are not changed under
     /// it.
     active: AtomicBool,
+    /// Whether the host has the plugin render offline (`clap.render`). Set
+    /// on the main thread, read by the audio thread before each block.
+    offline: AtomicBool,
     /// Whether the plugin said anything of its voices when it was created,
     /// which decides whether `voice-info` is offered. Never changes.
     has_voice_info: bool,
@@ -951,6 +971,8 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
         ptr::from_ref(Vtables::<P>::LATENCY).cast()
     } else if id == CLAP_EXT_TAIL {
         ptr::from_ref(Vtables::<P>::TAIL).cast()
+    } else if id == CLAP_EXT_RENDER {
+        ptr::from_ref(Vtables::<P>::RENDER).cast()
     } else {
         ptr::null()
     }
@@ -1013,7 +1035,8 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         let transport =
             unsafe { process.transport.as_ref() }.map_or(Transport::STOPPED, convert_transport);
         audio.notes.output.clear();
-        if !audio.render(frames, transport) {
+        let offline = instance.offline.load(Ordering::Relaxed);
+        if !audio.render(frames, transport, offline) {
             // The plugin panicked. The host is told the block failed, and
             // the next block starts with every parameter's value, since the
             // changes of this one may not have reached the plugin.
@@ -1057,8 +1080,8 @@ impl<P: Plugin> Audio<P> {
     /// piece is a block of its own to the plugin: its events, its output
     /// and its sidechain counted from the piece's start, its transport the
     /// one in force there. A transport event on frame 0 replaces the
-    /// block's own.
-    fn render(&mut self, frames: usize, mut transport: Transport) -> bool {
+    /// block's own. `offline` is what every context says of the render.
+    fn render(&mut self, frames: usize, mut transport: Transport, offline: bool) -> bool {
         let Self {
             plugin,
             layout,
@@ -1079,7 +1102,7 @@ impl<P: Plugin> Audio<P> {
             if let Some(&(_, change)) = changes.last() {
                 transport = change;
             }
-            let mut context = ProcessContext::new(events, &transport);
+            let mut context = ProcessContext::new(events, &transport).with_offline(offline);
             if keyed {
                 context = context.with_sidechain(sidechain);
             }
@@ -1133,12 +1156,11 @@ impl<P: Plugin> Audio<P> {
                         .is_ok()
                     })
                 };
+                let context = ProcessContext::new(piece_events, &transport).with_offline(offline);
                 if keyed {
-                    sidechain.windowed(start..end, |side| {
-                        run(&ProcessContext::new(piece_events, &transport).with_sidechain(side))
-                    })
+                    sidechain.windowed(start..end, |side| run(&context.with_sidechain(side)))
                 } else {
-                    run(&ProcessContext::new(piece_events, &transport))
+                    run(&context)
                 }
             });
             if !finished {
@@ -2473,6 +2495,29 @@ unsafe extern "C" fn note_ports_get<P: Plugin>(
         // see the `output` module.
         info.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
         copy_text(if is_input { "Notes" } else { "Notes out" }, &mut info.name);
+        true
+    })
+}
+
+unsafe extern "C" fn render_has_hard_realtime_requirement(_plugin: *const clap_plugin) -> bool {
+    false
+}
+
+unsafe extern "C" fn render_set<P: Plugin>(
+    plugin: *const clap_plugin,
+    mode: clap_plugin_render_mode,
+) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return false;
+        };
+        let offline = match mode {
+            CLAP_RENDER_REALTIME => false,
+            CLAP_RENDER_OFFLINE => true,
+            _ => return false,
+        };
+        instance.offline.store(offline, Ordering::Relaxed);
         true
     })
 }

@@ -138,6 +138,12 @@ impl Envelope {
         self.level
     }
 
+    /// Whether the envelope has not yet reached the end of its hold, so
+    /// that its level may still rise.
+    pub(crate) fn is_rising(&self) -> bool {
+        matches!(self.stage, Stage::Delay | Stage::Attack | Stage::Hold)
+    }
+
     /// Whether the envelope is releasing or done.
     pub(crate) fn is_released(&self) -> bool {
         matches!(self.stage, Stage::Release | Stage::Done)

@@ -3,10 +3,11 @@
 use core::fmt;
 use core::marker::PhantomData;
 
+use manguebyte_core::governor::{Allowance, Clock, Governor};
 use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::{Event, EventKind, Expression, NoteRef};
-use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Tuning};
+use manguebyte_dsp::{BUDGET_FADE_SECONDS, ProcessContext, ProcessSpec, Processor, Tuning};
 use manguebyte_midi::MidiMessage;
 
 use crate::controllers::{ControllerTable, MAX_CONTROLLERS};
@@ -30,6 +31,22 @@ pub const MAX_HELD_NOTES: usize = 256;
 
 /// Most changes [`Sampler::set_controller`] holds for one block.
 pub const MAX_PENDING_CONTROLLER_CHANGES: usize = 1_024;
+
+/// How much more audible a voice at full quality counts than it is, when a
+/// budget is shared out, so that two voices of nearly the same loudness do
+/// not take turns.
+const KEEP_BONUS: f64 = 1.25;
+
+/// A block being rendered within a budget.
+#[derive(Debug, Clone, Copy)]
+struct Budgeted {
+    /// The units the block may spend.
+    units: f64,
+    /// The units spent so far, times the frames each was spent for.
+    spent: f64,
+    /// Whether a voice got less than full quality.
+    limited: bool,
+}
 
 /// What the sampler remembers about one key of one channel.
 #[derive(Debug, Clone, Copy)]
@@ -151,9 +168,42 @@ struct Voice {
 /// [`MAX_HELD_NOTES`]) and a note-off ends the one with its identifier, or,
 /// for notes without one, the latest on its channel and key.
 ///
+/// # A budget
+///
+/// A sampler can render within the budget of a processor budget governor
+/// ([`manguebyte_core::governor`], ADR 0018), through
+/// [`process_governed`](Self::process_governed), or
+/// [`process_budgeted`](Self::process_budgeted) with an allowance of the
+/// caller's. Nothing changes unless one of them is called.
+///
+/// A voice costs, in units a block, 1 if it reads its sample's frames as
+/// they are, 1.5 through the cubic interpolator, and through the sinc 5 at
+/// or below the sample's rate and 16 times the speed above it, up to 64,
+/// after the timings in [`Interpolation`]'s table. Filters and envelopes are
+/// not counted. At the start of each block, and where a note starts or ends
+/// inside it, the budget is shared out: voices not yet released first, the
+/// louder before the quieter. A voice the sinc does not fit for is
+/// demoted to the cubic, crossing from one to the other over
+/// [`BUDGET_FADE_SECONDS`]. One that neither fits for is faded out over as
+/// long and then, if it is a loop its key or the pedal holds, suspended
+/// where it is, to be faded back in later; any other is stolen. A new note
+/// that nothing fits for makes no sound. A voice fading out is rendered for
+/// as long as its fade lasts, over the budget if need be, and what it costs
+/// is counted as spent. A suspended voice still counts against the
+/// polyphony, and is the first to give way to a new note.
+///
+/// A block whose [`ProcessContext::offline`] is set renders everything,
+/// whatever the budget. While the budget covers every voice at full quality,
+/// the output is that of `process_with`, bit for bit. A budget that does not
+/// is shared out where blocks start, so what is heard then depends on where
+/// the host cuts them, and with a governor on a real clock, on the machine.
+/// A call to `process_with` after a budget brings every voice back to full
+/// quality, with the same fades.
+///
 /// # Real time
 ///
-/// [`process_with`](Processor::process_with) and
+/// [`process_with`](Processor::process_with),
+/// [`process_budgeted`](Self::process_budgeted) and
 /// [`reset`](Processor::reset) neither allocate, free, lock nor panic, and
 /// the output does not depend on how the host cuts the timeline into
 /// blocks: every voice moves one frame at a time and every event lands on
@@ -223,6 +273,15 @@ pub struct Sampler<S: Sample = f32> {
     block_done: u64,
     /// The tuning of the keys.
     tuning: Tuning,
+    /// The voices in order of priority, as a budget is shared out; has room
+    /// for them all.
+    order: Vec<usize>,
+    /// The block under way, if it is rendered within a budget.
+    budgeted: Option<Budgeted>,
+    /// Whether some voice is not at full quality, for a budget's sake.
+    thinned: bool,
+    /// Whether voices started or ended since the budget was shared out.
+    changed: bool,
     marker: PhantomData<S>,
 }
 
@@ -323,6 +382,10 @@ impl<S: Sample> Sampler<S> {
                 block_frames: 0,
                 block_done: 0,
                 tuning: Tuning::default(),
+                order: Vec::with_capacity(polyphony + spare),
+                budgeted: None,
+                thinned: false,
+                changed: false,
                 marker: PhantomData,
             },
             SamplerLoader {
@@ -518,12 +581,34 @@ impl<S: Sample> Sampler<S> {
         self.polyphony
     }
 
-    /// How many voices are sounding, fading ones included. A note that
-    /// starts several regions uses a voice for each.
+    /// How many voices are sounding, fading ones included, and not those a
+    /// budget has [suspended](Self::suspended_voices). A note that starts
+    /// several regions uses a voice for each.
     pub fn active_voices(&self) -> usize {
         self.voices
             .iter()
-            .filter(|voice| voice.player.active)
+            .filter(|voice| voice.player.active && !voice.player.is_silenced())
+            .count()
+    }
+
+    /// How many voices a [budget](Self#a-budget) has demoted to the cubic
+    /// interpolator, those still sounding.
+    pub fn demoted_voices(&self) -> usize {
+        self.voices
+            .iter()
+            .filter(|voice| {
+                let player = &voice.player;
+                player.active && player.share.wanted && player.share.cheap
+            })
+            .count()
+    }
+
+    /// How many voices a [budget](Self#a-budget) has silenced, waiting to be
+    /// taken up again.
+    pub fn suspended_voices(&self) -> usize {
+        self.voices
+            .iter()
+            .filter(|voice| voice.player.is_silenced())
             .count()
     }
 
@@ -627,6 +712,7 @@ impl<S: Sample> Sampler<S> {
     /// Real-time safe.
     pub fn release_all(&mut self, shortest: f64) {
         let rate = self.sample_rate;
+        self.changed = true;
         for voice in &mut self.voices {
             if !voice.player.active {
                 continue;
@@ -645,6 +731,7 @@ impl<S: Sample> Sampler<S> {
     /// release-triggered region has started. Real-time safe.
     pub fn fade_out_all(&mut self, seconds: f64) {
         let rate = self.sample_rate;
+        self.changed = true;
         for voice in &mut self.voices {
             if voice.player.active {
                 voice.player.fade_out(seconds, rate);
@@ -664,6 +751,7 @@ impl<S: Sample> Sampler<S> {
 
     /// Handles one event now. Real-time safe.
     pub fn handle_event(&mut self, event: &Event) {
+        self.changed = true;
         match event.kind {
             EventKind::NoteOn { note, velocity } => self.note_on(note, velocity),
             EventKind::NoteOff { note, velocity } => self.note_off(note, velocity),
@@ -827,6 +915,7 @@ impl<S: Sample> Sampler<S> {
         release: Option<(Trigger, f64)>,
         held_before: u32,
     ) {
+        self.changed = true;
         let slot = self.current;
         let Some(instrument) = self.instruments[slot].as_deref() else {
             return;
@@ -978,7 +1067,204 @@ impl<S: Sample> Sampler<S> {
         }
     }
 
+    /// Shares `budget` out among the voices, the most important first.
+    /// Returns whether some voice got less than full quality.
+    fn share_out(&mut self, budget: f64) -> bool {
+        let fade = ((BUDGET_FADE_SECONDS * self.sample_rate).round() as u32).max(1);
+        for voice in &mut self.voices {
+            if voice.player.is_silenced() && !voice.player.can_suspend() {
+                voice.player.stop();
+            }
+        }
+        self.order.clear();
+        for (index, voice) in self.voices.iter().enumerate() {
+            if voice.player.active {
+                self.order.push(index);
+            }
+        }
+        let voices = &self.voices;
+        let rank = |index: usize| {
+            let player = &voices[index].player;
+            let mut audibility = player.audibility();
+            if audibility.is_nan() {
+                audibility = 0.0;
+            }
+            if player.share.wanted && !player.share.cheap {
+                audibility *= KEEP_BONUS;
+            }
+            (player.is_releasing(), audibility, player.age, index)
+        };
+        // Sorts in place, with no memory of its own.
+        self.order.sort_unstable_by(|&a, &b| {
+            let (a, b) = (rank(a), rank(b));
+            a.0.cmp(&b.0)
+                .then(b.1.total_cmp(&a.1))
+                .then(b.2.cmp(&a.2))
+                .then(a.3.cmp(&b.3))
+        });
+
+        let mut allowance = Allowance::new(budget);
+        let mut limited = false;
+        for &index in &self.order {
+            let Some(voice) = self.voices.get_mut(index) else {
+                continue;
+            };
+            let key = &self.keys[usize::from(voice.player.note.key & 0x7F)];
+            let modulated = !key.is_level() || !self.all.is_level();
+            let player = &mut voice.player;
+            let fresh = core::mem::take(&mut player.share.fresh);
+            let unheard = fresh || player.is_silenced();
+            // A fade under way keeps its length.
+            if player.share.depth == 0 {
+                player.share.fade = fade;
+            }
+            let whole = player.cost(self.interpolation, false, modulated);
+            let cheap = player.cost(self.interpolation, true, modulated);
+            let fits = if allowance.try_take(whole) {
+                Some(false)
+            } else if cheap < whole && allowance.try_take(cheap) {
+                Some(true)
+            } else {
+                None
+            };
+            match fits {
+                Some(demoted) => {
+                    if demoted != player.share.cheap {
+                        player.set_cheap(demoted, if unheard { 0 } else { fade });
+                    }
+                    player.share.wanted = true;
+                    limited |= demoted;
+                }
+                None => {
+                    limited = true;
+                    player.share.wanted = false;
+                    if fresh {
+                        player.share.depth = player.share.fade;
+                        if !player.can_suspend() {
+                            player.stop();
+                        }
+                    }
+                }
+            }
+        }
+        limited
+    }
+
+    /// Renders a block as [`process_with`](Processor::process_with) does,
+    /// within what is left of `allowance`, to which it adds what it spent,
+    /// marked [limited](Allowance::limited) if a voice got less than full
+    /// quality. See [a budget](Self#a-budget). A voice rendered for part of
+    /// the block spends that part of its cost. Real-time safe.
+    ///
+    /// Several instruments can share one allowance: each spends what those
+    /// before it left. A block whose [`ProcessContext::offline`] is set is
+    /// rendered whole whatever is left.
+    pub fn process_budgeted(
+        &mut self,
+        buffer: &mut AudioBuffer<S>,
+        context: &ProcessContext<'_, S>,
+        allowance: &mut Allowance,
+    ) {
+        let units = if context.offline {
+            f64::INFINITY
+        } else {
+            allowance.remaining()
+        };
+        self.budgeted = Some(Budgeted {
+            units,
+            spent: 0.0,
+            limited: false,
+        });
+        self.changed = true;
+        self.process_block(buffer, context);
+        let frames = buffer.num_frames();
+        if let Some(block) = self.budgeted.take() {
+            if frames > 0 {
+                allowance.force(block.spent / frames as f64);
+            }
+            if block.limited {
+                allowance.mark_limited();
+            }
+        }
+        self.thinned = self.voices.iter().any(|voice| voice.player.is_thinned());
+    }
+
+    /// Renders a block within `governor`'s budget, and has it learn from the
+    /// block: [`process_budgeted`](Self::process_budgeted) inside
+    /// [`Governor::govern`]. The governor takes the sample rate the sampler
+    /// was prepared for. Offline ([`ProcessContext::offline`], or a
+    /// governor set offline) everything is rendered, the clock is not read
+    /// and nothing is learnt. Real-time safe.
+    ///
+    /// The governor should measure this sampler alone. For several
+    /// instruments on one governor, call [`Governor::govern`] once and give
+    /// each the allowance.
+    ///
+    /// ```
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_core::governor::{Governor, GovernorConfig};
+    /// use manguebyte_dsp::event::NoteRef;
+    /// use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor};
+    /// use manguebyte_sampler::{Instrument, MemorySource, Sampler};
+    ///
+    /// let instrument = Instrument::from_sfz("<region> sample=*sine", &mut MemorySource::new())?;
+    /// let (mut sampler, _loader) = Sampler::<f32>::with_instrument(instrument, 32);
+    /// sampler.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 128, num_channels: 2 });
+    /// let mut governor = Governor::new(GovernorConfig::default());
+    ///
+    /// sampler.note_on(NoteRef::new(0, 60), 1.0);
+    /// let mut block = AudioBuffer::<f32>::new(2, 128);
+    /// sampler.process_governed(&mut block, &ProcessContext::empty(), &mut governor);
+    /// assert!(block.peak() > 0.0);
+    /// assert_eq!(governor.stats().blocks, 1);
+    /// # Ok::<(), manguebyte_sampler::InstrumentError>(())
+    /// ```
+    pub fn process_governed<C: Clock>(
+        &mut self,
+        buffer: &mut AudioBuffer<S>,
+        context: &ProcessContext<'_, S>,
+        governor: &mut Governor<C>,
+    ) {
+        governor.set_sample_rate(self.sample_rate);
+        governor.govern(buffer.num_frames(), context.offline, |allowance| {
+            self.process_budgeted(buffer, context, allowance);
+        });
+    }
+
+    /// A block's work, within the budget in `budgeted` if there is one.
+    fn process_block(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
+        self.take_arrivals();
+        buffer.clear();
+        let frames = buffer.num_frames();
+        for line in self.keys.iter_mut() {
+            line.advance();
+        }
+        self.all.advance();
+        self.block_frames = frames as u64;
+        self.block_done = 0;
+        let mut position = 0;
+        for event in context.events {
+            let at = (event.offset as usize).min(frames);
+            self.render_until(buffer, &mut position, at);
+            self.apply_pending(at as u32);
+            self.handle_event(event);
+        }
+        self.render_until(buffer, &mut position, frames);
+        // What is set for the block's end or later lands there.
+        self.apply_pending(u32::MAX);
+        self.changes.clear();
+        self.applied = 0;
+    }
+
     fn render(&mut self, piece: &mut AudioBuffer<S>) {
+        if let Some(mut block) = self.budgeted {
+            if core::mem::take(&mut self.changed) {
+                block.limited |= self.share_out(block.units);
+                self.budgeted = Some(block);
+            }
+        }
+        let budgeted = self.budgeted.is_some();
+        let mut spent = 0.0;
         let len = self.block_frames.max(1);
         let all = self.all;
         let offset = self.block_done;
@@ -1007,17 +1293,33 @@ impl<S: Sample> Sampler<S> {
                     len,
                 }
             };
-            match self.instruments[voice.slot].as_deref() {
-                Some(instrument) => voice.player.render(
-                    instrument,
+            let cost = if budgeted {
+                voice.player.cost(
                     self.interpolation,
-                    piece,
-                    &self.controllers,
-                    self.clock,
-                    &modulation,
-                ),
+                    voice.player.share.cheap,
+                    modulation.active,
+                )
+            } else {
+                voice.player.share.fresh = false;
+                0.0
+            };
+            match self.instruments[voice.slot].as_deref() {
+                Some(instrument) => {
+                    let rendered = voice.player.render(
+                        instrument,
+                        self.interpolation,
+                        piece,
+                        &self.controllers,
+                        self.clock,
+                        &modulation,
+                    );
+                    spent += cost * rendered as f64;
+                }
                 None => voice.player.stop(),
             }
+        }
+        if let Some(block) = &mut self.budgeted {
+            block.spent += spent;
         }
         self.clock = self.clock.wrapping_add(piece.num_frames() as u64);
         self.block_done += piece.num_frames() as u64;
@@ -1103,6 +1405,8 @@ fn start_voice(
             .min_by_key(|voice| {
                 (
                     voice.player.serial == start.serial,
+                    // One a budget has silenced is not heard at all.
+                    !voice.player.is_silenced(),
                     !voice.player.is_releasing(),
                     voice.player.age,
                 )
@@ -1159,27 +1463,13 @@ impl<S: Sample> Processor<S> for Sampler<S> {
     /// [`set_controller`](Sampler::set_controller) on its frame (a change
     /// before an event on the same frame).
     fn process_with(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
-        self.take_arrivals();
-        buffer.clear();
-        let frames = buffer.num_frames();
-        for line in self.keys.iter_mut() {
-            line.advance();
+        if self.thinned {
+            // Voices a budget thinned come back to full quality.
+            let mut allowance = Allowance::new(f64::INFINITY);
+            self.process_budgeted(buffer, context, &mut allowance);
+            return;
         }
-        self.all.advance();
-        self.block_frames = frames as u64;
-        self.block_done = 0;
-        let mut position = 0;
-        for event in context.events {
-            let at = (event.offset as usize).min(frames);
-            self.render_until(buffer, &mut position, at);
-            self.apply_pending(at as u32);
-            self.handle_event(event);
-        }
-        self.render_until(buffer, &mut position, frames);
-        // What is set for the block's end or later lands there.
-        self.apply_pending(u32::MAX);
-        self.changes.clear();
-        self.applied = 0;
+        self.process_block(buffer, context);
     }
 
     /// Silences every voice at once and returns to the state of a sampler
@@ -1197,6 +1487,7 @@ impl<S: Sample> Processor<S> for Sampler<S> {
             *channel = CHANNEL_AT_REST;
         }
         self.held.clear();
+        self.thinned = false;
         self.note_ons = 0;
         self.clock = 0;
         self.serial = 0;

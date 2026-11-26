@@ -152,6 +152,21 @@ budget gives, whatever the load: the plugin's choice, at the cost of the
 deadline. `set_max_budget` is what the instrument costs at full quality,
 if it knows; unlimited otherwise.
 
+**9. The framework's instruments (added 2026-11-26).** `Synth` and
+`Sampler` spend an `Allowance` through a second way of processing
+(`process_budgeted`, and `process_governed` around a `Governor`), so that
+`process_with` stays what it was; neither holds a governor, which keeps
+their types free of a clock and lets several share one. A voice states its
+tiers and their costs and does its own cross-fade between tiers, which only
+it can: both tiers read the same state. The instrument fades what it cuts
+(6 ms) and spends what the fade costs, over the budget if need be. A cut
+voice that is a held, sustained tone waits where it is and is taken up
+again; any other is stolen, since a decaying note resumed late would be
+wrong. Whether a render is offline travels with the block
+(`ProcessContext::offline`), which the wrappers set, rather than through a
+call on the plugin, which every plugin would have to forward to its
+instruments.
+
 ## Consequences
 
 - An instrument that wants to degrade gracefully needs a cost model in
@@ -160,8 +175,8 @@ if it knows; unlimited otherwise.
   cheaper ones, then nothing) a few lines.
 - Degrading is abrupt: the budget falls in one block, and a voice moved
   to a cheaper tier changes sound at once unless the instrument
-  cross-fades its tiers. The budget rises slowly, so promotions are spread
-  out, but each is still a step.
+  cross-fades its tiers, as the framework's do (decision 9). The budget
+  rises slowly, so promotions are spread out, but each is still a step.
 - On a busy machine at normal priority the default degrades far more
   than the work alone would need, since it cannot tell stolen time from
   cost; an instrument that would rather risk late blocks than thin out
