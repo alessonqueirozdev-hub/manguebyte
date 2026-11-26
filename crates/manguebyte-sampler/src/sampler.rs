@@ -193,25 +193,28 @@ struct Voice {
 /// polyphony, and is the first to give way to a new note.
 ///
 /// A block whose [`ProcessContext::offline`] is set renders everything,
-/// whatever the budget. While the budget covers every voice at full quality,
-/// the output is that of `process_with`, bit for bit. A budget that does not
-/// is shared out where blocks start, so what is heard then depends on where
-/// the host cuts them, and with a governor on a real clock, on the machine.
-/// A call to `process_with` after a budget brings every voice back to full
-/// quality, with the same fades.
+/// whatever the budget. From a reset, and while the budget covers every voice
+/// at full quality, the output is that of `process_with`, bit for bit. A
+/// budget that does not is shared out where blocks start, so what is heard
+/// then depends on where the host cuts them, and with a governor on a real
+/// clock, on the machine. A call to `process_with` after a budget brings
+/// every voice back to full quality, with the same fades, so what it then
+/// renders may differ from what a sampler no budget touched would.
 ///
 /// # Real time
 ///
 /// [`process_with`](Processor::process_with),
 /// [`process_budgeted`](Self::process_budgeted) and
-/// [`reset`](Processor::reset) neither allocate, free, lock nor panic, and
-/// the output does not depend on how the host cuts the timeline into
-/// blocks: every voice moves one frame at a time and every event lands on
-/// its frame. A new instrument is taken at the start of a block; the one
-/// it replaces keeps playing the notes it had started until they end, and
-/// is then sent back to the loader to be freed there. If a third arrives
-/// while two are still sounding, the older one's notes fade out over 6 ms
-/// first.
+/// [`reset`](Processor::reset) neither allocate, free, lock nor panic.
+/// From a reset, or once no voice is thinned by [a budget](Self#a-budget),
+/// the output of `process_with`, and of `process_budgeted` with a budget
+/// that covers every voice at full quality, does not depend on how the
+/// host cuts the timeline into blocks: every voice moves one frame at a
+/// time and every event lands on its frame. A new instrument is taken at
+/// the start of a block; the one it replaces keeps playing the notes it
+/// had started until they end, and is then sent back to the loader to be
+/// freed there. If a third arrives while two are still sounding, the older
+/// one's notes fade out over 6 ms first.
 ///
 /// ```
 /// use manguebyte_core::AudioBuffer;
@@ -658,6 +661,7 @@ impl<S: Sample> Sampler<S> {
     /// Releases a note now. Real-time safe.
     pub fn note_off(&mut self, note: NoteRef, velocity: f32) {
         let _ = velocity;
+        self.changed = true;
         let channel = usize::from(note.channel & 0x0F);
         let pedal = self.channels[channel].sustain;
         for voice in &mut self.voices {
@@ -751,11 +755,11 @@ impl<S: Sample> Sampler<S> {
 
     /// Handles one event now. Real-time safe.
     pub fn handle_event(&mut self, event: &Event) {
-        self.changed = true;
         match event.kind {
             EventKind::NoteOn { note, velocity } => self.note_on(note, velocity),
             EventKind::NoteOff { note, velocity } => self.note_off(note, velocity),
             EventKind::NoteChoke { note } => {
+                self.changed = true;
                 let rate = self.sample_rate;
                 for voice in &mut self.voices {
                     if voice.player.active && note.matches(&voice.player.note) {
@@ -808,6 +812,7 @@ impl<S: Sample> Sampler<S> {
                 match controller {
                     64 => self.set_sustain(channel, value >= 64),
                     120 => {
+                        self.changed = true;
                         let rate = self.sample_rate;
                         for voice in &mut self.voices {
                             if voice.player.active
@@ -831,6 +836,7 @@ impl<S: Sample> Sampler<S> {
                         }
                     }
                     123 => {
+                        self.changed = true;
                         for voice in &mut self.voices {
                             let player = &mut voice.player;
                             if player.active
@@ -874,6 +880,8 @@ impl<S: Sample> Sampler<S> {
         if down || !was_down {
             return;
         }
+        // The notes it held end here.
+        self.changed = true;
         for voice in &mut self.voices {
             let player = &mut voice.player;
             if player.active

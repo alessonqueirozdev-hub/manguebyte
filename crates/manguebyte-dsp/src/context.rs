@@ -206,7 +206,12 @@ pub struct ProcessContext<'a, S: Sample = f32> {
     /// budget they are given (`Synth::process_budgeted` and
     /// `Sampler::process_budgeted`). A plugin with a
     /// [`Governor`](manguebyte_core::governor::Governor) of its own passes
-    /// it to [`govern`](manguebyte_core::governor::Governor::govern).
+    /// it to [`govern`](manguebyte_core::governor::Governor::govern); one
+    /// that renders on a render pool cannot, since `govern` holds the
+    /// governor while the block renders, so it calls
+    /// [`set_offline`](manguebyte_core::governor::Governor::set_offline)
+    /// with this and then `begin_block`, `run_governed` and `end_block`
+    /// itself, spending the governor's `allowance`.
     pub offline: bool,
 }
 

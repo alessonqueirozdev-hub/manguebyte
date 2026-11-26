@@ -11,8 +11,11 @@ break the API.
 
 The framework's own instruments can spend a `core::governor` budget (ADR
 0018). Nothing changes for one that is not asked to: `process_with` renders
-as before, and a budget that covers every voice, or an offline block, gives
-that output bit for bit.
+as before. From a fresh start, and as long as no voice has been thinned, a
+budget that covers every voice, or an offline block, gives that output bit
+for bit. After a budget has thinned voices, they come back over 6 ms rather
+than at once (under `process_with` too), and the output may differ from that
+of a run no budget touched.
 
 - `Synth::process_budgeted` renders within an `Allowance`, and
   `Synth::process_governed` inside a `Governor`. Held, then louder, then

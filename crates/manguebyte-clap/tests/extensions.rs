@@ -45,7 +45,7 @@ use manguebyte_clap::clap_sys::plugin::clap_plugin;
 use manguebyte_clap::clap_sys::process::*;
 use manguebyte_clap::clap_sys::version::CLAP_VERSION;
 use manguebyte_clap::plugin_entry;
-use manguebyte_core::governor::{Governor, GovernorConfig};
+use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
 use manguebyte_core::{AudioBuffer, ParamId};
 use manguebyte_dsp::event::{EventKind, NoteRef};
 use manguebyte_dsp::instruments::{OrganParams, OrganVoice};
@@ -582,6 +582,53 @@ impl Pointers {
             constant_mask: 0,
         }
     }
+}
+
+#[test]
+fn switching_to_offline_without_a_reset_takes_effect_at_the_next_block() {
+    let _guard = one_at_a_time();
+    let host = Host::new::<Thrifty>();
+    let render: &clap_plugin_render = host.extension(CLAP_EXT_RENDER).unwrap();
+    let set = |mode| unsafe { render.set.unwrap()(host.plugin, mode) };
+    host.activate(64);
+
+    // Live, the two held notes have no room and wait.
+    let notes = [note_on(0, 48, 1), note_on(0, 55, 2)];
+    assert_eq!(host.play(128, &[64], &notes), [0.0; 128]);
+    assert!(set(CLAP_RENDER_OFFLINE));
+    let offline = host.play(512, &[64], &[]);
+    // What the organ itself does when a budget of nothing is lifted: the
+    // voices fade back in from the first frame of the block.
+    let expected = {
+        let mut organ = Synth::new(OrganVoice::voices(4, OrganParams::jazz()));
+        organ.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 512,
+            num_channels: 1,
+        });
+        organ.note_on(NoteRef::with_id(0, 48, 1), 1.0);
+        organ.note_on(NoteRef::with_id(0, 55, 2), 1.0);
+        let mut block = AudioBuffer::<f32>::new(1, 512);
+        block.set_num_frames(128);
+        let context = ProcessContext::empty();
+        organ.process_budgeted(&mut block, &context, &mut Allowance::new(0.0));
+        assert_eq!(organ.suspended_voices(), 2);
+        block.set_num_frames(512);
+        let context = context.with_offline(true);
+        organ.process_budgeted(&mut block, &context, &mut Allowance::new(0.0));
+        assert_eq!(organ.suspended_voices(), 0);
+        block.channel(0).to_vec()
+    };
+    assert_eq!(offline, expected);
+    let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |top, &s| top.max(s.abs()));
+    assert!(peak(&offline[..64]) > 0.0);
+    assert!(peak(&offline[..32]) < 0.25 * peak(&offline[288..]));
+
+    // And back to live: the voices fade out again, and then not a sound.
+    assert!(set(CLAP_RENDER_REALTIME));
+    let live = host.play(512, &[64], &[]);
+    assert!(peak(&live[..64]) > 0.0);
+    assert_eq!(live[288..], [0.0; 224]);
 }
 
 /// What one call to `process` produced.

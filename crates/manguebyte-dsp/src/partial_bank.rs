@@ -303,8 +303,9 @@ impl PartialBank {
     /// are; with 0 they go or come at once. A group that has faded out is not
     /// rendered: its phasors stand still, while its gains, ramps and
     /// modulators move on as if it sounded, which is all it still costs.
-    /// While every group sounds in full, the output is that of a bank with
-    /// no limit, bit for bit.
+    /// Until a limit first takes a group below full level, the output is
+    /// that of a bank with no limit, bit for bit; after that it may differ,
+    /// since a group that stood still does not catch up.
     ///
     /// ```
     /// use manguebyte_dsp::PartialBank;

@@ -759,6 +759,21 @@ fn govern_times_what_it_renders_and_offline_it_gives_everything() {
 }
 
 #[test]
+fn jobs_missed_before_a_block_goes_offline_do_not_count_later() {
+    let mut governor = Governor::with_clock(GovernorConfig::default(), FakeClock::default());
+    // A live block with missed jobs, turned offline before it ends.
+    governor.begin_block();
+    governor.note_missed(3);
+    governor.set_offline(true);
+    governor.end_block(FRAMES, 1.0, false);
+    governor.set_offline(false);
+    governor.govern(FRAMES, false, |allowance| allowance.force(1.0));
+    let stats = governor.stats();
+    assert_eq!((stats.blocks, stats.missed_blocks), (1, 0));
+    assert_eq!(governor.last_load(), 0.0);
+}
+
+#[test]
 fn an_allowance_gathers_what_its_parts_spent() {
     let mut block = Allowance::new(10.0);
     let mut parts = [Allowance::new(5.0), Allowance::new(5.0)];

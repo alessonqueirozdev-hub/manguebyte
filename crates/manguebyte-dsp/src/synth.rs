@@ -440,12 +440,14 @@ impl<V> Slot<V> {
 /// need be, and what it costs is counted as spent.
 ///
 /// A block whose [`ProcessContext::offline`] is set renders everything,
-/// whatever the budget. While the budget covers every voice at tier 0, the
-/// output is that of [`process_with`](Processor::process_with), bit for
-/// bit. A budget that does not cover them is shared out where blocks start,
-/// so what is heard then depends on where the host cuts them, and with a
-/// governor on a real clock, on the machine. A call to `process_with` after
-/// a budget brings every voice back to full quality, with the same fades.
+/// whatever the budget. From a reset, and while the budget covers every
+/// voice at tier 0, the output is that of
+/// [`process_with`](Processor::process_with), bit for bit. A budget that
+/// does not cover them is shared out where blocks start, so what is heard
+/// then depends on where the host cuts them, and with a governor on a real
+/// clock, on the machine. A call to `process_with` after a budget brings
+/// every voice back to full quality, with the same fades, so what it then
+/// renders may differ from what a synth no budget touched would.
 ///
 /// ```
 /// use manguebyte_core::AudioBuffer;

@@ -12,7 +12,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use manguebyte_core::AudioBuffer;
-use manguebyte_core::governor::{Governor, GovernorConfig};
+use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
 use manguebyte_dsp::event::NoteRef;
 use manguebyte_dsp::instruments::{OrganParams, OrganVoice};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth};
@@ -143,15 +143,28 @@ impl Host {
         }
     }
 
-    /// Sets processing up in `mode` and plays two notes for one block whose
-    /// data says `block_mode`; returns the left channel.
-    fn play(&self, mode: i32, block_mode: i32) -> Vec<f32> {
+    /// Sets processing up in `mode` and activates.
+    fn start(&self, mode: i32) {
         let mut setup = vst::ProcessSetup {
             processMode: mode,
             symbolicSampleSize: vst::SymbolicSampleSizes_::kSample32 as i32,
             maxSamplesPerBlock: BLOCK as i32,
             sampleRate: 48_000.0,
         };
+        unsafe {
+            assert_eq!(self.processor.setupProcessing(&mut setup), kResultOk);
+            assert_eq!(self.component.setActive(1), kResultOk);
+        }
+    }
+
+    /// Deactivates, which resets the plugin.
+    fn stop(&self) {
+        unsafe { assert_eq!(self.component.setActive(0), kResultOk) };
+    }
+
+    /// One block whose data says `block_mode`, with these events; returns
+    /// the left channel.
+    fn block(&self, block_mode: i32, events: Vec<vst::Event>) -> Vec<f32> {
         let mut channels = vec![vec![0.0f32; BLOCK]; 2];
         let mut pointers: Vec<*mut f32> = channels.iter_mut().map(|c| c.as_mut_ptr()).collect();
         let mut outputs = [vst::AudioBusBuffers {
@@ -161,7 +174,7 @@ impl Host {
                 channelBuffers32: pointers.as_mut_ptr(),
             },
         }];
-        let input = ComWrapper::new(Events(vec![note_on(48), note_on(55)]));
+        let input = ComWrapper::new(Events(events));
         let mut data = vst::ProcessData {
             processMode: block_mode,
             symbolicSampleSize: vst::SymbolicSampleSizes_::kSample32 as i32,
@@ -176,14 +189,16 @@ impl Host {
             outputEvents: ptr::null_mut(),
             processContext: ptr::null_mut(),
         };
-        unsafe {
-            assert_eq!(self.processor.setupProcessing(&mut setup), kResultOk);
-            assert_eq!(self.component.setActive(1), kResultOk);
-            assert_eq!(self.processor.process(&mut data), kResultOk);
-            // Deactivating resets the plugin, for the next play.
-            assert_eq!(self.component.setActive(0), kResultOk);
-        }
+        unsafe { assert_eq!(self.processor.process(&mut data), kResultOk) };
         channels.swap_remove(0)
+    }
+
+    /// Plays two notes for one block, from a reset.
+    fn play(&self, mode: i32, block_mode: i32) -> Vec<f32> {
+        self.start(mode);
+        let played = self.block(block_mode, vec![note_on(48), note_on(55)]);
+        self.stop();
+        played
     }
 }
 
@@ -220,4 +235,52 @@ fn offline_processing_plays_everything_whatever_the_budget() {
     assert_eq!(host.play(PREFETCH, PREFETCH), silence);
     // And back to live.
     assert_eq!(host.play(REALTIME, REALTIME), silence);
+}
+
+#[test]
+fn switching_to_offline_without_a_reset_takes_effect_at_the_next_block() {
+    // What the organ itself does when a budget of nothing is lifted after a
+    // block: the voices fade back in from the first frame of the next.
+    let mut organ = Synth::new(OrganVoice::voices(4, OrganParams::jazz()));
+    organ.prepare(&ProcessSpec {
+        sample_rate: 48_000.0,
+        max_block_size: BLOCK,
+        num_channels: 2,
+    });
+    organ.note_on(NoteRef::new(0, 48), 1.0);
+    organ.note_on(NoteRef::new(0, 55), 1.0);
+    let mut block = AudioBuffer::<f32>::new(2, BLOCK);
+    let mut render = |context: &ProcessContext<'_, f32>| {
+        organ.process_budgeted(&mut block, context, &mut Allowance::new(0.0));
+        block.channel(0).to_vec()
+    };
+    render(&ProcessContext::empty());
+    render(&ProcessContext::empty());
+    let offline = ProcessContext::empty().with_offline(true);
+    let expected: Vec<f32> = (0..8).flat_map(|_| render(&offline)).collect();
+
+    let host = Host::new();
+    // Live, the two held notes have no room and wait.
+    host.start(REALTIME);
+    let silence = vec![0.0; BLOCK];
+    assert_eq!(
+        host.block(REALTIME, vec![note_on(48), note_on(55)]),
+        silence
+    );
+    assert_eq!(host.block(REALTIME, Vec::new()), silence);
+    let played: Vec<f32> = (0..8)
+        .flat_map(|_| host.block(OFFLINE, Vec::new()))
+        .collect();
+    assert_eq!(played, expected);
+    let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |top, &s| top.max(s.abs()));
+    assert!(peak(&played[..BLOCK]) > 0.0);
+    assert!(peak(&played[..32]) < 0.25 * peak(&played[288..]));
+
+    // And back to live: the voices fade out again, and then not a sound.
+    let live: Vec<f32> = (0..8)
+        .flat_map(|_| host.block(REALTIME, Vec::new()))
+        .collect();
+    assert!(peak(&live[..BLOCK]) > 0.0);
+    assert_eq!(live[320..], [0.0; 8 * BLOCK - 320]);
+    host.stop();
 }

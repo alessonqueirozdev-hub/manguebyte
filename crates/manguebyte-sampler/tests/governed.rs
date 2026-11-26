@@ -11,7 +11,7 @@ use std::time::Duration;
 use common::*;
 use manguebyte_core::AudioBuffer;
 use manguebyte_core::governor::{Allowance, Clock, Governor, GovernorConfig};
-use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
+use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{
     BUDGET_FADE_SECONDS, ProcessContext, ProcessSpec, Processor, Synth, Transport,
 };
@@ -309,6 +309,61 @@ fn a_waiting_voice_gives_way_first_to_a_new_note() {
     // What it left room for is the other two.
     let (_, spent, _) = block(&mut sampler, BLOCK, 1_000.0);
     assert!((spent - (32.0 + FIFTH)).abs() < 1e-6, "{spent}");
+}
+
+#[test]
+fn only_notes_share_the_budget_out_inside_a_block() {
+    // Two loops read as they are, and room for one: the louder, on the
+    // first channel. The second then gets louder than it inside a block.
+    let (first, second) = (NoteRef::new(0, 60), NoteRef::new(1, 60));
+    let louder = EventKind::NoteExpression {
+        note: second,
+        expression: Expression::Volume,
+        value: 8.0,
+    };
+    let after = |kind: EventKind| {
+        let mut sampler = sampler(4);
+        sampler.note_on(first, 1.0);
+        sampler.note_on(second, 0.5);
+        block(&mut sampler, 2 * FADE, 1.0);
+        assert_eq!(sampler.suspended_voices(), 1);
+        let mut events = EventBuffer::with_capacity(4);
+        events
+            .push(Event {
+                offset: 100,
+                kind: louder,
+            })
+            .unwrap();
+        events.push(Event { offset: 300, kind }).unwrap();
+        let mut buffer = AudioBuffer::<f32>::new(1, 4 * FADE);
+        let context = ProcessContext::new(&events, &Transport::STOPPED);
+        let mut allowance = Allowance::new(1.0);
+        sampler.process_budgeted(&mut buffer, &context, &mut allowance);
+        let output = buffer.channel(0).to_vec();
+        (sampler, output, allowance.spent())
+    };
+    // What the first voice alone sounds like over the same frames.
+    let alone = {
+        let mut sampler = sampler(4);
+        sampler.note_on(first, 1.0);
+        block(&mut sampler, 2 * FADE, 1.0);
+        block(&mut sampler, 4 * FADE, 1.0).0
+    };
+    // Neither a controller nor the wheel nor an expression shares the
+    // budget out again.
+    for kind in [controller(1, 64), bend(0), louder] {
+        let (mut sampler, output, spent) = after(kind);
+        assert!(output == alone, "{kind:?}");
+        assert_eq!((spent, sampler.suspended_voices()), (1.0, 1), "{kind:?}");
+        // The next block starts with the second voice the louder.
+        let (next, ..) = block(&mut sampler, 4 * FADE, 1.0);
+        assert!(next != alone, "{kind:?}");
+        assert_eq!(sampler.suspended_voices(), 1, "{kind:?}");
+    }
+    // A note does, where it is.
+    let (_, output, _) = after(on(62, 0.1));
+    assert_eq!(output[..300], alone[..300]);
+    assert!(output[300..] != alone[300..]);
 }
 
 #[test]

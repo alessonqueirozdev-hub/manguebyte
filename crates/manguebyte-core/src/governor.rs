@@ -449,7 +449,10 @@ impl<C: Clock> Governor<C> {
 
     /// Turns offline rendering on or off. Offline, the budget is always the
     /// maximum, the clock is not read and nothing is learnt; turning it
-    /// off again picks up where the governor was.
+    /// off again picks up where the governor was. Every call, whether or
+    /// not it changes anything, forgets the block under way as
+    /// [`discard_block`](Self::discard_block) does, missed jobs included,
+    /// so call it before [`begin_block`](Self::begin_block).
     pub fn set_offline(&mut self, offline: bool) {
         self.offline = offline;
         self.started = None;
