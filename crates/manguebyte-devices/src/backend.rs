@@ -223,14 +223,9 @@ impl Backend for SystemBackend {
 
     fn device_info(&self, direction: Direction, id: &str) -> Result<DeviceInfo, DeviceError> {
         let host = self.host();
-        let devices = match direction {
-            Direction::Output => host.output_devices()?,
-            Direction::Input => host.input_devices()?,
-        };
-        let info = devices
-            .into_iter()
-            .find(|device| device.id == id)
-            .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))?;
+        // This one device only: asking the others what they support touches
+        // them.
+        let info = crate::device::info(&host.backend()?, direction, id)?;
         #[cfg(windows)]
         if host.is_exclusive() {
             return Ok(crate::exclusive::describe(&crate::exclusive::System, info));

@@ -15,9 +15,10 @@ break the API.
   identifiers, so a saved setup moves between the two by its `host` line.
   A device serves this program alone, without the Windows mixer, on a
   period down to its shortest (3 ms on the development machine's Realtek
-  output, where shared mode adds about 10 ms of its own); the buffer sizes
-  offered start there. Drivers that refuse it, Windows' Bluetooth audio
-  among them, are reported, not worked around.
+  output, where shared mode adds about 10 ms of its own; output ran in #50
+  and has not been re-run since #55); the buffer sizes offered start there.
+  Drivers that refuse it, Windows' Bluetooth audio among them, are reported,
+  not worked around.
 - Input and duplex in that host: an input alone, or an input and an output
   on one callback, each device on its own stream and thread, joined by the
   bridge that `DuplexStream` uses, which follows the drift between the two
@@ -26,12 +27,17 @@ break the API.
   counts and rates it takes exclusively, and a channel count the settings
   do not name is one it takes. `AudioHost::exclusive_support` lists each
   device with what it takes, or why it cannot be held (`ExclusiveRefusal`).
-  The callback is told no latencies. Tested in CI with stand-ins for the
-  devices; capture and duplex have not yet run on a real device
-  (TECH_DEBT item 123).
+  The callback is told no latencies. A saved setup that names this host and
+  an input now takes that input exclusively: before, the host had no inputs.
+  Tested in CI with stand-ins for the devices; capture and duplex have not
+  yet run on a real device (TECH_DEBT item 123).
 - `manguebyte-wasapi`, a new crate: the COM calls behind that host, which
   `manguebyte-devices` cannot make since it forbids `unsafe`. `start` plays
-  an output and `start_capture` records an input, once a period.
+  an output and `start_capture` records an input, once a period. A period the
+  driver has no buffer for (`AUDCLNT_E_BUFFER_ERROR`) is passed over, an
+  input being handed silence marked as a discontinuity; a stream stops after
+  about a second of them, or when its callback panics
+  (`Error::CallbackPanicked`), and says so.
 
 ## [0.2.0] - 2026-11-12
 

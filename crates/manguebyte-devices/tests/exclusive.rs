@@ -9,8 +9,12 @@
 //!
 //! Either may have `wasapi:` before it. A test whose variables are not set
 //! opens nothing and passes. Outputs are left silent, and what an input
-//! records is counted and never read, kept or played. A device whose name
-//! says it is a Behringer UMC is refused before anything opens it.
+//! records is counted and never read, kept or played.
+//!
+//! A chosen device is looked up in the manager's list of names, which asks
+//! no device what it supports, and one whose name says UMC or Behringer, or
+//! cannot be read, is refused there. After that only the chosen devices are
+//! asked anything.
 
 #![cfg(windows)]
 
@@ -19,8 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use manguebyte_devices::{
-    AudioHost, DeviceChoice, DeviceIo, DeviceManager, DeviceRef, DeviceSetup, Direction,
-    WASAPI_EXCLUSIVE,
+    DeviceChoice, DeviceIo, DeviceManager, DeviceRef, DeviceSetup, Direction, WASAPI_EXCLUSIVE,
 };
 
 /// A device is held by one stream at a time, so the tests take turns.
@@ -43,28 +46,26 @@ fn chosen(variable: &str, direction: Direction) -> Option<String> {
     } else {
         format!("wasapi:{id}")
     };
-    let host = AudioHost::by_name(WASAPI_EXCLUSIVE).expect("Windows has the host");
-    let devices = match direction {
-        Direction::Input => host.input_devices(),
-        Direction::Output => host.output_devices(),
-    }
-    .expect("the host lists devices");
-    let device = devices
+    // The shared host's devices are the exclusive host's, by the same
+    // identifiers, and listing them reads only identifiers and names.
+    let snapshot = DeviceManager::new()
+        .devices()
+        .expect("Windows lists devices");
+    let device = snapshot
+        .devices(direction)
         .iter()
         .find(|device| device.id == id)
         .unwrap_or_else(|| panic!("{variable} names no {}: {id}", direction.as_str()));
     let name = device.name.to_lowercase();
+    // "unknown device" stands for a name that could not be read.
     assert!(
-        !name.contains("umc") && !name.contains("behringer"),
-        "{} is never opened by a test",
+        !["umc", "behringer", "unknown device"]
+            .iter()
+            .any(|forbidden| name.contains(forbidden)),
+        "{variable} names {:?}, which no test touches",
         device.name
     );
-    // Asked without opening it, as a listing would be.
-    for support in host.exclusive_support(direction).expect("the host says") {
-        if support.id == id {
-            eprintln!("{}: {:?}", support.name, support.outcome);
-        }
-    }
+    eprintln!("{variable}: {}", device.name);
     Some(id)
 }
 
@@ -88,6 +89,15 @@ fn run(output: Option<String>, input: Option<String>) {
         .with_host(WASAPI_EXCLUSIVE)
         .with_output(choice(&output))
         .with_input(choice(&input));
+    // What the streams report from their threads, where a panic would be
+    // lost.
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&failures);
+    manager.set_error_handler(move |error| {
+        kept.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(error.to_string());
+    });
     let blocks = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&blocks);
     let with_input = input.is_some();
@@ -123,6 +133,8 @@ fn run(output: Option<String>, input: Option<String>) {
 
     std::thread::sleep(Duration::from_millis(300));
     manager.stop();
+    let failures = failures.lock().unwrap_or_else(PoisonError::into_inner);
+    assert!(failures.is_empty(), "a stream failed: {failures:?}");
     let ran = blocks.load(Ordering::Relaxed);
     eprintln!("{ran} blocks, periods of up to {period} frames, in 0.3 s");
     assert!(ran > 3);

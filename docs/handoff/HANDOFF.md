@@ -36,7 +36,7 @@ Issues #7, #22 and #24 are kept for outside contributors; #23 belongs to LukoOG.
 
 ## What still needs Alesson's Windows PC
 
-- Tests that open real audio devices (`MANGUEBYTE_WASAPI_DEVICE=...`, `crates/manguebyte-wasapi/tests/hardware.rs`, `crates/manguebyte-devices/tests/exclusive.rs`). **Real devices only ever play silence; the Behringer UMC is never opened by a test.**
+- Tests that open real audio devices (`MANGUEBYTE_WASAPI_DEVICE=...` for an output, `MANGUEBYTE_WASAPI_INPUT_DEVICE=...` for an input; `crates/manguebyte-wasapi/tests/hardware.rs`, `crates/manguebyte-devices/tests/exclusive.rs`). **Real devices only ever play silence; the Behringer UMC is never opened by a test.**
 - Trying plugins in a DAW, the standalone with real MIDI, and anything Windows-, macOS- or iOS-only (the CI covers building and validating them).
 - Devin runs on that PC (its CLI), with the manager's handoff folder — now the private repo `manguebyte-handoff`.
 
@@ -50,7 +50,7 @@ all required on `main`) runs on every pull request and on `ci/**` branches.
 
 ## Environment variables
 
-None needed. Optional: `MANGUEBYTE_WASAPI_DEVICE` (Windows hardware test only).
+None needed. Optional, for the Windows hardware tests only: `MANGUEBYTE_WASAPI_DEVICE` (an output) and `MANGUEBYTE_WASAPI_INPUT_DEVICE` (an input).
 
 ## The other projects
 

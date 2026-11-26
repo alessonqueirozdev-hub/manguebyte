@@ -26,6 +26,7 @@ pub(crate) mod code {
     pub(crate) const DEVICE_IN_USE: i32 = 0x8889_000A_u32 as i32;
     pub(crate) const EXCLUSIVE_MODE_NOT_ALLOWED: i32 = 0x8889_000E_u32 as i32;
     pub(crate) const SERVICE_NOT_RUNNING: i32 = 0x8889_0010_u32 as i32;
+    pub(crate) const BUFFER_ERROR: i32 = 0x8889_0018_u32 as i32;
     pub(crate) const BUFFER_SIZE_NOT_ALIGNED: i32 = 0x8889_0019_u32 as i32;
     pub(crate) const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
 }
@@ -65,6 +66,13 @@ pub(crate) fn refuses_the_device(hresult: i32) -> bool {
             | code::SERVICE_NOT_RUNNING
             | code::ACCESS_DENIED
     )
+}
+
+/// Whether this failure of a stream's `GetBuffer` only says that there is
+/// no buffer this time. Microsoft documents it for exclusive mode, on both
+/// directions, and asks the caller to wait for the next pass.
+pub(crate) fn no_buffer(hresult: i32) -> bool {
+    hresult == code::BUFFER_ERROR
 }
 
 /// Which structure describes a format to the driver.
@@ -319,6 +327,21 @@ mod tests {
         // `S_FALSE`, `E_INVALIDARG` and the plain "no" are about the format.
         for hresult in [1, 0x8007_0057_u32 as i32, code::UNSUPPORTED_FORMAT] {
             assert!(!refuses_the_device(hresult));
+        }
+    }
+
+    #[test]
+    fn only_a_missing_buffer_is_waited_out() {
+        assert!(no_buffer(code::BUFFER_ERROR));
+        for hresult in [
+            0,
+            code::DEVICE_INVALIDATED,
+            code::DEVICE_IN_USE,
+            code::SERVICE_NOT_RUNNING,
+            code::BUFFER_SIZE_NOT_ALIGNED,
+            code::ACCESS_DENIED,
+        ] {
+            assert!(!no_buffer(hresult));
         }
     }
 

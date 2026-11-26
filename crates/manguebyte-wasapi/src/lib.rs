@@ -18,8 +18,14 @@
 //! - [`start`] opens an output, starts a thread of its own with the "Pro
 //!   Audio" priority, and calls `render` once a period to fill the device's
 //!   buffer, in the device's [`Samples`] format.
-//! - [`start_capture`] opens an input the same way and calls `capture` once
-//!   a period with what the device recorded, as a [`Packet`].
+//! - [`start_capture`] opens an input the same way and calls `capture` with
+//!   each packet the device recorded, normally one a period, as a
+//!   [`Packet`].
+//!
+//! A period for which the driver has no buffer is passed over: an output
+//! does not call `render`, and an input hands `capture` a period of silence
+//! marked as a discontinuity. A stream stops after about a second of them in
+//! a row, or when its callback panics.
 //!
 //! Every COM object a stream uses is made, used and released on that one
 //! thread. A program that records and plays at once starts one of each and
@@ -34,6 +40,7 @@ use std::time::Duration;
 mod exclusive;
 mod negotiate;
 mod packet;
+mod period;
 
 /// What went wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +63,8 @@ pub enum Error {
     FormatNotSupported(String),
     /// The device went away.
     DeviceLost,
+    /// A stream's `render` or `capture` panicked, and the stream stopped.
+    CallbackPanicked,
     /// Anything else the system said.
     Os(String),
 }
@@ -74,6 +83,7 @@ impl fmt::Display for Error {
             ),
             Self::FormatNotSupported(why) => write!(f, "no format the device takes: {why}"),
             Self::DeviceLost => f.write_str("the device went away"),
+            Self::CallbackPanicked => f.write_str("the stream's callback panicked"),
             Self::Os(why) => write!(f, "WASAPI: {why}"),
         }
     }
@@ -187,15 +197,16 @@ impl Captured<'_> {
     }
 }
 
-/// One delivery of a capture stream, normally one period.
+/// One delivery of a capture stream, normally one period: a packet the
+/// device recorded, or silence standing for audio it did not hand over.
 #[derive(Debug, Clone, Copy)]
 pub struct Packet<'a> {
     /// The recorded samples. All zeros when the driver marks the packet
     /// silent.
     pub samples: Captured<'a>,
     /// Audio was lost before this packet, as the driver says (the first
-    /// packet of a stream may say so), or because the packet itself could
-    /// not be read and zeros stand for it.
+    /// packet of a stream may say so), or zeros stand for audio that could
+    /// not be read or that the driver had no buffer for.
     pub discontinuity: bool,
 }
 
@@ -245,8 +256,11 @@ pub fn capabilities(id: &str, channels: u16) -> Result<Capabilities, Error> {
 /// `render` runs on the stream's own thread once a period, with the
 /// buffer to fill and how long the stream has run. It must not allocate,
 /// lock or block. It is handed a buffer of silence to overwrite; leaving it
-/// untouched plays silence. `on_error` runs on the same thread, at most
-/// once, when the device fails or goes away; the stream then stops.
+/// untouched plays silence. A period the driver has no buffer for calls
+/// nothing. `on_error` runs on the same thread, at most once, when the
+/// device fails or goes away, when it has had no buffer for about a second,
+/// or when `render` panics ([`Error::CallbackPanicked`]); the stream then
+/// stops.
 ///
 /// Returns once the device runs, with the format it runs in.
 /// [`Error::Unsupported`] when `id` is an input.
@@ -275,11 +289,14 @@ where
 
 /// Opens the input device `id` exclusively and starts it.
 ///
-/// `capture` runs on the stream's own thread once a period, with what the
-/// device recorded and how long the stream has run. It must not allocate,
-/// lock or block. The samples are the driver's own buffer, lent for that
-/// call only. `on_error` runs on the same thread, at most once, when the
-/// device fails or goes away; the stream then stops.
+/// `capture` runs on the stream's own thread with each packet the device
+/// recorded, normally one a period, and how long the stream has run. It must
+/// not allocate, lock or block. The samples are the driver's own buffer, or
+/// zeros standing for it, lent for that call only. A period the driver has
+/// no buffer for is handed over as zeros marked as a discontinuity.
+/// `on_error` runs on the same thread, at most once, when the device fails
+/// or goes away, when it has had no buffer for about a second, or when
+/// `capture` panics ([`Error::CallbackPanicked`]); the stream then stops.
 ///
 /// Returns once the device runs, with the format it runs in.
 /// [`Error::Unsupported`] when `id` is an output: exclusive mode has no

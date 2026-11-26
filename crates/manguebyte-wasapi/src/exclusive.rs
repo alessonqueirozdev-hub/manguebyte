@@ -4,11 +4,11 @@
 //! releases them, in that order, inside one multithreaded apartment of its
 //! own. Each period the driver signals an event; an output's thread takes
 //! the whole buffer, has it filled, and hands it back, and an input's takes
-//! the packet recorded, has it read, and hands it back.
+//! each packet recorded, has it read, and hands it back.
 //!
-//! What can be decided without a device (formats, periods, what a failure
-//! means) is in `negotiate`, and what a packet becomes in `packet`, where
-//! every system tests it.
+//! What can be decided without a device is decided where every system tests
+//! it: formats, periods and what a failure means in `negotiate`, what a
+//! packet becomes in `packet`, and when a stream stops in `period`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -17,11 +17,10 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, DEVICE_STATE_ACTIVE, EDataFlow,
-    IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-    WAVEFORMATEXTENSIBLE_0, eCapture, eRender,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    DEVICE_STATE_ACTIVE, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
+    IMMDevice, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eCapture, eRender,
 };
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -35,10 +34,11 @@ use windows::Win32::System::Threading::{
 use windows::core::{HSTRING, Interface, w};
 
 use crate::negotiate::{
-    Candidate, Failure, Header, RATES, candidates, code, error_for, layout, negotiate, period_of,
-    refuses_the_device, wanted_period,
+    Candidate, Failure, Header, RATES, candidates, code, error_for, layout, negotiate, no_buffer,
+    period_of, refuses_the_device, wanted_period,
 };
-use crate::packet::Reader;
+use crate::packet::{Flags, Reader};
+use crate::period::{Period, Taken, Watch, drain};
 use crate::{Capabilities, Error, Format, Packet, Request, SampleKind, Samples};
 
 /// Where a stream's thread says whether the device started.
@@ -375,7 +375,7 @@ trait Pump {
     }
 
     /// Once for each of the driver's events, `time` after the start.
-    fn period(&mut self, format: &Format, time: Duration) -> Result<(), Error>;
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error>;
 }
 
 /// An output's part: `render` fills the device's buffer.
@@ -387,11 +387,17 @@ struct Player<R> {
 impl<R: FnMut(Samples<'_>, Duration)> Player<R> {
     /// Takes the device's buffer, has `render` fill it, and hands it back.
     /// With no `time`, plays a period of silence without calling `render`.
-    fn hand_over(&mut self, format: &Format, time: Option<Duration>) -> Result<(), Error> {
+    /// A period the driver has no buffer for is missed: there is nothing to
+    /// fill or hand back.
+    fn hand_over(&mut self, format: &Format, time: Option<Duration>) -> Result<Period, Error> {
         let frames = format.period_frames;
         // SAFETY: in exclusive, event-driven mode the whole buffer is free
         // when the event fires, and before the stream starts.
-        let data = unsafe { self.service.GetBuffer(frames) }.map_err(classify)?;
+        let data = match unsafe { self.service.GetBuffer(frames) } {
+            Ok(data) => data,
+            Err(error) if no_buffer(error.code().0) => return Ok(Period::Missed),
+            Err(error) => return Err(classify(error)),
+        };
         let len = frames as usize * usize::from(format.channels);
         let mut flags = 0;
         match time {
@@ -414,7 +420,8 @@ impl<R: FnMut(Samples<'_>, Duration)> Player<R> {
             }
         }
         // SAFETY: hands back exactly the frames taken.
-        unsafe { self.service.ReleaseBuffer(frames, flags) }.map_err(classify)
+        unsafe { self.service.ReleaseBuffer(frames, flags) }.map_err(classify)?;
+        Ok(Period::Served)
     }
 }
 
@@ -422,10 +429,14 @@ impl<R: FnMut(Samples<'_>, Duration)> Pump for Player<R> {
     /// A period of silence is in the buffer before the device starts, as
     /// exclusive mode asks.
     fn prime(&mut self, format: &Format) -> Result<(), Error> {
-        self.hand_over(format, None)
+        match self.hand_over(format, None)? {
+            Period::Served | Period::Idle => Ok(()),
+            // Before the start there is no next pass to wait for.
+            Period::Missed => Err(error_for(code::BUFFER_ERROR, "no buffer to start with")),
+        }
     }
 
-    fn period(&mut self, format: &Format, time: Duration) -> Result<(), Error> {
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error> {
         self.hand_over(format, Some(time))
     }
 }
@@ -437,42 +448,57 @@ struct Recorder<C> {
     capture: C,
 }
 
-impl<C: FnMut(Packet<'_>, Duration)> Pump for Recorder<C> {
-    /// Takes the packet recorded, has `capture` read it, and hands it back.
-    /// Exclusive mode hands over one packet an event, a period long
-    /// (`GetNextPacketSize` is shared mode's).
-    fn period(&mut self, format: &Format, time: Duration) -> Result<(), Error> {
+impl<C: FnMut(Packet<'_>, Duration)> Recorder<C> {
+    /// Takes the next packet recorded, has `capture` read it, and hands it
+    /// back.
+    fn take(&mut self, format: &Format, time: Duration) -> Result<Taken, Error> {
         let mut data = std::ptr::null_mut();
         let (mut frames, mut flags) = (0u32, 0u32);
         // SAFETY: the three pointers are to live locals; the packet's
         // positions are not asked for.
-        unsafe {
+        let got = unsafe {
             self.service
                 .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+        };
+        match got {
+            Ok(()) => {}
+            Err(error) if no_buffer(error.code().0) => return Ok(Taken::NoBuffer),
+            Err(error) => return Err(classify(error)),
         }
-        .map_err(classify)?;
+        // `AUDCLNT_S_BUFFER_EMPTY`, a success: no packet is held, so there
+        // is none to hand back.
         if frames == 0 {
-            // Nothing was there (`AUDCLNT_S_BUFFER_EMPTY`, a success), so
-            // nothing is held; handing back nothing is harmless either way.
-            // SAFETY: no frames are handed back.
-            let _ = unsafe { self.service.ReleaseBuffer(0) };
-            return Ok(());
+            return Ok(Taken::Empty);
         }
         let len = frames as usize * usize::from(format.channels);
-        let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
-        let discontinuity = flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
         let capture = &mut self.capture;
         // SAFETY: `GetBuffer` returned `frames` frames of the format the
         // client was initialised with, which is the reader's, readable and
         // unchanged until `ReleaseBuffer`.
         unsafe {
             self.reader
-                .read(data, len, silent, discontinuity, &mut |packet| {
+                .read(data, len, Flags::of(flags), &mut |packet| {
                     capture(packet, time);
                 });
         }
         // SAFETY: hands back exactly the frames taken.
-        unsafe { self.service.ReleaseBuffer(frames) }.map_err(classify)
+        unsafe { self.service.ReleaseBuffer(frames) }.map_err(classify)?;
+        Ok(Taken::Packet)
+    }
+}
+
+impl<C: FnMut(Packet<'_>, Duration)> Pump for Recorder<C> {
+    /// Reads every packet there is: usually one, but an event can stand for
+    /// more. A period the driver has no buffer for is handed to `capture` as
+    /// silence after a loss, so that what follows it keeps its pace.
+    /// (`GetNextPacketSize` is shared mode's.)
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error> {
+        let period = drain(|| self.take(format, time))?;
+        if period == Period::Missed {
+            let capture = &mut self.capture;
+            self.reader.missed(&mut |packet| capture(packet, time));
+        }
+        Ok(period)
     }
 }
 
@@ -596,6 +622,7 @@ where
     }
     let _ = ready.send(Ok(opened.format));
 
+    let mut watch = Watch::new(opened.format.sample_rate, opened.format.period_frames);
     let origin = Instant::now();
     loop {
         // SAFETY: the event handle is live for as long as `opened`.
@@ -607,7 +634,7 @@ where
             on_error(Error::DeviceLost);
             break;
         }
-        if let Err(error) = pump.period(&opened.format, origin.elapsed()) {
+        if let Err(error) = watch.run(|| pump.period(&opened.format, origin.elapsed())) {
             on_error(error);
             break;
         }
@@ -620,12 +647,14 @@ where
 mod tests {
     use windows::Win32::Foundation::E_ACCESSDENIED;
     use windows::Win32::Media::Audio::{
+        AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_E_BUFFER_ERROR,
         AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_DEVICE_INVALIDATED,
         AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_SERVICE_NOT_RUNNING,
         AUDCLNT_E_UNSUPPORTED_FORMAT,
     };
 
     use super::*;
+    use crate::packet::flag;
 
     #[test]
     fn the_codes_told_apart_are_the_systems() {
@@ -643,8 +672,22 @@ mod tests {
                 AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED,
             ),
             (code::ACCESS_DENIED, E_ACCESSDENIED),
+            (code::BUFFER_ERROR, AUDCLNT_E_BUFFER_ERROR),
         ] {
             assert_eq!(ours, theirs.0);
+        }
+    }
+
+    #[test]
+    fn the_capture_flags_are_the_systems() {
+        for (ours, theirs) in [
+            (
+                flag::DATA_DISCONTINUITY,
+                AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
+            ),
+            (flag::SILENT, AUDCLNT_BUFFERFLAGS_SILENT),
+        ] {
+            assert_eq!(ours, theirs.0 as u32);
         }
     }
 

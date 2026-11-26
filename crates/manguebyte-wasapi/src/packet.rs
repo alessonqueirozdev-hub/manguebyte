@@ -7,6 +7,33 @@
 
 use crate::{Captured, Packet, SampleKind};
 
+/// `AUDCLNT_BUFFERFLAGS`' bits that are read, as `Audioclient.h` numbers
+/// them. A test on Windows compares them with the `windows` crate's.
+pub(crate) mod flag {
+    pub(crate) const DATA_DISCONTINUITY: u32 = 0x1;
+    pub(crate) const SILENT: u32 = 0x2;
+}
+
+/// What the driver says about a captured packet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Flags {
+    /// Its data is not to be read: it stands for silence.
+    pub(crate) silent: bool,
+    /// Audio was lost before it.
+    pub(crate) discontinuity: bool,
+}
+
+impl Flags {
+    /// The flags among `bits`; the others, such as the one for a bad
+    /// timestamp, are not read.
+    pub(crate) fn of(bits: u32) -> Self {
+        Self {
+            silent: bits & flag::SILENT != 0,
+            discontinuity: bits & flag::DATA_DISCONTINUITY != 0,
+        }
+    }
+}
+
 /// A period of silence in the stream's format, handed over for the packets
 /// whose data is not to be read.
 enum Silence {
@@ -50,27 +77,48 @@ impl Reader {
         }
     }
 
+    /// Hands `sink` a period of zeros marked as a discontinuity, for a
+    /// period whose audio the driver never handed over.
+    ///
+    /// Real-time safe if `sink` is.
+    pub(crate) fn missed(&self, sink: &mut dyn FnMut(Packet<'_>)) {
+        let period = match &self.silence {
+            Silence::F32(zeros) => zeros.len(),
+            Silence::I32(zeros) => zeros.len(),
+            Silence::I16(zeros) => zeros.len(),
+        };
+        let flags = Flags {
+            silent: true,
+            discontinuity: true,
+        };
+        // SAFETY: a silent packet's data is not read.
+        unsafe { self.read(std::ptr::null(), period, flags, sink) };
+    }
+
     /// Hands `sink` a packet of `len` values. A packet the driver marked
-    /// `silent` is handed over as zeros without being read. So is one whose
+    /// silent is handed over as zeros without being read. So is one whose
     /// data is null or misaligned, which then also counts as a
-    /// `discontinuity`; silence longer than a period is handed over a
+    /// discontinuity; silence longer than a period is handed over a
     /// period at a time.
     ///
     /// Real-time safe if `sink` is.
     ///
     /// # Safety
     ///
-    /// Unless `silent`, `data` must be null or point to at least `len`
+    /// Unless `flags` say silent, `data` must be null or point to at least `len`
     /// samples of the reader's kind that are readable, initialised and
     /// unchanged for the whole call.
     pub(crate) unsafe fn read(
         &self,
         data: *const u8,
         len: usize,
-        silent: bool,
-        discontinuity: bool,
+        flags: Flags,
         sink: &mut dyn FnMut(Packet<'_>),
     ) {
+        let Flags {
+            silent,
+            discontinuity,
+        } = flags;
         if len == 0 {
             return;
         }
@@ -126,16 +174,52 @@ mod tests {
         // or points into an array of at least `len` samples that outlives
         // the call.
         unsafe {
-            reader.read(data, len, silent, discontinuity, &mut |packet| {
-                let values = match packet.samples {
-                    Captured::F32(s) => s.iter().map(|&v| f64::from(v)).collect(),
-                    Captured::I32(s) => s.iter().map(|&v| f64::from(v)).collect(),
-                    Captured::I16(s) => s.iter().map(|&v| f64::from(v)).collect(),
-                };
-                seen.push((values, packet.discontinuity));
+            let flags = Flags {
+                silent,
+                discontinuity,
+            };
+            reader.read(data, len, flags, &mut |packet| {
+                seen.push(seen_in(packet));
             });
         }
         seen
+    }
+
+    fn seen_in(packet: Packet<'_>) -> (Vec<f64>, bool) {
+        let values = match packet.samples {
+            Captured::F32(s) => s.iter().map(|&v| f64::from(v)).collect(),
+            Captured::I32(s) => s.iter().map(|&v| f64::from(v)).collect(),
+            Captured::I16(s) => s.iter().map(|&v| f64::from(v)).collect(),
+        };
+        (values, packet.discontinuity)
+    }
+
+    #[test]
+    fn the_drivers_flags_are_told_apart() {
+        let flags = |silent, discontinuity| Flags {
+            silent,
+            discontinuity,
+        };
+        assert_eq!(Flags::of(0), flags(false, false));
+        assert_eq!(Flags::of(flag::SILENT), flags(true, false));
+        assert_eq!(Flags::of(flag::DATA_DISCONTINUITY), flags(false, true));
+        assert_eq!(Flags::of(0x3), flags(true, true));
+        // A bad timestamp (4) says nothing about the audio.
+        assert_eq!(Flags::of(0x4), flags(false, false));
+        assert_eq!(Flags::of(u32::MAX), flags(true, true));
+    }
+
+    #[test]
+    fn a_missed_period_is_a_period_of_zeros_after_a_loss() {
+        for kind in [
+            SampleKind::F32,
+            SampleKind::I32 { valid_bits: 24 },
+            SampleKind::I16,
+        ] {
+            let mut seen = Vec::new();
+            Reader::new(kind, 6).missed(&mut |packet| seen.push(seen_in(packet)));
+            assert_eq!(seen, [(vec![0.0; 6], true)]);
+        }
     }
 
     #[test]

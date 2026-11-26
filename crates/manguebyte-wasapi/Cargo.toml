@@ -28,5 +28,12 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 
+# The hardware tests read a device's name before they touch it.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
 [lints]
 workspace = true

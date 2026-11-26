@@ -8,9 +8,10 @@
 //! - `MANGUEBYTE_WASAPI_INPUT_DEVICE` names an input
 //!   (`{0.0.1.00000000}.{…}`).
 //!
-//! A test whose variables are not set opens nothing and passes. This crate
-//! knows no device names, so naming the right device is on whoever sets the
-//! variables.
+//! A test whose variables are not set opens nothing and passes. Before
+//! anything else is asked of a device, its name is read from its property
+//! store, which neither activates nor opens it: a name that says UMC or
+//! Behringer, or that cannot be read, fails the test there.
 
 #![cfg(windows)]
 
@@ -21,6 +22,13 @@ use std::time::Duration;
 use manguebyte_wasapi::{
     Capabilities, Error, Request, Samples, capabilities, start, start_capture,
 };
+use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+use windows::Win32::System::Com::StructuredStorage::PropVariantToBSTR;
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, STGM_READ,
+};
+use windows::core::HSTRING;
 
 /// A device is held by one stream at a time, so the tests take turns.
 fn alone() -> MutexGuard<'static, ()> {
@@ -28,12 +36,84 @@ fn alone() -> MutexGuard<'static, ()> {
     DEVICES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn chosen(variable: &str) -> Option<String> {
-    let id = std::env::var(variable).ok();
-    if id.is_none() {
-        eprintln!("{variable} is not set: no device was opened");
+/// Whether a device of this name is one no test may touch.
+fn forbidden(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.trim().is_empty() || name.contains("umc") || name.contains("behringer")
+}
+
+/// The name Windows shows for the device, in a COM apartment this thread is
+/// in already.
+fn read_name(id: &str) -> windows::core::Result<String> {
+    // SAFETY: a plain COM object creation in this thread's apartment.
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    // SAFETY: `HSTRING` hands a null-terminated wide string that outlives
+    // the call.
+    let device = unsafe { enumerator.GetDevice(&HSTRING::from(id)) }?;
+    // SAFETY: `device` is live; the store is opened to be read.
+    let store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
+    // SAFETY: the key is a constant that lives across the call.
+    let value = unsafe { store.GetValue(&PKEY_Device_FriendlyName) }?;
+    // SAFETY: `value` is the live property the store returned, cleared when
+    // dropped.
+    let name = unsafe { PropVariantToBSTR(&value) }?;
+    Ok(name.to_string())
+}
+
+/// `PKEY_Device_FriendlyName` of the device `id`, with or without `wasapi:`
+/// before it. Nothing is activated or opened.
+fn friendly_name(id: &str) -> windows::core::Result<String> {
+    let id = id.strip_prefix("wasapi:").unwrap_or(id);
+    // SAFETY: no reserved pointer is passed.
+    let entered = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let name = read_name(id);
+    if entered {
+        // SAFETY: balances the successful `CoInitializeEx` above; every COM
+        // object made since was released when `read_name` returned.
+        unsafe { CoUninitialize() };
     }
-    id
+    name
+}
+
+/// The device `variable` names, if it is set and a test may touch it.
+fn chosen(variable: &str) -> Option<String> {
+    let Ok(id) = std::env::var(variable) else {
+        eprintln!("{variable} is not set: no device was opened");
+        return None;
+    };
+    let name = friendly_name(&id).unwrap_or_else(|error| {
+        panic!("{variable}: {id} is not touched, as its name cannot be read: {error}")
+    });
+    assert!(
+        !forbidden(&name),
+        "{variable} names {name:?}, which no test touches"
+    );
+    eprintln!("{variable}: {name}");
+    Some(id)
+}
+
+/// What a stream reports from its own thread, where a panic would be lost:
+/// kept, to be asserted on once the stream has stopped.
+#[derive(Clone, Default)]
+struct Failures(Arc<Mutex<Vec<Error>>>);
+
+impl Failures {
+    /// An `on_error` that keeps what it is told.
+    fn sink(&self) -> impl FnMut(Error) + Send + 'static {
+        let kept = Arc::clone(&self.0);
+        move |error| {
+            kept.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(error);
+        }
+    }
+
+    /// Call after the stream is dropped.
+    fn assert_none(&self, stream: &str) {
+        let failures = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(failures.is_empty(), "the {stream} failed: {failures:?}");
+    }
 }
 
 /// What the device takes, with the first of two or one channels it takes at
@@ -63,6 +143,23 @@ fn check_periods(periods: usize, rate: u32, period_frames: u32) {
         periods as f64 > expected * 0.5,
         "the device ran too few periods"
     );
+    assert!(
+        (periods as f64) < expected * 1.5 + 2.0,
+        "the device ran too many periods"
+    );
+}
+
+#[test]
+fn a_behringer_or_nameless_device_is_refused() {
+    for name in [
+        "Speakers (UMC404HD 192k)",
+        "Line (BEHRINGER USB WDM AUDIO)",
+        "umc202hd",
+        "  ",
+    ] {
+        assert!(forbidden(name), "{name:?}");
+    }
+    assert!(!forbidden("Speakers (Realtek(R) Audio)"));
 }
 
 #[test]
@@ -75,6 +172,7 @@ fn a_chosen_device_runs_exclusively_on_its_shortest_period() {
 
     let periods = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&periods);
+    let failures = Failures::default();
     let (stream, format) = start(
         &id,
         Request {
@@ -91,7 +189,7 @@ fn a_chosen_device_runs_exclusively_on_its_shortest_period() {
             assert!(len > 0);
             counted.fetch_add(1, Ordering::Relaxed);
         },
-        |error| panic!("the device failed: {error}"),
+        failures.sink(),
     )
     .expect("the device opens exclusively");
     eprintln!("format: {format:?}");
@@ -99,6 +197,7 @@ fn a_chosen_device_runs_exclusively_on_its_shortest_period() {
     assert!(format.period_frames + 1 >= caps.min_period_frames(rate));
     std::thread::sleep(Duration::from_millis(500));
     drop(stream);
+    failures.assert_none("output");
     check_periods(periods.load(Ordering::Relaxed), rate, format.period_frames);
 
     // Free again: it opens a second time.
@@ -110,10 +209,11 @@ fn a_chosen_device_runs_exclusively_on_its_shortest_period() {
             period_frames: Some(512),
         },
         |_, _| {},
-        |error| panic!("the device failed: {error}"),
+        failures.sink(),
     )
     .expect("the device was given back");
     drop(again);
+    failures.assert_none("output");
 }
 
 #[test]
@@ -135,6 +235,7 @@ fn a_chosen_input_records_exclusively_on_its_shortest_period() {
     // looked at.
     let counts = Arc::new([const { AtomicUsize::new(0) }; 3]);
     let counted = Arc::clone(&counts);
+    let failures = Failures::default();
     let (stream, format) = start_capture(
         &id,
         request,
@@ -144,13 +245,14 @@ fn a_chosen_input_records_exclusively_on_its_shortest_period() {
             counted[1].fetch_add(frames, Ordering::Relaxed);
             counted[2].fetch_add(usize::from(packet.discontinuity), Ordering::Relaxed);
         },
-        |error| panic!("the device failed: {error}"),
+        failures.sink(),
     )
     .expect("the input opens exclusively");
     eprintln!("format: {format:?}");
     assert!(format.period_frames + 1 >= caps.min_period_frames(rate));
     std::thread::sleep(Duration::from_millis(500));
     drop(stream);
+    failures.assert_none("input");
     let [packets, frames, discontinuities] =
         std::array::from_fn(|i| counts[i].load(Ordering::Relaxed));
     eprintln!("{frames} frames, {discontinuities} discontinuities");
@@ -167,10 +269,11 @@ fn a_chosen_input_records_exclusively_on_its_shortest_period() {
             ..request
         },
         |_, _| {},
-        |error| panic!("the device failed: {error}"),
+        failures.sink(),
     )
     .expect("the input was given back");
     drop(again);
+    failures.assert_none("input");
 }
 
 #[test]
@@ -195,6 +298,7 @@ fn a_chosen_input_and_output_run_together() {
         channels,
         period_frames: None,
     };
+    let (out_failures, in_failures) = (Failures::default(), Failures::default());
     // The output is left silent: nothing recorded reaches it.
     let (out_stream, out_format) = start(
         &output,
@@ -202,7 +306,7 @@ fn a_chosen_input_and_output_run_together() {
         move |_, _| {
             played[0].fetch_add(1, Ordering::Relaxed);
         },
-        |error| panic!("the output failed: {error}"),
+        out_failures.sink(),
     )
     .expect("the output opens exclusively");
     let (in_stream, in_format) = start_capture(
@@ -211,7 +315,7 @@ fn a_chosen_input_and_output_run_together() {
         move |_, _| {
             recorded[1].fetch_add(1, Ordering::Relaxed);
         },
-        |error| panic!("the input failed: {error}"),
+        in_failures.sink(),
     )
     .expect("the input opens beside it");
     eprintln!("output: {out_format:?}");
@@ -219,6 +323,8 @@ fn a_chosen_input_and_output_run_together() {
     std::thread::sleep(Duration::from_millis(500));
     drop(in_stream);
     drop(out_stream);
+    out_failures.assert_none("output");
+    in_failures.assert_none("input");
     check_periods(
         periods[0].load(Ordering::Relaxed),
         rate,
