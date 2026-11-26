@@ -194,7 +194,7 @@ impl Backend {
 
     /// The backend to run: this one if it can, the scalar one if not.
     #[inline]
-    fn usable(self) -> Backend {
+    pub(crate) fn usable(self) -> Backend {
         if self.is_available() {
             self
         } else {

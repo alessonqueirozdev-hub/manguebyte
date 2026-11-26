@@ -11,5 +11,13 @@ categories.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[example]]
+# Checks the SIMD registers and the lookup tables in WebAssembly. CI builds it
+# as a `cdylib`, with `cargo rustc --crate-type`, so that a JavaScript engine
+# can call its functions; it is not declared one here because `cargo test`
+# builds every example, and Miri cannot build a `cdylib`.
+name = "simd_register_wasm"
+crate-type = ["rlib"]
+
 [lints]
 workspace = true

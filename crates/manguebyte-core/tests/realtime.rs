@@ -278,3 +278,61 @@ fn governing_never_allocates() {
     });
     assert_eq!(calls, 0, "the governor used the heap");
 }
+
+#[test]
+fn registers_and_lookup_tables_never_allocate() {
+    use manguebyte_core::lookup::{LookupTable, LookupTransform, SineTable};
+    use manguebyte_core::simd::{self, Aligned, Backend, Isa, Kernel, Mask, Register, SimdSample};
+
+    /// Every operation of a register, on a block with a tail.
+    struct Everything<'a, S>(&'a mut [S]);
+
+    impl<S: SimdSample> Kernel for Everything<'_, S> {
+        type Output = u32;
+
+        #[inline(always)]
+        fn run<I: Isa>(self, isa: I) -> u32 {
+            let mut bits = 0;
+            let mut chunks = self.0.chunks_exact_mut(S::LANES);
+            let half = isa.splat(S::from_f64(0.5));
+            for chunk in &mut chunks {
+                let x = isa.load(chunk);
+                let mask = x.simd_gt(half) | !x.simd_ne(half);
+                let y = mask.select(x.sqrt(), -x.abs() / (half - x * half));
+                let mut aligned = Aligned(S::Lanes::default());
+                y.add_product(x, half)
+                    .clamp(-half, half)
+                    .store_aligned(&mut aligned);
+                <S::Register<I>>::load_aligned(isa, &aligned).store(chunk);
+                bits ^= mask.bits() + u32::from(y.reduce_sum() > y.reduce_max() + y.reduce_min());
+            }
+            let rest = chunks.into_remainder();
+            (isa.load_partial(rest, S::ZERO) + half).store_partial(rest);
+            bits
+        }
+    }
+
+    let narrow = LookupTransform::<f32>::tanh(256).unwrap();
+    let wide = LookupTransform::<f64>::exp(-1.0, 1.0, 256).unwrap();
+    let table = LookupTable::from_values(&[0.0f32, 1.0, 4.0, 9.0]).unwrap();
+    let sine = SineTable::<f32>::new(256).unwrap();
+    let mut a = vec![0.75f32; 515];
+    let mut b = vec![0.25f64; 515];
+    let calls = heap_calls(|| {
+        // The first use asks the processor what it has.
+        let _ = simd::dispatch(Everything(&mut a));
+        for backend in Backend::ALL {
+            let _ = backend.dispatch(Everything(&mut a));
+            let _ = backend.dispatch(Everything(&mut b));
+        }
+        narrow.linear_in_place(&mut a);
+        narrow.cubic_in_place(&mut a);
+        wide.linear_in_place(&mut b);
+        wide.cubic_in_place(&mut b);
+        for x in &mut a {
+            *x = table.linear(*x) + table.cubic(*x) + sine.linear(*x) + sine.cubic(*x);
+            *x += narrow.position(*x) + narrow.linear(*x) + narrow.cubic(*x);
+        }
+    });
+    assert_eq!(calls, 0, "a register or a table used the heap");
+}

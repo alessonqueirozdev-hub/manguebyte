@@ -47,6 +47,77 @@ println!("running on {}", Backend::detect().name());
 operation on every backend the processor has against the loops they
 replaced.
 
+## SIMD registers
+
+`manguebyte_core::simd` lets a processor vectorise a loop of its own
+([ADR 0029](../../docs/adr/0029-simd-registers-and-lookup-tables.md)). The
+loop is a `Kernel`, written once over a `Register` of 8 `f32` or 4 `f64`,
+256 bits on every backend; `simd::dispatch` runs it compiled for SSE2, AVX,
+AVX2, NEON, WebAssembly SIMD or plain Rust, whichever the processor has
+best, with the same results on each, bit for bit (a NaN made by arithmetic
+excepted, whose sign and payload are unspecified; the module documentation
+says what changes while subnormals are flushed). There are the four
+operations, `add_product` (never fused), square root, `abs`, `min`, `max`,
+comparisons and selection, aligned, unaligned and partial loads and stores,
+and sums across the lanes in a fixed order. No `unsafe` is needed, and
+nothing allocates.
+
+```rust
+use manguebyte_core::simd::{self, Isa, Kernel, Register, SimdSample};
+
+/// The energy of a block.
+struct Energy<'a>(&'a [f32]);
+
+impl Kernel for Energy<'_> {
+    type Output = f32;
+
+    #[inline(always)] // so that it is compiled for the backend
+    fn run<I: Isa>(self, isa: I) -> f32 {
+        let mut sums = isa.splat(0.0f32);
+        let chunks = self.0.chunks_exact(<f32 as SimdSample>::LANES);
+        let rest = chunks.remainder();
+        for chunk in chunks {
+            let x = isa.load(chunk);
+            sums = sums.add_product(x, x);
+        }
+        let x = isa.load_partial(rest, 0.0);
+        sums.add_product(x, x).reduce_sum()
+    }
+}
+
+assert_eq!(simd::dispatch(Energy(&[0.5; 100])), 25.0);
+```
+
+Mark `run`, and what it calls with registers, `#[inline(always)]`: code that
+is not inlined into it runs correctly, but on AVX many times slower than
+plain Rust.
+
+## Lookup tables
+
+`manguebyte_core::lookup` works a function out once, off the audio thread,
+and reads it back: `LookupTable` at a fractional index, `LookupTransform`
+over a range of inputs, linearly or with a four-point cubic, and
+`SineTable` at any phase. `LookupTransform::tanh` and `exp` are ready made.
+Reading allocates nothing and gives a finite value for every input, NaN
+included, and the same bits on every system; the ready-made tables hold the
+same bits too. Their largest errors, measured by the tests, are in the
+documentation of each: with 2 048 points a period the sine is within
+`1.3e-6` read linearly, and within `2.1e-7` (`f32`) or `2.1e-12` (`f64`)
+read with the cubic.
+
+```rust
+use manguebyte_core::lookup::{LookupTransform, SineTable};
+
+// In `prepare`:
+let shaper = LookupTransform::<f32>::tanh(4_096).expect("4 096 points");
+let sine = SineTable::<f32>::new(2_048).expect("2 048 points");
+// On the audio thread:
+let mut block = [0.5f32; 64];
+shaper.cubic_in_place(&mut block);
+assert!((block[0] - 0.5f32.tanh()).abs() < 5e-7);
+assert!((sine.linear(0.25) - 1.0).abs() < 1.3e-6);
+```
+
 ## Rendering on several cores
 
 `manguebyte_core::pool::RenderPool` renders independent jobs, such as the
