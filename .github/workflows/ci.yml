@@ -370,8 +370,8 @@ jobs:
       # a module built with SIMD, against the same definitions and the same
       # fingerprint as on the other processors.
       - run: |
-          cargo build -p manguebyte-core --release --example simd_register_wasm \
-            --target wasm32-unknown-unknown
+          cargo rustc -p manguebyte-core --release --example simd_register_wasm \
+            --target wasm32-unknown-unknown --crate-type cdylib
           node crates/manguebyte-core/examples/simd_register_wasm.mjs \
             target/wasm32-unknown-unknown/release/examples/simd_register_wasm.wasm
         env:

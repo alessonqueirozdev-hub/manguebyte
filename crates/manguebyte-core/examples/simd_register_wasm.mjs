@@ -1,8 +1,9 @@
 // Runs the WebAssembly build of the `simd_register_wasm` example: the SIMD
 // registers and the lookup tables against their definitions.
 //
-//   RUSTFLAGS="-C target-feature=+simd128" cargo build --release \
-//     -p manguebyte-core --example simd_register_wasm --target wasm32-unknown-unknown
+//   RUSTFLAGS="-C target-feature=+simd128" cargo rustc --release \
+//     -p manguebyte-core --example simd_register_wasm --target wasm32-unknown-unknown \
+//     --crate-type cdylib
 //   node crates/manguebyte-core/examples/simd_register_wasm.mjs \
 //     target/wasm32-unknown-unknown/release/examples/simd_register_wasm.wasm
 //

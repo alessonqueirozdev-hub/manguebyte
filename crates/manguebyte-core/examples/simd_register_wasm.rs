@@ -3,8 +3,9 @@
 //! register against its definition, and the fingerprint of the lookup tables.
 //!
 //! ```text
-//! RUSTFLAGS="-C target-feature=+simd128" cargo build --release \
-//!   -p manguebyte-core --example simd_register_wasm --target wasm32-unknown-unknown
+//! RUSTFLAGS="-C target-feature=+simd128" cargo rustc --release \
+//!   -p manguebyte-core --example simd_register_wasm --target wasm32-unknown-unknown \
+//!   --crate-type cdylib
 //! node crates/manguebyte-core/examples/simd_register_wasm.mjs \
 //!   target/wasm32-unknown-unknown/release/examples/simd_register_wasm.wasm
 //! ```
