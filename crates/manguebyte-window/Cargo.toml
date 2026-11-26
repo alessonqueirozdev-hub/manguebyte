@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-window"
-description = "Platform windows for the Manguebyte user interface: child windows for plugin editors, application windows and their loop, file drops and file dialogs, with a headless backend for tests and a Win32 backend."
+description = "Platform windows for the Manguebyte user interface: child windows for plugin editors, application windows and their loop, file drops and file dialogs, with Win32, X11 (child windows) and headless backends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -44,6 +44,15 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# The X11 protocol (ADR 0028, decision 2), spoken by x11rb's own
+# `RustConnection`: neither libX11 nor libxcb is needed to build or run.
+# The one extension used is XKB, for the repeats of held keys.
+# rustix, which x11rb already uses, writes to the connection's socket with
+# `MSG_NOSIGNAL` (see `x11::connect`).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", default-features = false, features = ["net", "std"] }
+x11rb = { version = "0.14.0", default-features = false, features = ["xkb"] }
+
 [features]
 # Real top-level windows, pixel read-back, input injection and message
 # loops for tests and probes (`win32::testing`). Never for a plugin.
@@ -54,6 +63,14 @@ testing = []
 # A path, not the workspace entry: cargo drops path-only dev-dependencies
 # when it publishes, and a crate cannot depend on itself from crates.io.
 manguebyte-window = { path = ".", features = ["testing"] }
+
+# The X11 tests play the host over a connection of their own: they inject
+# input with XTEST, wait on the window's descriptor with `poll`, and let
+# `SIGPIPE` end the process while they break the window's connection.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+rustix = { version = "1", default-features = false, features = ["event", "std"] }
+x11rb = { version = "0.14.0", default-features = false, features = ["xtest"] }
 
 [lints]
 workspace = true

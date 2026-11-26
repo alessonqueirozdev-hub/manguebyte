@@ -530,6 +530,27 @@ jobs:
       - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
       - run: cargo test -p mangue-duck --test two_binaries -- --ignored
 
+  window-probe-x11:
+    name: Window probe (X11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Xvfb
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - run: cargo test -p manguebyte-window --test x11 --no-run
+      # Real child windows in a parent window on a virtual X server: pictures
+      # presented and read back with GetImage, input injected with XTEST,
+      # and the host's loop played by the test (ADR 0028, decision 5). The
+      # tests are ignored everywhere else, where there is no server. The
+      # screen is large enough for a picture that needs two requests.
+      - name: Open real windows under Xvfb
+        timeout-minutes: 10
+        run: >-
+          xvfb-run -a -s "-screen 0 2560x2560x24"
+          cargo test -p manguebyte-window --test x11 -- --ignored
+
   layering:
     name: Layering
     runs-on: ubuntu-latest

@@ -7,6 +7,26 @@ break the API.
 
 ## Unreleased
 
+### Windows on Linux
+
+- X11 child windows in `manguebyte-window`
+  ([ADR 0028](docs/adr/0028-macos-and-x11-windows.md), part 1). On Linux,
+  `Window::open_with_context`, new, makes a window inside a host's X window
+  and drives it from the host's loop: the connection's descriptor
+  (`EditorContext::watch_fd`), or a 16 ms timer where the host watches none,
+  and the host's timers for the window's. It has no thread of its own and
+  refuses to open where the host offers neither. It speaks the protocol
+  through `x11rb` in pure Rust (neither `libX11` nor `libxcb`), presents with
+  `PutImage`, answers exposes from its back buffer, reports the pointer, the
+  wheel, keys with the text they type and the keyboard's focus, takes its
+  scale from `Xft.dpi`, and sends keys and wheel notches the handler does not
+  use on to the parent. Tested against `Xvfb` in the `Window probe (X11)`
+  job.
+- The plugin wrappers and `manguebyte-gui` do not open editors on Linux yet
+  (part 3), and there are no X11 application windows, clipboard, file dialogs
+  or drops ([TECH_DEBT](docs/TECH_DEBT.md) item 124).
+- `WindowError` has two new variants, `NoHostLoop` and `Unavailable`.
+
 ### Devices
 
 - WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`

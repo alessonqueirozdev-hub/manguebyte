@@ -264,8 +264,9 @@ validator on it as well as Steinberg's on the `.vst3`. JUCE's
 accepts no CLAP format.
 
 **Limit.** Editors open in the host's window on Windows only, through
-`manguebyte-window`'s Win32 backend, which CI tests with real windows; macOS
-and Linux windows are not there yet. By hand, one editor has been opened
+`manguebyte-window`'s Win32 backend, which CI tests with real windows. On
+Linux that crate makes X11 child windows, tested under `Xvfb`, but no
+wrapper opens an editor in one yet; macOS windows are not there. By hand, one editor has been opened
 inside a DAW: Mangue Pluck's, as a CLAP in REAPER on Windows, where it
 showed its title and knobs; working its knobs there has not been tested.
 64-bit audio runs through the plugin's 32-bit path, in CLAP as in VST 3;

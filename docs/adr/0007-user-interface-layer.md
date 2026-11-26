@@ -197,6 +197,22 @@ Reading recorded so far:
   `System_Memory` for the clipboard, `UI_Input_Ime` for placing an input
   method's windows, from imm32.dll) are the same: declarations only.
 
+- `x11rb` 0.14.0 and `x11rb-protocol` 0.14.0, which `manguebyte-window`
+  uses on Linux only (ADR 0028), with the `xkb` feature and no other: no
+  threads, no mutable statics, no hooks; no atom or other name given to the
+  server by the connection itself; the environment is only read (`DISPLAY`
+  to find the server, `XAUTHORITY` and `HOME` for its authority file);
+  `tracing`, the `libxcb` binding, cursor themes and image helpers are
+  features left off. One thing is worked around in our code: the
+  connection's stream writes to its socket without `MSG_NOSIGNAL`, so a
+  write after the server closed it would raise `SIGPIPE` in a host that has
+  not ignored it; the backend gives the connection a stream of its own that
+  sets the flag. Their tree: `gethostname` 1.1.0 (one call to `uname`, for
+  the authority file) and `rustix` 1.1.6 with `linux-raw-sys` and
+  `bitflags`. The only statics written at run time are `rustix`'s atomics
+  that cache, per binary, what the kernel told the process when it started
+  (page size, vDSO addresses) and, in `fs`, whether `statx` works.
+
 How `manguebyte-window` itself keeps the rule on Win32: its window class is
 named after the framework's version, the module handle of the binary it is
 in and the address of an immutable static of that copy of the crate, so two

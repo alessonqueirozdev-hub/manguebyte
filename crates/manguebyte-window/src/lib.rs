@@ -18,7 +18,7 @@
 //! system's dialogs for opening files, picking a folder and saving
 //! ([`WindowCx::open_files`], [`FileDialog`]). ADR 0010 says why and how.
 //!
-//! Two backends implement it:
+//! Three backends implement it:
 //!
 //! - **Win32** (on Windows): a `WS_CHILD` window inside a `Win32` parent,
 //!   or an overlapped top-level window, presenting with
@@ -26,6 +26,13 @@
 //!   `IFileOpenDialog` and `IFileSaveDialog`. See the `win32` module
 //!   (built on Windows only) for what it does and does not do to the
 //!   process.
+//! - **X11** (on Linux): a child window inside an X11 parent, for plugin
+//!   editors, made with [`Window::open_with_context`] and driven by the
+//!   host's loop: no thread of its own. It presents with `PutImage`, speaks
+//!   to the server in pure Rust (neither libX11 nor libxcb), and takes its
+//!   scale from `Xft.dpi`. It has no application windows, clipboard, file
+//!   dialogs or drops yet, and the plugin formats and the interface glue do
+//!   not open editors with it yet (ADR 0028).
 //! - **Headless** ([`Window::headless`], [`App::headless`], on every
 //!   system): no system window at all. A test drives it through
 //!   [`Headless`], which injects [`RawInput`], exposes, resizes, fires
@@ -33,12 +40,13 @@
 //!   the dialogs' answers, and reads back what the window shows, and
 //!   through [`HeadlessApp`], which posts the steps the loop runs.
 //!
-//! Both run the same code for everything but the system calls: damage
+//! All run the same code for everything but the system calls: damage
 //! merging ([`Damage`]), the back buffer and its pixel conversion, the
 //! conversion from device to logical pixels, pointer capture and click
 //! counting, timers, the text caret, and the queue that keeps the handler
-//! from being re-entered. Each has a [`Clipboard`]: the system's on Win32,
-//! one of the window's own when headless.
+//! from being re-entered. A [`Clipboard`] is the system's on Win32 and one
+//! of the window's own when headless; on X11 it reads nothing and refuses
+//! to write.
 //!
 //! # Units
 //!
@@ -97,8 +105,8 @@
 //!
 //! Nothing here keeps mutable statics, starts threads, installs hooks or
 //! changes a process-wide setting, and no name it gives the system is the
-//! same in two binaries (ADR 0007). This crate never reaches a crate that
-//! processes audio.
+//! same in two binaries (ADR 0007); the X11 backend gives the server no
+//! name at all. This crate never reaches a crate that processes audio.
 
 #![deny(unsafe_code)]
 
@@ -118,6 +126,8 @@ mod window;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub mod win32;
+#[cfg(target_os = "linux")]
+mod x11;
 
 pub use app::{App, AppWindowOptions, HeadlessApp, RunEnd};
 pub use clipboard::{Clipboard, MAX_CLIPBOARD_UNITS};

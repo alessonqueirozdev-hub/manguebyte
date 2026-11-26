@@ -67,7 +67,7 @@ nothing beside or above it.
 | `manguebyte-web` | An engine for the browser: parts with a synth, drum kits, an SFZ sampler or the instruments of `manguebyte-dsp` (plucked strings, FM, an organ through its rotating speaker, an 808-style kit and bass, an acid bass) through a chain of effects, a master bus with a true-peak limiter, every kind at one loudness target, 32-byte event records, a shared-memory event ring, WebAssembly exports | core, dsp, params, sampler, analysis |
 | `manguebyte-gfx` | Scenes, a CPU rasteriser behind a private seam, text with an embedded typeface | `tiny-skia`, `skrifa`, `harfrust` |
 | `manguebyte-ui` | Retained widget tree, layout, theme, accessibility model, widgets, a test harness | core, gfx, params, plugin (for the editor contract) |
-| `manguebyte-window` | Platform windows: a child of a host's window (Win32 so far) and a headless backend for tests | gfx, plugin (for the editor contract), `windows-sys` on Windows |
+| `manguebyte-window` | Platform windows: a child of a host's window (Win32, and X11 on Linux) and a headless backend for tests | gfx, plugin (for the editor contract), `windows-sys` on Windows, `x11rb` and `rustix` on Linux |
 | `manguebyte-gui` | Glue between the plugin wrappers and the interface: an `EditorSpec` that opens a widget tree in a child window | gfx, plugin, ui, window |
 | `cargo-mangue` | The command-line tool: new, bundle (CLAP, VST 3, LV2, AU), install, validate | `serde_json` |
 | `manguebyte` | Everything under one name | core, midi, params, dsp, formats, plugin and graph; behind features devices, analysis, osc, clap, vst3, lv2, au, host, standalone, sampler, and `gui` with `ui` (the `gui` feature); never `manguebyte-web`, `manguebyte-gfx`, `manguebyte-window` or `cargo-mangue` |
