@@ -182,7 +182,7 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ A SIMD register type for processors' own loops
   (`manguebyte_core::simd`), the same results on every backend, and lookup
   tables (`manguebyte_core::lookup`) with ready-made sine, `tanh` and `exp`
-  (ADR 0029, TECH_DEBT 123)
+  (ADR 0029, TECH_DEBT 126)
 - ✅ Additive synthesis: `PartialBank`, a bank of sine partials with
   frequencies, gain ramps and pans set every control block, rendered a
   partial per vector lane (`vector::add_partials`), the same bit for bit on
