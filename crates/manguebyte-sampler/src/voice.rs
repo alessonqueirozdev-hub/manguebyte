@@ -79,6 +79,8 @@ pub struct SamplerVoice {
     tuning: f64,
     /// The tuning of the keys, from `Synth::set_tuning`.
     key_tuning: Tuning,
+    /// Whether a budget has the voice read through the cubic interpolator.
+    cheap: bool,
 }
 
 impl SamplerVoice {
@@ -102,6 +104,7 @@ impl SamplerVoice {
             pan: 0.0,
             tuning: 0.0,
             key_tuning: Tuning::default(),
+            cheap: false,
         }
     }
 
@@ -239,6 +242,9 @@ impl SamplerVoice {
             let upcoming = sustain.map(|at| self.layers[at].upcoming(instrument));
             let layer = &mut self.layers[slot];
             if layer.start(instrument, &start, &*instrument.controller_defaults, 0) {
+                if self.cheap {
+                    layer.set_cheap(true, 0);
+                }
                 layer.set_volume(self.volume);
                 layer.set_pan(self.pan);
                 layer.set_tuning(self.tuning);
@@ -310,6 +316,7 @@ impl<S: Sample> Voice<S> for SamplerVoice {
         self.volume = 1.0;
         self.pan = 0.0;
         self.tuning = 0.0;
+        self.cheap = false;
     }
 
     fn is_active(&self) -> bool {
@@ -355,6 +362,53 @@ impl<S: Sample> Voice<S> for SamplerVoice {
             self.outside = self.outside_to;
         }
         self.held_frames = self.held_frames.wrapping_add(frames);
+    }
+
+    /// Two with the sinc interpolator, of which the second reads through
+    /// the cubic; one with the cubic.
+    fn tier_count(&self) -> usize {
+        match self.interpolation {
+            Interpolation::Sinc => 2,
+            Interpolation::Cubic => 1,
+        }
+    }
+
+    /// The units [`Sampler`](crate::Sampler#a-budget) counts for each
+    /// region sounding.
+    fn tier_cost(&self, tier: usize) -> f64 {
+        let modulated = self.outside != (1.0, 1.0) || self.outside_to != (1.0, 1.0);
+        self.layers
+            .iter()
+            .filter(|layer| layer.active)
+            .map(|layer| layer.cost(self.interpolation, tier > 0, modulated))
+            .sum()
+    }
+
+    fn set_tier(&mut self, tier: usize, fade_frames: usize) {
+        self.cheap = tier > 0;
+        let frames = u32::try_from(fade_frames).unwrap_or(u32::MAX);
+        for layer in &mut self.layers {
+            layer.set_cheap(self.cheap, frames);
+        }
+    }
+
+    /// The loudness of its loudest region.
+    fn audibility(&self) -> f32 {
+        self.layers
+            .iter()
+            .filter(|layer| layer.active)
+            .map(Player::audibility)
+            .fold(0.0, f64::max) as f32
+    }
+
+    /// Whether every region sounding is a loop its key holds.
+    fn can_suspend(&self) -> bool {
+        self.held
+            && self.layers.iter().any(|layer| layer.active)
+            && self
+                .layers
+                .iter()
+                .all(|layer| !layer.active || layer.can_suspend())
     }
 
     fn expression(&mut self, expression: Expression, value: f64) {

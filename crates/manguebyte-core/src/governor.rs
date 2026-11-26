@@ -86,9 +86,14 @@
 //!
 //! [`set_offline`](Governor::set_offline) turns the governor off: the budget
 //! is always the maximum, the clock is never read, and nothing is learnt, so
-//! an offline render is at full quality and the same on every machine. Turn
-//! it on for a host's offline bounce (CLAP's `render` extension, VST 3's
-//! offline process mode).
+//! an offline render is at full quality and the same on every machine.
+//!
+//! [`govern`](Governor::govern) also takes whether the block it is given is
+//! rendered offline, and then gives an unlimited allowance, whatever the
+//! maximum is. The instruments of the framework pass it the block's
+//! `ProcessContext::offline` (in `manguebyte-dsp`), which the CLAP and VST 3
+//! wrappers set for a host's offline render (CLAP's `render` extension, VST
+//! 3's offline process mode), so a plugin built on them does not have to.
 //!
 //! # The floor
 //!
@@ -105,9 +110,12 @@
 //! [`spike_blocks`](GovernorConfig::spike_blocks) above one, it must
 //! last). Give the governor the pool's report through
 //! [`note_report`](Governor::note_report) before
-//! [`end_block`](Governor::end_block), and time the pool's `run` and the
-//! mix after it between [`begin_block`](Governor::begin_block) and
-//! `end_block`.
+//! [`end_block`](Governor::end_block), or run the pool with
+//! [`RenderPool::run_governed`](crate::pool::RenderPool::run_governed),
+//! which does, and time the pool's `run` and the mix after it between
+//! [`begin_block`](Governor::begin_block) and `end_block`. Jobs that spend
+//! shares of the budget each have an [`Allowance`] of their own, added to
+//! the block's with [`Allowance::absorb`].
 //!
 //! # Real time
 //!
@@ -441,7 +449,10 @@ impl<C: Clock> Governor<C> {
 
     /// Turns offline rendering on or off. Offline, the budget is always the
     /// maximum, the clock is not read and nothing is learnt; turning it
-    /// off again picks up where the governor was.
+    /// off again picks up where the governor was. Every call, whether or
+    /// not it changes anything, forgets the block under way as
+    /// [`discard_block`](Self::discard_block) does, missed jobs included,
+    /// so call it before [`begin_block`](Self::begin_block).
     pub fn set_offline(&mut self, offline: bool) {
         self.offline = offline;
         self.started = None;
@@ -535,6 +546,58 @@ impl<C: Clock> Governor<C> {
         self.last_load = 0.0;
         self.smoothed_load = 0.0;
         self.stats = GovernorStats::default();
+    }
+
+    /// The allowance of the block about to be rendered: the
+    /// [budget](Self::budget), or an unlimited one while offline, so that a
+    /// [maximum](Self::set_max_budget) never thins an offline render.
+    pub fn allowance(&self) -> Allowance {
+        Allowance::new(if self.offline {
+            f64::INFINITY
+        } else {
+            self.budget
+        })
+    }
+
+    /// Renders one block of `frames` frames under the governor: `render`
+    /// gets the block's [`Allowance`] and spends it, and the governor times
+    /// it and works out the next budget, as
+    /// [`begin_block`](Self::begin_block), [`allowance`](Self::allowance)
+    /// and [`end_block`](Self::end_block) around it would.
+    ///
+    /// With `offline` true, or while the governor is
+    /// [offline](Self::set_offline), `render` gets an unlimited allowance,
+    /// the clock is not read and nothing is learnt; whatever was noted of
+    /// the block, missed jobs included, is dropped. Real-time safe if
+    /// `render` is.
+    ///
+    /// ```
+    /// use manguebyte_core::governor::{Governor, GovernorConfig};
+    ///
+    /// let mut governor = Governor::new(GovernorConfig::default());
+    /// governor.set_max_budget(8.0);
+    /// governor.govern(128, false, |allowance| assert_eq!(allowance.budget(), 8.0));
+    /// // An offline block may render everything.
+    /// governor.govern(128, true, |allowance| assert_eq!(allowance.budget(), f64::INFINITY));
+    /// assert_eq!(governor.stats().blocks, 1);
+    /// ```
+    pub fn govern(&mut self, frames: usize, offline: bool, render: impl FnOnce(&mut Allowance)) {
+        if offline || self.offline {
+            self.discard_block();
+            render(&mut Allowance::new(f64::INFINITY));
+        } else {
+            self.begin_block();
+            let mut allowance = self.allowance();
+            render(&mut allowance);
+            self.end_block(frames, allowance.spent(), allowance.limited());
+        }
+    }
+
+    /// Forgets the block being measured, without learning from it: what
+    /// [`begin_block`](Self::begin_block) started and the missed jobs noted.
+    pub fn discard_block(&mut self) {
+        self.started = None;
+        self.missed = 0;
     }
 
     /// Marks the start of a block's rendering: reads the clock once (not
@@ -739,6 +802,29 @@ impl Allowance {
     /// left out for want of budget, in a way the allowance did not see.
     pub fn mark_limited(&mut self) {
         self.limited = true;
+    }
+
+    /// Adds what `part` spent to what this one has, whether or not it fits,
+    /// and takes over its being [limited](Self::limited): how the block's
+    /// allowance gathers the shares given to the jobs of a render pool.
+    ///
+    /// ```
+    /// use manguebyte_core::governor::Allowance;
+    ///
+    /// let mut block = Allowance::new(10.0);
+    /// // Half of the budget each, for two jobs.
+    /// let mut jobs = [Allowance::new(5.0), Allowance::new(5.0)];
+    /// assert!(jobs[0].try_take(4.0));
+    /// assert!(!jobs[1].try_take(6.0));
+    /// for job in &jobs {
+    ///     block.absorb(job);
+    /// }
+    /// assert_eq!(block.spent(), 4.0);
+    /// assert!(block.limited());
+    /// ```
+    pub fn absorb(&mut self, part: &Allowance) {
+        self.force(part.spent);
+        self.limited |= part.limited;
     }
 
     /// Whether something was refused or cut short: the instrument wanted

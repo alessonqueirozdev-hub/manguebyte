@@ -10,7 +10,7 @@ use crate::instrument::{
     AMPEG, CUTOFF, FILEG, FILEG_DEPTH, Instrument, MODULATES_AMPEG, MODULATES_FILEG,
     MODULATES_GAIN, MODULATES_PITCH, PITCH, Part, RESONANCE, SampleData, Sums, Zone, stages,
 };
-use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
+use crate::interpolate::{Interpolation, MAX_STRETCH, MAX_TAPS, cubic_weights};
 use crate::region::OffMode;
 use crate::resample::{fixed_step, sinc_taps};
 use crate::stream::{Lease, MARGIN};
@@ -28,6 +28,52 @@ pub(crate) const TICK: u32 = 16;
 
 /// One in fixed-point positions: 32 bits of fraction.
 const ONE: u64 = 1 << 32;
+
+/// The cost units a voice that reads its sample's frames as they are
+/// spends a block (ADR 0018).
+const COPY_COST: f64 = 1.0;
+
+/// The cost units of a voice read by the cubic interpolator.
+const CUBIC_COST: f64 = 1.5;
+
+/// The cost units of a voice read by the sinc at or below its sample's
+/// rate, and, for each time faster it reads, above it, up to the stretch the
+/// kernel stops growing at. In proportion to the native timings of
+/// [`Interpolation`].
+const SINC_COST: f64 = 5.0;
+const STRETCHED_SINC_COST: f64 = 16.0;
+
+/// What a budget gives a voice. Every voice has all of it unless a budget
+/// says otherwise.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Share {
+    /// Whether the voice is to be heard.
+    pub(crate) wanted: bool,
+    /// How far it is on the way to silence, in frames of `fade`: 0 is full
+    /// level, and `fade` is silent.
+    pub(crate) depth: u32,
+    /// The frames the fade lasts, at least 1.
+    pub(crate) fade: u32,
+    /// Whether the voice is to be read by the cubic interpolator.
+    pub(crate) cheap: bool,
+    /// How far it is on the way from the interpolator chosen to the cubic,
+    /// in frames of `blend_fade`.
+    blend: u32,
+    blend_fade: u32,
+    /// A voice not yet rendered, which starts as it is shared out, with no
+    /// fade.
+    pub(crate) fresh: bool,
+}
+
+const WHOLE: Share = Share {
+    wanted: true,
+    depth: 0,
+    fade: 1,
+    cheap: false,
+    blend: 0,
+    blend_fade: 1,
+    fresh: false,
+};
 
 /// Whether the key that started a voice still holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +221,8 @@ pub(crate) struct Player {
     crossfade: Crossfade,
     crossfade_frames: u64,
     crossfade_done: u64,
+    /// What a budget gives it.
+    pub(crate) share: Share,
 }
 
 /// Which way a voice crosses.
@@ -288,6 +336,7 @@ impl Player {
         crossfade: Crossfade::None,
         crossfade_frames: 1,
         crossfade_done: 0,
+        share: WHOLE,
     };
 
     /// Starts playing a region, with the controllers in `controls` as they
@@ -315,6 +364,7 @@ impl Player {
             1.0 + zone.veltrack * curve
         };
         self.active = true;
+        self.share.fresh = true;
         self.zone = start.zone;
         self.note = start.note;
         self.release_trigger = start.release_trigger;
@@ -653,6 +703,77 @@ impl Player {
         self.envelope.level() * self.fade() * self.base_gain()
     }
 
+    /// How audible the voice is, for sharing a budget out: its loudness,
+    /// its note's volume included, with an envelope that has not reached its
+    /// peak counted as there, so that a note just struck is not taken for a
+    /// silent one.
+    pub(crate) fn audibility(&self) -> f64 {
+        let envelope = if self.envelope.is_rising() {
+            1.0
+        } else {
+            self.envelope.level()
+        };
+        envelope * self.fade() * self.base_gain().abs() * self.expression_volume
+    }
+
+    /// Whether a budget has silenced the voice, so that it is not rendered.
+    pub(crate) fn is_silenced(&self) -> bool {
+        self.active && !self.share.wanted && self.share.depth >= self.share.fade
+    }
+
+    /// Whether the voice can be left unrendered and taken up again: a loop
+    /// whose key or pedal still holds it, and that nothing is ending.
+    pub(crate) fn can_suspend(&self) -> bool {
+        self.looping
+            && self.hold != Hold::Released
+            && !self.release_trigger
+            && !self.dying
+            && self.crossfade != Crossfade::Out
+    }
+
+    /// Whether a budget has the voice on less than full quality, or on its
+    /// way back to it.
+    pub(crate) fn is_thinned(&self) -> bool {
+        self.active
+            && (!self.share.wanted
+                || self.share.depth > 0
+                || self.share.cheap
+                || self.share.blend > 0)
+    }
+
+    /// What rendering the voice costs a block, read with `interpolation` or,
+    /// if `cheap`, with the cubic. `modulated` says whether something
+    /// outside moves its pitch or gain.
+    pub(crate) fn cost(&self, interpolation: Interpolation, cheap: bool, modulated: bool) -> f64 {
+        if !modulated && self.step == ONE && self.position & (ONE - 1) == 0 {
+            return COPY_COST;
+        }
+        if cheap || interpolation == Interpolation::Cubic {
+            return CUBIC_COST;
+        }
+        if self.step_frames <= 1.0 {
+            SINC_COST
+        } else {
+            STRETCHED_SINC_COST * self.step_frames.min(MAX_STRETCH as f64)
+        }
+    }
+
+    /// Reads with the cubic interpolator, or no longer does, crossing from
+    /// one to the other over `frames` frames; at once with 0.
+    pub(crate) fn set_cheap(&mut self, cheap: bool, frames: u32) {
+        let share = &mut self.share;
+        share.cheap = cheap;
+        if frames == 0 {
+            share.blend_fade = 1;
+            share.blend = u32::from(cheap);
+        } else {
+            // The same mix on the new length.
+            share.blend =
+                (u64::from(share.blend) * u64::from(frames) / u64::from(share.blend_fade)) as u32;
+            share.blend_fade = frames;
+        }
+    }
+
     /// Whether the envelope is in its release, or the voice is fading.
     pub(crate) fn is_releasing(&self) -> bool {
         self.dying || self.envelope.is_released()
@@ -755,7 +876,9 @@ impl Player {
 
     /// Adds the voice's sound to `buffer`, whose first frame is frame
     /// `clock` of the controllers in `controls`. Stops the voice, on the
-    /// exact frame, when its sound ends.
+    /// exact frame, when its sound ends. Returns how many frames it
+    /// rendered: fewer than the buffer's if it ended, or if a budget
+    /// silenced it on the way.
     pub(crate) fn render<S: Sample, C: Controls + ?Sized>(
         &mut self,
         instrument: &Instrument,
@@ -764,9 +887,9 @@ impl Player {
         controls: &C,
         clock: u64,
         modulation: &Modulation,
-    ) {
+    ) -> usize {
         if !self.active {
-            return;
+            return 0;
         }
         let frames = buffer.num_frames();
         let at = (controls, clock, modulation);
@@ -784,7 +907,7 @@ impl Player {
                             *sample += S::from_f64(0.5 * (left + right));
                         }
                     },
-                );
+                )
             }
             _ => {
                 let (out_left, out_right) = buffer.channel_pair_mut(0, 1);
@@ -801,7 +924,7 @@ impl Player {
                             *sample += S::from_f64(right);
                         }
                     },
-                );
+                )
             }
         }
     }
@@ -813,14 +936,14 @@ impl Player {
         frames: usize,
         (controls, clock, modulation): (&C, u64, &Modulation),
         mut emit: impl FnMut(usize, f64, f64),
-    ) {
+    ) -> usize {
         let Some(zone) = instrument.zones.get(self.zone) else {
             self.stop();
-            return;
+            return 0;
         };
         let Some(sample) = zone.sample.and_then(|index| instrument.samples.get(index)) else {
             self.stop();
-            return;
+            return 0;
         };
         if self.lease.is_held() {
             self.lease.refresh();
@@ -835,16 +958,22 @@ impl Player {
             }
         }
         let mut weights = [0.0; MAX_TAPS];
+        let mut rendered = frames;
         for frame in 0..frames {
+            // Silenced by a budget: it stays where it is.
+            if !self.share.wanted && self.share.depth >= self.share.fade {
+                rendered = frame;
+                break;
+            }
             let index = self.position >> 32;
             if !self.looping && index > zone.end {
                 self.stop();
-                return;
+                return frame;
             }
             let level = self.envelope.next();
             if self.envelope.is_done() {
                 self.stop();
-                return;
+                return frame;
             }
             if self.ticking {
                 let filter_level = if self.filtered {
@@ -866,7 +995,7 @@ impl Player {
             if self.dying {
                 if self.fade_left == 0 {
                     self.stop();
-                    return;
+                    return frame;
                 }
                 gain *= self.fade();
                 self.fade_left -= 1;
@@ -875,7 +1004,7 @@ impl Player {
                 if self.crossfade == Crossfade::Out && self.crossfade_done >= self.crossfade_frames
                 {
                     self.stop();
-                    return;
+                    return frame;
                 }
                 let angle = core::f64::consts::FRAC_PI_2 * self.crossfade_done as f64
                     / self.crossfade_frames as f64;
@@ -887,6 +1016,30 @@ impl Player {
                 self.crossfade_done += 1;
                 if self.crossfade == Crossfade::In && self.crossfade_done > self.crossfade_frames {
                     self.crossfade = Crossfade::None;
+                }
+            }
+            // The fade a budget has the voice on.
+            if !self.share.wanted || self.share.depth > 0 {
+                self.share.depth = if self.share.wanted {
+                    self.share.depth - 1
+                } else {
+                    self.share.depth + 1
+                };
+                gain *= 1.0 - f64::from(self.share.depth) / f64::from(self.share.fade);
+            }
+            // How much of the sound is the cubic's, for a budget's sake.
+            let mut cubic_mix = 0.0;
+            let mut interpolation = interpolation;
+            if self.share.cheap || self.share.blend > 0 {
+                self.share.blend = if self.share.cheap {
+                    (self.share.blend + 1).min(self.share.blend_fade)
+                } else {
+                    self.share.blend - 1
+                };
+                if self.share.blend >= self.share.blend_fade {
+                    interpolation = Interpolation::Cubic;
+                } else if interpolation == Interpolation::Sinc {
+                    cubic_mix = f64::from(self.share.blend) / f64::from(self.share.blend_fade);
                 }
             }
             // The step for this frame, and the gain, with what a model
@@ -943,6 +1096,16 @@ impl Player {
                     (self.held_left, self.held_right)
                 }
             };
+            // The cubic reads frames the sinc has read too.
+            if cubic_mix > 0.0 && count > 4 && !self.starved {
+                let cubic = cubic_weights(fraction);
+                if let Some((from_left, from_right)) =
+                    self.gather(zone, sample, index as i64 - 1, &cubic)
+                {
+                    left += (from_left - left) * cubic_mix;
+                    right += (from_right - right) * cubic_mix;
+                }
+            }
             if self.filtered {
                 (left, right) = self.filter.process(left, right, self.stereo);
             }
@@ -959,6 +1122,11 @@ impl Player {
         if let Some(part) = sample.part_at(index).filter(|part| part.packed.is_some()) {
             self.lease.unpack_ahead(part, (index - part.start) as usize);
         }
+        // One silenced that cannot wait to be taken up again ends here.
+        if self.is_silenced() && !self.can_suspend() {
+            self.stop();
+        }
+        rendered
     }
 
     /// The weighted sum of the frames from `first` on, through the loop

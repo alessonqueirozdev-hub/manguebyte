@@ -1,8 +1,8 @@
 //! Drives the CLAP extensions beyond the basic ones through the C
 //! interface, the way a host does: per-note automation and modulation and
 //! their flags, `voice-info`, `note-name`, `audio-ports-config`,
-//! `audio-ports-activation`, 64-bit audio and transport events inside a
-//! block.
+//! `audio-ports-activation`, `render`, 64-bit audio and transport events
+//! inside a block.
 //!
 //! Every `unsafe` block in this file is a call across that interface with
 //! pointers the test owns and keeps alive for the duration of the call, so
@@ -30,6 +30,9 @@ use manguebyte_clap::clap_sys::ext::note_name::{
     CLAP_EXT_NOTE_NAME, clap_note_name, clap_plugin_note_name,
 };
 use manguebyte_clap::clap_sys::ext::params::*;
+use manguebyte_clap::clap_sys::ext::render::{
+    CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME, clap_plugin_render,
+};
 use manguebyte_clap::clap_sys::ext::voice_info::{
     CLAP_EXT_VOICE_INFO, CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES, clap_host_voice_info,
     clap_plugin_voice_info, clap_voice_info,
@@ -42,8 +45,10 @@ use manguebyte_clap::clap_sys::plugin::clap_plugin;
 use manguebyte_clap::clap_sys::process::*;
 use manguebyte_clap::clap_sys::version::CLAP_VERSION;
 use manguebyte_clap::plugin_entry;
+use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
 use manguebyte_core::{AudioBuffer, ParamId};
 use manguebyte_dsp::event::{EventKind, NoteRef};
+use manguebyte_dsp::instruments::{OrganParams, OrganVoice};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice};
 use manguebyte_params::{FloatParam, FloatRange, Param, param_set};
 use manguebyte_plugin::output::OutputBuffer;
@@ -577,6 +582,53 @@ impl Pointers {
             constant_mask: 0,
         }
     }
+}
+
+#[test]
+fn switching_to_offline_without_a_reset_takes_effect_at_the_next_block() {
+    let _guard = one_at_a_time();
+    let host = Host::new::<Thrifty>();
+    let render: &clap_plugin_render = host.extension(CLAP_EXT_RENDER).unwrap();
+    let set = |mode| unsafe { render.set.unwrap()(host.plugin, mode) };
+    host.activate(64);
+
+    // Live, the two held notes have no room and wait.
+    let notes = [note_on(0, 48, 1), note_on(0, 55, 2)];
+    assert_eq!(host.play(128, &[64], &notes), [0.0; 128]);
+    assert!(set(CLAP_RENDER_OFFLINE));
+    let offline = host.play(512, &[64], &[]);
+    // What the organ itself does when a budget of nothing is lifted: the
+    // voices fade back in from the first frame of the block.
+    let expected = {
+        let mut organ = Synth::new(OrganVoice::voices(4, OrganParams::jazz()));
+        organ.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 512,
+            num_channels: 1,
+        });
+        organ.note_on(NoteRef::with_id(0, 48, 1), 1.0);
+        organ.note_on(NoteRef::with_id(0, 55, 2), 1.0);
+        let mut block = AudioBuffer::<f32>::new(1, 512);
+        block.set_num_frames(128);
+        let context = ProcessContext::empty();
+        organ.process_budgeted(&mut block, &context, &mut Allowance::new(0.0));
+        assert_eq!(organ.suspended_voices(), 2);
+        block.set_num_frames(512);
+        let context = context.with_offline(true);
+        organ.process_budgeted(&mut block, &context, &mut Allowance::new(0.0));
+        assert_eq!(organ.suspended_voices(), 0);
+        block.channel(0).to_vec()
+    };
+    assert_eq!(offline, expected);
+    let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |top, &s| top.max(s.abs()));
+    assert!(peak(&offline[..64]) > 0.0);
+    assert!(peak(&offline[..32]) < 0.25 * peak(&offline[288..]));
+
+    // And back to live: the voices fade out again, and then not a sound.
+    assert!(set(CLAP_RENDER_REALTIME));
+    let live = host.play(512, &[64], &[]);
+    assert!(peak(&live[..64]) > 0.0);
+    assert_eq!(live[288..], [0.0; 224]);
 }
 
 /// What one call to `process` produced.
@@ -1232,4 +1284,106 @@ fn a_transport_event_inside_a_block_takes_effect_on_its_frame() {
     let run = host.process(&mut [], &mut outputs, &events, Some(120.0));
     assert_eq!(run.heap_calls, 0);
     assert_eq!(outputs[0].f32()[0], [100.0; 8]);
+}
+
+// --- Offline render -------------------------------------------------------
+
+/// An organ that renders within a governor whose maximum is nothing: live it
+/// is silent, so anything it plays it was told to render offline. It does
+/// nothing about offline renders itself.
+struct Thrifty {
+    organ: Synth<OrganVoice>,
+    governor: Governor,
+    params: Arc<ShapeParams>,
+}
+
+impl Plugin for Thrifty {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.thrifty",
+        name: "Thrifty",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Plays only offline",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::MONO_INSTRUMENT;
+    type Params = ShapeParams;
+
+    fn new() -> Self {
+        let mut governor = Governor::new(GovernorConfig::default());
+        governor.set_max_budget(0.0);
+        Self {
+            organ: Synth::new(OrganVoice::voices(4, OrganParams::jazz())),
+            governor,
+            params: Arc::new(ShapeParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 2.0), 1.0),
+            }),
+        }
+    }
+    fn params(&self) -> Arc<ShapeParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.organ.prepare(spec);
+    }
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.organ
+            .process_governed(buffer, context, &mut self.governor);
+    }
+    fn reset(&mut self) {
+        self.organ.reset();
+    }
+}
+
+/// What the organ plays with every voice it is asked for.
+fn whole_organ(frames: usize) -> Vec<f32> {
+    let mut organ = Synth::new(OrganVoice::voices(4, OrganParams::jazz()));
+    organ.prepare(&ProcessSpec {
+        sample_rate: 48_000.0,
+        max_block_size: frames,
+        num_channels: 1,
+    });
+    organ.note_on(NoteRef::with_id(0, 48, 1), 1.0);
+    organ.note_on(NoteRef::with_id(0, 55, 2), 1.0);
+    let mut block = AudioBuffer::<f32>::new(1, frames);
+    organ.process(&mut block);
+    block.channel(0).to_vec()
+}
+
+#[test]
+fn an_offline_render_plays_everything_whatever_the_budget() {
+    let _guard = one_at_a_time();
+    let host = Host::new::<Thrifty>();
+    let render: &clap_plugin_render = host.extension(CLAP_EXT_RENDER).unwrap();
+    let set = |mode| unsafe { render.set.unwrap()(host.plugin, mode) };
+    assert!(!unsafe { render.has_hard_realtime_requirement.unwrap()(host.plugin) });
+    host.activate(64);
+
+    let notes = [note_on(0, 48, 1), note_on(0, 55, 2)];
+    // Live, which is what a plugin starts as: not a sound.
+    assert_eq!(host.play(256, &[64], &notes), [0.0; 256]);
+
+    unsafe { (*host.plugin).reset.unwrap()(host.plugin) };
+    assert!(set(CLAP_RENDER_OFFLINE));
+    // In blocks of any size, and in the pieces a transport event cuts one
+    // into.
+    let expected = whole_organ(256);
+    assert!(expected.iter().any(|&sample| sample != 0.0));
+    assert_eq!(host.play(256, &[64, 7, 1], &notes), expected);
+
+    unsafe { (*host.plugin).reset.unwrap()(host.plugin) };
+    let mut outputs = [Samples::F32(vec![vec![0.0; 64]])];
+    let events = [notes[0], notes[1], Sent::Transport(transport(30, 90.0))];
+    let run = host.process(&mut [], &mut outputs, &events, Some(120.0));
+    assert_eq!((run.status, run.heap_calls), (CLAP_PROCESS_CONTINUE, 0));
+    assert_eq!(outputs[0].f32()[0], expected[..64]);
+
+    // A mode that is neither is refused and changes nothing.
+    assert!(!set(7));
+    unsafe { (*host.plugin).reset.unwrap()(host.plugin) };
+    assert_eq!(host.play(64, &[64], &notes), expected[..64]);
+
+    unsafe { (*host.plugin).reset.unwrap()(host.plugin) };
+    assert!(set(CLAP_RENDER_REALTIME));
+    assert_eq!(host.play(64, &[64], &notes), [0.0; 64]);
 }

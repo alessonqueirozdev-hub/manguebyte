@@ -321,3 +321,43 @@ fn streaming_voices_and_cursors_never_allocate() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_sampler_spending_a_budget_never_allocates() {
+    use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+
+    let spec = ProcessSpec {
+        sample_rate: 48_000.0,
+        max_block_size: 256,
+        num_channels: 2,
+    };
+    let instrument = || Instrument::from_sfz(TEXT, &mut source()).unwrap();
+    let (mut sampler, mut loader) = Sampler::<f32>::new(8);
+    sampler.prepare(&spec);
+    loader.load(instrument()).unwrap();
+    let shared = Arc::new(instrument());
+    let mut synth = Synth::with_voices(6, || SamplerVoice::new(Arc::clone(&shared)));
+    synth.prepare(&spec);
+    let later = instrument();
+    let blocks: Vec<EventBuffer> = (300..380).map(busy_events).collect();
+    let mut governor = Governor::new(GovernorConfig::default());
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let transport = Transport::STOPPED;
+    loader.load(later).unwrap();
+    assert_no_heap_use("samplers under a budget", || {
+        for (index, events) in blocks.iter().enumerate() {
+            buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+            set_parameters(&mut sampler, index);
+            let context = ProcessContext::new(events, &transport);
+            let units = [f64::INFINITY, 60.0, 4.0, 0.0, 200.0][index / 3 % 5];
+            sampler.process_budgeted(&mut buffer, &context, &mut Allowance::new(units));
+            synth.process_budgeted(&mut buffer, &context, &mut Allowance::new(units));
+            if index % 7 == 0 {
+                sampler.process_governed(&mut buffer, &context, &mut governor);
+                sampler.process_with(&mut buffer, &context);
+            }
+        }
+        sampler.reset();
+        sampler.process(&mut buffer);
+    });
+}

@@ -27,6 +27,11 @@ const EVENTS_PER_BLOCK: usize = 4_096;
 /// plugin's sound can be checked in an ordinary unit test and in CI, on
 /// machines with no sound card.
 ///
+/// It renders with no deadline, and says so: every block's context is
+/// [offline](ProcessContext::offline), so a processor budget governor in the
+/// plugin cuts nothing. [`set_offline`](Self::set_offline) renders as a host
+/// playing live does instead.
+///
 /// Events are scheduled by their position on the timeline, in frames from
 /// the start, and are delivered when rendering reaches them.
 ///
@@ -51,6 +56,8 @@ pub struct Harness<P: Plugin> {
     layout: AudioLayout,
     sample_rate: f64,
     max_block_size: usize,
+    /// Whether blocks say they are rendered offline.
+    offline: bool,
     /// Block lengths to cycle through.
     pattern: Vec<usize>,
     next_in_pattern: usize,
@@ -118,6 +125,7 @@ impl<P: Plugin> Harness<P> {
             layout: P::LAYOUT,
             sample_rate,
             max_block_size,
+            offline: true,
             pattern: vec![max_block_size],
             next_in_pattern: 0,
             scheduled: Vec::new(),
@@ -195,6 +203,14 @@ impl<P: Plugin> Harness<P> {
             max_block_size: self.max_block_size,
             num_channels: layout.outputs,
         });
+    }
+
+    /// Says whether the blocks to come are rendered offline
+    /// ([`ProcessContext::offline`]): true to begin with. With false, the
+    /// plugin is told what a host playing live tells it, and a governor in
+    /// it measures the blocks against its own clock.
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
     }
 
     /// The layout the plugin runs with.
@@ -516,8 +532,9 @@ impl<P: Plugin> Harness<P> {
             let block = self.clock.next_block(length);
             let map = self.clock.map();
             let transport = block.transport(map);
-            let mut context =
-                ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
+            let mut context = ProcessContext::new(&self.events, &transport)
+                .with_timeline(block.with_map(map))
+                .with_offline(self.offline);
             if let Some(whole) = sidechain.filter(|_| self.layout.sidechain > 0) {
                 // The plugin gets the stretch that goes with this block.
                 self.sidechain.set_num_frames(length);
@@ -823,6 +840,46 @@ mod tests {
     #[should_panic(expected = "tempo 0")]
     fn a_tempo_of_zero_is_a_mistake() {
         let _ = Harness::<Level>::new(48_000.0, 16).with_tempo(0.0);
+    }
+
+    /// Says in every frame whether the block is rendered offline.
+    struct Deadline(Arc<NoParams>);
+
+    impl Plugin for Deadline {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.deadline",
+            name: "Deadline",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Says whether it is offline",
+            kind: PluginKind::Instrument,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+        type Params = NoParams;
+
+        fn new() -> Self {
+            Self(Arc::new(NoParams {}))
+        }
+        fn params(&self) -> Arc<NoParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            let said = if context.offline { 1.0 } else { -1.0 };
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(said);
+            }
+        }
+    }
+
+    #[test]
+    fn the_harness_renders_offline_unless_told_otherwise() {
+        let mut harness = Harness::<Deadline>::new(48_000.0, 4);
+        assert_eq!(harness.render(10).channel(0), &[1.0; 10]);
+        harness.set_offline(false);
+        assert_eq!(harness.render(10).channel(0), &[-1.0; 10]);
+        harness.set_offline(true);
+        assert_eq!(harness.render(10).channel(0), &[1.0; 10]);
     }
 
     // --- An instrument. ---

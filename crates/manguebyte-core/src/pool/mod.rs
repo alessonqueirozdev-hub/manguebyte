@@ -573,6 +573,22 @@ impl<J: Job> RenderPool<J> {
         self.run_with(count, |_| false)
     }
 
+    /// [`run`](Self::run) for a block a [`Governor`](crate::governor::Governor)
+    /// measures: the report goes to the governor
+    /// ([`note_report`](crate::governor::Governor::note_report)), so that a
+    /// block with missed jobs counts as at least a whole deadline's load.
+    /// Call it between the governor's `begin_block` and `end_block`, on the
+    /// audio thread; it does not allocate or lock.
+    pub fn run_governed<C: crate::governor::Clock>(
+        &mut self,
+        count: usize,
+        governor: &mut crate::governor::Governor<C>,
+    ) -> BlockReport {
+        let report = self.run(count);
+        governor.note_report(&report);
+        report
+    }
+
     /// As [`run`](Self::run), but first offers the work to other threads:
     /// `request` is called with the number of helpers that could be used
     /// (one less than the jobs), and returns `true` if it had that many

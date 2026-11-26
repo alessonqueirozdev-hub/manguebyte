@@ -36,6 +36,8 @@ pub struct Engine<P: Plugin> {
     /// [`ProcessContext::timeline`].
     clock: TransportClock,
     sample_rate: f64,
+    /// Whether blocks are rendered offline.
+    offline: bool,
     midi: Vec<MidiReceiver>,
     notes: Consumer<MidiMessage>,
     /// Reads the MIDI of the ports and the program, as [`Plugin::MPE`]
@@ -190,6 +192,7 @@ impl<P: Plugin> Engine<P> {
             events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
             clock,
             sample_rate,
+            offline: false,
             midi,
             notes,
             input: NoteInput::new(P::MPE),
@@ -343,6 +346,23 @@ impl<P: Plugin> Engine<P> {
         true
     }
 
+    /// Says whether the blocks to come are rendered offline, with no
+    /// deadline, as a program writing a file through
+    /// [`render`](Self::render) does: every block's context then says so
+    /// ([`ProcessContext::offline`]), and the framework's instruments render
+    /// everything, whatever their budget. False to begin with, and what a
+    /// device needs; [`Standalone`](crate::Standalone), which only plays on
+    /// one, never sets it.
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
+    }
+
+    /// Whether blocks are rendered offline. See
+    /// [`set_offline`](Self::set_offline).
+    pub fn is_offline(&self) -> bool {
+        self.offline
+    }
+
     /// Produces one block for the device.
     ///
     /// `input` is what the device captured, if anything. `output` is the
@@ -430,8 +450,9 @@ impl<P: Plugin> Engine<P> {
         let block = self.clock.next_block(frames);
         let map = self.clock.map();
         let transport = block.transport(map);
-        let context =
-            ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
+        let context = ProcessContext::new(&self.events, &transport)
+            .with_timeline(block.with_map(map))
+            .with_offline(self.offline);
         self.output.clear();
         // A bus is given to the plugin only if the device has somewhere
         // for it to go.
@@ -518,6 +539,7 @@ impl<P: Plugin> AudioCallback for Engine<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use manguebyte_core::governor::{Governor, GovernorConfig};
     use manguebyte_core::spsc::{self, Producer};
     use manguebyte_dsp::event::{EventKind, NoteRef};
     use manguebyte_dsp::{Processor, Synth, Voice};
@@ -817,6 +839,66 @@ mod tests {
         let mut count = 0;
         queue.send_all(|_| count += 1);
         assert_eq!(count, 0);
+    }
+
+    /// Keys that render within a governor whose maximum is nothing: live
+    /// they are silent, so anything they play they were told to render
+    /// offline. They do nothing about offline renders themselves.
+    struct Thrifty {
+        synth: Synth<KeyVoice>,
+        governor: Governor,
+        params: Arc<LevelParams>,
+    }
+
+    impl Plugin for Thrifty {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-thrifty",
+            name: "Thrifty",
+            ..Keys::INFO
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+        type Params = LevelParams;
+
+        fn new() -> Self {
+            let mut governor = Governor::new(GovernorConfig::default());
+            governor.set_max_budget(0.0);
+            Self {
+                synth: Synth::with_voices(4, KeyVoice::default),
+                governor,
+                params: Keys::new().params,
+            }
+        }
+        fn params(&self) -> Arc<LevelParams> {
+            Arc::clone(&self.params)
+        }
+        fn prepare(&mut self, spec: &ProcessSpec) {
+            self.synth.prepare(spec);
+        }
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            self.synth
+                .process_governed(buffer, context, &mut self.governor);
+        }
+    }
+
+    #[test]
+    fn an_offline_render_plays_everything_whatever_the_budget() {
+        let (mut engine, mut notes) = engine::<Thrifty>();
+        let mut device = AudioBuffer::<f32>::new(2, 8);
+        assert!(!engine.is_offline());
+        notes.push(on(60)).unwrap();
+        engine.render(None, &mut device);
+        assert_eq!(device.peak(), 0.0);
+
+        engine.set_offline(true);
+        assert!(engine.is_offline());
+        notes.push(on(64)).unwrap();
+        engine.render(None, &mut device);
+        assert_eq!(device.channel(0), &[64.0; 8]);
+
+        engine.set_offline(false);
+        engine.render(None, &mut device);
+        // The note heard fades out, as a voice a budget cuts does.
+        assert!(device.channel(0)[7] < 64.0);
     }
 
     fn engine<P: Plugin>() -> (Engine<P>, Producer<MidiMessage>) {

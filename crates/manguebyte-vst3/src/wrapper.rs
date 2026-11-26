@@ -305,6 +305,8 @@ struct Audio<P> {
     plugin: P,
     sample_rate: f64,
     max_block: usize,
+    /// Whether the setup asked for offline processing.
+    offline: bool,
     /// Whether the plugin has been prepared for the current setup.
     prepared: bool,
     /// The layout the plugin was prepared for.
@@ -517,6 +519,7 @@ impl<P: Plugin> Component<P> {
                 plugin,
                 sample_rate: 44_100.0,
                 max_block: 0,
+                offline: false,
                 prepared: false,
                 layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
@@ -1493,6 +1496,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
         let audio = unsafe { &mut *self.audio.get() };
         audio.sample_rate = setup.sampleRate;
         audio.max_block = setup.maxSamplesPerBlock.max(1) as usize;
+        audio.offline = setup.processMode == vst::ProcessModes_::kOffline as i32;
         audio.prepared = false;
         kResultOk
     }
@@ -1559,7 +1563,9 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             // SAFETY: the context pointer is valid for this call, or null.
             let transport = unsafe { data.processContext.as_ref() }
                 .map_or(Transport::STOPPED, convert_transport);
-            let mut context = ProcessContext::new(&audio.events, &transport);
+            // Either says so: the setup, or the block itself.
+            let offline = audio.offline || data.processMode == vst::ProcessModes_::kOffline as i32;
+            let mut context = ProcessContext::new(&audio.events, &transport).with_offline(offline);
             if layout.sidechain > 0 {
                 context = context.with_sidechain(&audio.sidechain);
             }

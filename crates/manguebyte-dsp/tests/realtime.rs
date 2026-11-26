@@ -2066,3 +2066,70 @@ fn the_space_around_the_pipes_does_not_use_the_heap() {
     assert!(all_finite(&buffer));
     check("SwellBox", SwellBox::<f32>::default());
 }
+
+#[test]
+fn instruments_spending_a_budget_do_not_use_the_heap() {
+    use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+    use manguebyte_dsp::instruments::{OrganParams, OrganVoice};
+    use manguebyte_dsp::{Partial, PartialBank};
+
+    let mut synth = Synth::new(OrganVoice::voices(8, OrganParams::jazz()));
+    synth.prepare(&SPEC);
+    let mut bank = PartialBank::new(64);
+    bank.set_len(64);
+    for partial in 0..64 {
+        bank.set(
+            partial,
+            Partial {
+                freq_hz: 50.0 * (partial + 1) as f64,
+                gain: 0.01,
+                pan: 0.0,
+            },
+        );
+    }
+    let mut governor = Governor::new(GovernorConfig::default());
+    let mut events = EventBuffer::with_capacity(64);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let transport = Transport::STOPPED;
+    assert_no_heap_use("instruments under a budget", || {
+        for round in 0..96u8 {
+            events.clear();
+            for step in 0..4u8 {
+                let key = 36 + (usize::from(round) * 5 + usize::from(step) * 11) % 48;
+                let note = NoteRef::new(0, key as u8);
+                let offset = u32::from(step) * 50;
+                let kind = match (round + step) % 5 {
+                    0..=2 => EventKind::NoteOn {
+                        note,
+                        velocity: 0.8,
+                    },
+                    3 => EventKind::NoteOff {
+                        note,
+                        velocity: 0.5,
+                    },
+                    _ => EventKind::NoteChoke { note },
+                };
+                let _ = events.push(Event { offset, kind });
+            }
+            buffer.set_num_frames([256, 64, 1, 200][usize::from(round) % 4]);
+            let context = ProcessContext::new(&events, &transport);
+            // Plenty, little, nothing, and everything again.
+            let units = [f64::INFINITY, 40.0, 13.0, 0.0, 70.0][usize::from(round / 3) % 5];
+            synth.process_budgeted(&mut buffer, &context, &mut Allowance::new(units));
+            if round % 7 == 0 {
+                synth.process_governed(&mut buffer, &context, &mut governor);
+                synth.process_with(&mut buffer, &context);
+                synth.process_governed(&mut buffer, &context.with_offline(true), &mut governor);
+            }
+            bank.set_partial_limit(
+                [64, 16, 0, 40][usize::from(round) % 4],
+                [0, 100, 300][usize::from(round) % 3],
+            );
+            let (left, right) = buffer.channel_pair_mut(0, 1);
+            bank.render_add(left, right);
+        }
+        synth.reset();
+        synth.process(&mut buffer);
+    });
+    assert!(all_finite(&buffer));
+}

@@ -195,6 +195,24 @@ pub struct ProcessContext<'a, S: Sample = f32> {
     /// [`transport`](Self::transport). Like the transport, it describes
     /// the whole block.
     pub timeline: Option<BlockTimeline<'a>>,
+    /// Whether the block is rendered offline, with no deadline to meet: a
+    /// host's bounce or export. The CLAP wrapper sets it for the offline
+    /// mode of CLAP's `render` extension, the VST 3 wrapper for VST 3's
+    /// offline process mode, and the standalone runner's engine and the
+    /// plugin `Harness` as they are told; the Audio Unit and LV2 wrappers
+    /// leave it false.
+    ///
+    /// The framework's instruments render everything offline, whatever
+    /// budget they are given (`Synth::process_budgeted` and
+    /// `Sampler::process_budgeted`). A plugin with a
+    /// [`Governor`](manguebyte_core::governor::Governor) of its own passes
+    /// it to [`govern`](manguebyte_core::governor::Governor::govern); one
+    /// that renders on a render pool cannot, since `govern` holds the
+    /// governor while the block renders, so it calls
+    /// [`set_offline`](manguebyte_core::governor::Governor::set_offline)
+    /// with this and then `begin_block`, `run_governed` and `end_block`
+    /// itself, spending the governor's `allowance`.
+    pub offline: bool,
 }
 
 impl<'a, S: Sample> ProcessContext<'a, S> {
@@ -206,6 +224,7 @@ impl<'a, S: Sample> ProcessContext<'a, S> {
             sidechain: None,
             offset: 0,
             timeline: None,
+            offline: false,
         }
     }
 
@@ -226,6 +245,14 @@ impl<'a, S: Sample> ProcessContext<'a, S> {
     #[must_use]
     pub fn with_timeline(mut self, timeline: BlockTimeline<'a>) -> Self {
         self.timeline = Some(timeline);
+        self
+    }
+
+    /// Says whether the block is rendered offline: see
+    /// [`offline`](Self::offline).
+    #[must_use]
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
         self
     }
 

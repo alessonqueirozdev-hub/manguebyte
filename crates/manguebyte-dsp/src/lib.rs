@@ -120,7 +120,7 @@ pub use shaper::{DcBlocker, ShaperCurve, Waveshaper};
 pub use shifter::FrequencyShifter;
 pub use stft::{SpectralProcessor, Stft, StftError, StftSettings};
 pub use svf::{StateVariableFilter, SvfMode};
-pub use synth::{Synth, Voice};
+pub use synth::{BUDGET_FADE_SECONDS, Synth, Voice};
 pub use tape::TapeSaturation;
 pub use transient::TransientShaper;
 pub use tremolo::{AutoPan, Tremolo};
