@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use manguebyte_gfx::{Color, IRect, MAX_SIDE, Pixmap, Point, Size};
-use manguebyte_plugin::editor::{ParentWindow, WindowApi, checked_scale};
+use manguebyte_plugin::editor::{EditorContext, ParentWindow, WindowApi, checked_scale};
 
 use crate::app::{AppInner, Frame};
 use crate::convert::{self, Utf16Joiner};
@@ -27,8 +27,8 @@ macro_rules! window_methods {
         /// pixmap whose top-left pixel is the window's. Only those
         /// rectangles, cut to the pixmap and the window, are converted and
         /// copied; more than [`MAX_RECTS`](crate::MAX_RECTS) are merged
-        /// first. GDI ignores alpha, so a pixel shows as its premultiplied
-        /// colour over black.
+        /// first. GDI and the X11 backend ignore alpha, so a pixel shows as
+        /// its premultiplied colour over black.
         ///
         /// # Errors
         ///
@@ -139,7 +139,9 @@ macro_rules! window_methods {
 
         /// Starts or restarts the timer `id`, firing about every
         /// `period_ms` milliseconds as [`Event::Timer`] until it is killed
-        /// or the window goes. Win32 fires no faster than every 10 ms.
+        /// or the window goes. Win32 fires no faster than every 10 ms. An
+        /// X11 window's timers are its host's, which may fire more slowly
+        /// than asked and, where it offers none, refuses them.
         ///
         /// # Errors
         ///
@@ -185,8 +187,8 @@ macro_rules! window_methods {
             self.inner().pointer.borrow().capturing()
         }
 
-        /// The system's handle (the `HWND` on Win32), or `None` for a
-        /// headless window or one that was destroyed.
+        /// The system's handle (the `HWND` on Win32, the window's id on
+        /// X11), or `None` for a headless window or one that was destroyed.
         pub fn raw_handle(&self) -> Option<usize> {
             self.inner().platform.handle()
         }
@@ -497,6 +499,14 @@ pub enum WindowError {
     /// Options no window can have, such as a size that is not a positive
     /// number or a minimum larger than the maximum.
     InvalidOptions(&'static str),
+    /// An X11 window is driven by its host's loop, and the host offers
+    /// neither a watch on a descriptor nor a timer
+    /// ([`Window::open_with_context`]), or the window was asked for with
+    /// [`Window::open`], which has no loop to give it.
+    NoHostLoop,
+    /// The window's backend cannot do this yet: the X11 backend has no
+    /// clipboard and no file dialogs.
+    Unavailable(&'static str),
     /// The system refused.
     Platform {
         /// The system call that failed.
@@ -524,6 +534,12 @@ impl fmt::Display for WindowError {
             WindowError::Busy => f.write_str("the window is busy with the same request"),
             WindowError::NotAppWindow => f.write_str("only an application window can do that"),
             WindowError::InvalidOptions(why) => write!(f, "invalid window options: {why}"),
+            WindowError::NoHostLoop => {
+                f.write_str("the window needs the host's timers or file descriptors")
+            }
+            WindowError::Unavailable(what) => {
+                write!(f, "{what}: not available on this backend yet")
+            }
             WindowError::Platform { call, code } => write!(f, "{call} failed with error {code}"),
         }
     }
@@ -542,10 +558,15 @@ pub(crate) enum Life {
 }
 
 /// The backend under a window.
+// One per window, inside its shared allocation: the arms' sizes do not
+// matter.
+#[cfg_attr(target_os = "linux", allow(clippy::large_enum_variant))]
 pub(crate) enum Platform {
     Headless(HeadlessPlatform),
     #[cfg(windows)]
     Win32(crate::win32::Win32Platform),
+    #[cfg(target_os = "linux")]
+    X11(crate::x11::X11Platform),
 }
 
 impl Platform {
@@ -554,8 +575,10 @@ impl Platform {
             Platform::Headless(p) => p.blit(rect),
             #[cfg(windows)]
             Platform::Win32(p) => p.blit(back, rect),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.blit(back, rect),
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = back;
     }
 
@@ -564,6 +587,8 @@ impl Platform {
             Platform::Headless(p) => p.invalidate(rect),
             #[cfg(windows)]
             Platform::Win32(p) => p.invalidate(rect),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.invalidate(rect),
         }
     }
 
@@ -578,6 +603,8 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.set_size(size),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.set_size(size),
         }
     }
 
@@ -586,6 +613,8 @@ impl Platform {
             Platform::Headless(p) => p.set_visible(visible),
             #[cfg(windows)]
             Platform::Win32(p) => p.set_visible(visible),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.set_visible(visible),
         }
     }
 
@@ -597,6 +626,8 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.set_timer(id, period_ms),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.set_timer(id, period_ms),
         }
     }
 
@@ -607,6 +638,8 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.kill_timer(id),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.kill_timer(id),
         }
     }
 
@@ -615,6 +648,10 @@ impl Platform {
             Platform::Headless(p) => p.capture(on),
             #[cfg(windows)]
             Platform::Win32(p) => p.capture(on),
+            // X11's implicit grab holds the pointer from the first button
+            // down to the last up, with nothing to ask for.
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => {}
         }
     }
 
@@ -628,6 +665,8 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.take_focus(),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.take_focus(),
         }
     }
 
@@ -636,6 +675,9 @@ impl Platform {
             Platform::Headless(p) => p.track_leave(),
             #[cfg(windows)]
             Platform::Win32(p) => p.track_leave(),
+            // An X11 window hears when the pointer leaves without asking.
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => {}
         }
     }
 
@@ -644,6 +686,9 @@ impl Platform {
             Platform::Headless(_) => ClickSettings::DEFAULT,
             #[cfg(windows)]
             Platform::Win32(p) => p.click_settings(),
+            // X11 has no setting for a double click.
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => ClickSettings::DEFAULT,
         }
     }
 
@@ -653,6 +698,8 @@ impl Platform {
             Platform::Headless(p) => p.answered(origin, event, handled),
             #[cfg(windows)]
             Platform::Win32(p) => p.answered(origin, event, handled),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.answered(origin, handled),
         }
     }
 
@@ -661,6 +708,8 @@ impl Platform {
             Platform::Headless(p) => p.destroy(),
             #[cfg(windows)]
             Platform::Win32(p) => p.destroy(),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.destroy(),
         }
     }
 
@@ -669,6 +718,8 @@ impl Platform {
             Platform::Headless(_) => None,
             #[cfg(windows)]
             Platform::Win32(p) => p.handle(),
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.handle(),
         }
     }
 
@@ -677,6 +728,8 @@ impl Platform {
             Platform::Headless(p) => Ok(p.read_clipboard()),
             #[cfg(windows)]
             Platform::Win32(p) => p.read_clipboard(),
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => Ok(None),
         }
     }
 
@@ -688,6 +741,11 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.write_clipboard(text),
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => {
+                let _ = text;
+                Err(WindowError::Unavailable("the clipboard"))
+            }
         }
     }
 
@@ -698,6 +756,10 @@ impl Platform {
             Platform::Headless(p) => p.show_caret(caret),
             #[cfg(windows)]
             Platform::Win32(p) => p.show_caret(caret),
+            // The interface draws its own caret, and no input method is
+            // told where it is yet.
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => {}
         }
     }
 
@@ -709,6 +771,9 @@ impl Platform {
             }
             #[cfg(windows)]
             Platform::Win32(p) => p.set_title(title),
+            // Only an application window has a title, and X11 has none yet.
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => Err(WindowError::NotAppWindow),
         }
     }
 
@@ -725,6 +790,8 @@ impl Platform {
                 let _ = inner;
                 p.close();
             }
+            #[cfg(target_os = "linux")]
+            Platform::X11(p) => p.close(inner),
         }
     }
 
@@ -739,6 +806,8 @@ impl Platform {
             Platform::Headless(p) => Ok(p.dialog(kind, dialog)),
             #[cfg(windows)]
             Platform::Win32(p) => p.dialog(kind, dialog),
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => Err(WindowError::Unavailable("file dialogs")),
         }
     }
 }
@@ -994,6 +1063,18 @@ impl Inner {
 
     pub(crate) fn is_open(&self) -> bool {
         self.life.get() == Life::Open
+    }
+
+    /// Whether the window holds the pointer for a drag.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn holds_pointer(&self) -> bool {
+        self.pointer.borrow().capturing()
+    }
+
+    /// Whether the window has the keyboard.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_keyboard(&self) -> bool {
+        self.focused.get()
     }
 
     fn check_open(&self) -> Result<(), WindowError> {
@@ -1498,12 +1579,16 @@ impl Window {
     /// A window inside `parent`, of the size and scale in `options`, whose
     /// events go to `handler`.
     ///
+    /// An X11 window runs on its host's loop, which this does not give it:
+    /// open one with [`open_with_context`](Self::open_with_context).
+    ///
     /// # Errors
     ///
     /// [`WindowError::Unsupported`] where there is no backend for the
-    /// parent's kind (in this version, anything but Win32 on Windows);
-    /// [`WindowError::InvalidParent`] for a handle that is not a window of
-    /// this process; [`WindowError::InvalidSize`] or
+    /// parent's kind (in this version, anything but Win32 on Windows and
+    /// X11 on Linux); [`WindowError::NoHostLoop`] for an X11 parent on
+    /// Linux; [`WindowError::InvalidParent`] for a handle that is not a
+    /// window of this process; [`WindowError::InvalidSize`] or
     /// [`WindowError::InvalidScale`] for bad options; or
     /// [`WindowError::Platform`] if the system refuses.
     pub fn open(
@@ -1517,11 +1602,57 @@ impl Window {
             ParentWindow::Win32 { hwnd } => {
                 crate::win32::open(hwnd, &options, Box::new(handler)).map(|inner| Window { inner })
             }
+            #[cfg(target_os = "linux")]
+            ParentWindow::X11 { .. } => {
+                drop(handler);
+                Err(WindowError::NoHostLoop)
+            }
             other => {
                 drop(handler);
                 Err(WindowError::Unsupported(other.api()))
             }
         }
+    }
+
+    /// As [`open`](Self::open), for an editor in a host: the window may
+    /// use the loop the host offers through `context`.
+    ///
+    /// On Linux this is how a window is made inside an X11 parent. It
+    /// belongs to a connection of its own to the server `DISPLAY` names, is
+    /// driven by the host's watch on that connection's descriptor
+    /// ([`EditorContext::watch_fd`]) or, where there is none, by a timer of
+    /// the host's, and its own timers are the host's
+    /// ([`EditorContext::every`]). Dropping the window, or the context's
+    /// [`HostLink`](manguebyte_plugin::editor::HostLink), cancels what it
+    /// registered; a window whose link is gone hears nothing more. The
+    /// parent may be another client's of the server, as a host's is. The
+    /// window has no clipboard, file dialogs or drops yet.
+    ///
+    /// Elsewhere it is [`open`](Self::open): a Win32 window runs on the
+    /// host's message loop and takes nothing from `context`.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open), but [`WindowError::NoHostLoop`] only where
+    /// the host offers neither a watch on a descriptor nor a timer; for an
+    /// X11 parent, [`WindowError::InvalidParent`] for an id that names no
+    /// window or an input-only one, and [`WindowError::Platform`] if the
+    /// server cannot be reached.
+    pub fn open_with_context(
+        parent: ParentWindow,
+        options: WindowOptions,
+        context: &EditorContext,
+        handler: impl WindowHandler + 'static,
+    ) -> Result<Window, WindowError> {
+        #[cfg(target_os = "linux")]
+        if let ParentWindow::X11 { window } = parent {
+            check_options(&options)?;
+            return crate::x11::open(window, &options, context, Box::new(handler))
+                .map(|inner| Window { inner });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = context;
+        Window::open(parent, options, handler)
     }
 
     /// A window with no system window behind it, and the controller a test
@@ -1698,6 +1829,8 @@ mod tests {
             Platform::Headless(p) => p.take_passed_on(),
             #[cfg(windows)]
             Platform::Win32(_) => unreachable!("headless"),
+            #[cfg(target_os = "linux")]
+            Platform::X11(_) => unreachable!("headless"),
         }
     }
 

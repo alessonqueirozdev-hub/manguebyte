@@ -31,13 +31,13 @@ impl BackBuffer {
 
     /// The buffer's size. It is the window's size, unless that is larger
     /// than [`MAX_SIDE`] or memory ran out, in which case it is smaller.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub(crate) fn size(&self) -> PhysicalSize {
         PhysicalSize::new(self.width, self.height)
     }
 
     /// The pixels, blue-green-red-alpha.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub(crate) fn bgra(&self) -> &[u8] {
         &self.bgra
     }

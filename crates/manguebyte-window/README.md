@@ -31,7 +31,12 @@ Documentation: <https://docs.rs/manguebyte-window>
   "Animation effects" setting), which the interface follows (ADR 0011).
 
 Backends: Win32 (ADR 0007 and ADR 0010 say what it does and does not do
-to a process) and headless. macOS and Linux are not built yet.
+to a process), X11 child windows on Linux, and headless. The X11 backend
+(ADR 0028, part 1) is for editors in a host's window: `Window::open_with_context`
+makes one, driven by the host's loop, in pure Rust (neither libX11 nor
+libxcb). It has no application windows, clipboard, file dialogs or drops yet,
+and the plugin formats do not open editors with it yet. macOS is not built
+yet.
 
 ## Licence
 

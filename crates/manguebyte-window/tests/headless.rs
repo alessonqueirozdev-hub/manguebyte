@@ -723,9 +723,16 @@ fn hostile_options_are_refused() {
         Window::open(cocoa, WindowOptions::new(size(1, 1)), nothing).err(),
         Some(WindowError::Unsupported(WindowApi::Cocoa))
     );
+    // On Linux an X11 window can be had, but not without the host's loop,
+    // which `open` has no way to be given.
+    let refusal = if cfg!(target_os = "linux") {
+        WindowError::NoHostLoop
+    } else {
+        WindowError::Unsupported(WindowApi::X11)
+    };
     assert_eq!(
         Window::open(x11, WindowOptions::new(size(1, 1)), nothing).err(),
-        Some(WindowError::Unsupported(WindowApi::X11))
+        Some(refusal)
     );
     #[cfg(not(windows))]
     assert_eq!(

@@ -96,6 +96,18 @@ Platform accessibility (AccessKit or our own adapters) stays out, as ADR 0007
 decision 6 says: each adapter comes after a test with two plugin binaries in
 one process on that platform.
 
+## As built
+
+**Part 1, X11 child windows.** A window in an X11 parent needs the host's
+loop, which `Window::open` has no way to take, so it is made with
+`Window::open_with_context`, given the editor's `EditorContext`; `open`
+answers `WindowError::NoHostLoop` for an X11 parent. The context offers
+neither or either of a descriptor watch and timers: with no watch, a 16 ms
+timer reads the connection; with no timers, the window's own timers are
+refused; with neither, no window opens. One extension is used, XKB, so that
+a held key's repeats are told apart and a new keyboard map is heard of. The
+window has to itself a connection to the server `DISPLAY` names.
+
 ## Consequences
 
 - Two dependencies arrive, each on one platform only, and each from a family
