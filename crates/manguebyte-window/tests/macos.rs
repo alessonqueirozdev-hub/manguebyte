@@ -1008,22 +1008,47 @@ mod macos {
         }
     }
 
-    /// The `macos_view` example's library, beside this test's own folder.
+    /// The `macos_view` example's library, the newest there is: Cargo puts
+    /// it in the profile's `examples` folder and, since 1.100, in the
+    /// example's own `build/<package>/<hash>/out`, beside this test's.
     fn example_library() -> PathBuf {
         let test = std::env::current_exe().expect("this test's path");
-        let examples = test
-            .parent()
-            .and_then(Path::parent)
-            .expect("the target folder")
-            .join("examples");
-        let library = examples.join("libmacos_view.dylib");
-        assert!(
-            library.is_file(),
-            "{} is not built: run `cargo test -p manguebyte-window`, or `cargo build -p \
-             manguebyte-window --example macos_view` first",
-            library.display()
-        );
-        library
+        let is_it = |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libmacos_view") && name.ends_with(".dylib"))
+        };
+        let mut found: Vec<PathBuf> = test
+            .ancestors()
+            .skip(1)
+            .map(|folder| folder.join("examples").join("libmacos_view.dylib"))
+            .collect();
+        // `<package>/<hash>/out/<this test>`: the package's other units.
+        if let Some(units) = test.ancestors().nth(3) {
+            for unit in std::fs::read_dir(units).into_iter().flatten().flatten() {
+                let files = std::fs::read_dir(unit.path().join("out"));
+                found.extend(
+                    files
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|file| file.path())
+                        .filter(|path| is_it(path)),
+                );
+            }
+        }
+        found
+            .into_iter()
+            .filter(|path| path.is_file())
+            .max_by_key(|path| path.metadata().and_then(|data| data.modified()).ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the example is not built (looked from {}): run `cargo test -p \
+                     manguebyte-window`, or `cargo build -p manguebyte-window --example \
+                     macos_view` first",
+                    test.display()
+                )
+            })
     }
 
     fn two_binaries() {

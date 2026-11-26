@@ -661,13 +661,16 @@ fn location(platform: &MacPlatform, view: &NSView, event: &NSEvent) -> PhysicalP
     )
 }
 
-/// The button of a press or a release, if it is one a window reports.
-fn button(event: &NSEvent) -> Option<Button> {
-    match event.buttonNumber() {
-        0 => Some(Button::Primary),
-        1 => Some(Button::Secondary),
-        2 => Some(Button::Middle),
-        _ => None,
+/// The button of a press or a release that AppKit sent to the method
+/// `method`, if it is one a window reports. The primary and the secondary
+/// button have methods of their own; the number tells the others apart.
+fn button(method: Sel, event: &NSEvent) -> Option<Button> {
+    if method == sel!(mouseDown:) || method == sel!(mouseUp:) {
+        Some(Button::Primary)
+    } else if method == sel!(rightMouseDown:) || method == sel!(rightMouseUp:) {
+        Some(Button::Secondary)
+    } else {
+        (event.buttonNumber() == 2).then_some(Button::Middle)
     }
 }
 
@@ -677,9 +680,9 @@ fn time_ms(event: &NSEvent) -> u32 {
     (event.timestamp() * 1000.0) as u64 as u32
 }
 
-extern "C-unwind" fn button_down(view: &NSView, _: Sel, event: &NSEvent) {
+extern "C-unwind" fn button_down(view: &NSView, method: Sel, event: &NSEvent) {
     serve(view, (), |inner, platform, view| {
-        if let Some(button) = button(event) {
+        if let Some(button) = button(method, event) {
             inner.input(RawInput::PointerDown {
                 at: location(platform, view, event),
                 button,
@@ -690,9 +693,9 @@ extern "C-unwind" fn button_down(view: &NSView, _: Sel, event: &NSEvent) {
     });
 }
 
-extern "C-unwind" fn button_up(view: &NSView, _: Sel, event: &NSEvent) {
+extern "C-unwind" fn button_up(view: &NSView, method: Sel, event: &NSEvent) {
     serve(view, (), |inner, platform, view| {
-        if let Some(button) = button(event) {
+        if let Some(button) = button(method, event) {
             inner.input(RawInput::PointerUp {
                 at: location(platform, view, event),
                 button,
