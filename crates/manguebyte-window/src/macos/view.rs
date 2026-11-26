@@ -26,7 +26,7 @@ use objc2_foundation::{
 };
 
 use super::{MacPlatform, Method, anchor, image, missing};
-use crate::cocoa;
+use crate::cocoa::{self, Scroll};
 use crate::dispatch::{Origin, drop_quietly};
 use crate::event::{Button, Handled, KeyEvent, PhysicalPoint, RawInput, TimerId};
 use crate::window::{Inner, Platform, WindowError, WindowOptions};
@@ -268,16 +268,18 @@ pub(super) fn attach(
         f64::from(options.size.width) / scale,
         f64::from(options.size.height) / scale,
     );
-    // The parent's top-left corner, and what keeps the view there.
+    // The parent's top-left corner, in the parent's own coordinates, and
+    // what keeps the view there.
+    let bounds = parent.bounds();
     let (y, bottom_margin) = if parent.isFlipped() {
-        (0.0, NSAutoresizingMaskOptions::ViewMaxYMargin)
+        (bounds.origin.y, NSAutoresizingMaskOptions::ViewMaxYMargin)
     } else {
         (
-            parent.bounds().size.height - size.height,
+            bounds.origin.y + bounds.size.height - size.height,
             NSAutoresizingMaskOptions::ViewMinYMargin,
         )
     };
-    let frame = CGRect::new(CGPoint::new(0.0, y), size);
+    let frame = CGRect::new(CGPoint::new(bounds.origin.x, y), size);
     // SAFETY: `alloc` on a class gives a new, uninitialised instance.
     let allocated: Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
     // SAFETY: the class descends from NSView, whose designated initialiser
@@ -426,6 +428,15 @@ pub(super) fn to_next_responder(view: &NSView, method: Method, event: &NSEvent) 
             }
             Method::ScrollWheel => {
                 let _: () = msg_send![super(view, NSView::class()), scrollWheel: event];
+            }
+            Method::OtherMouseDown => {
+                let _: () = msg_send![super(view, NSView::class()), otherMouseDown: event];
+            }
+            Method::OtherMouseDragged => {
+                let _: () = msg_send![super(view, NSView::class()), otherMouseDragged: event];
+            }
+            Method::OtherMouseUp => {
+                let _: () = msg_send![super(view, NSView::class()), otherMouseUp: event];
             }
         }
     }
@@ -629,8 +640,13 @@ extern "C-unwind" fn become_first_responder(view: &NSView, _: Sel) -> Bool {
 }
 
 extern "C-unwind" fn resign_first_responder(view: &NSView, _: Sel) -> Bool {
-    serve(view, Bool::YES, |inner, platform, _| {
-        platform.composing.set(0);
+    serve(view, Bool::YES, |inner, platform, view| {
+        if platform.composing.replace(0) > 0 {
+            // The input method forgets the composition too.
+            if let Some(context) = view.inputContext() {
+                context.discardMarkedText();
+            }
+        }
         inner.input(RawInput::Focus(false));
         Bool::YES
     })
@@ -682,31 +698,50 @@ fn time_ms(event: &NSEvent) -> u32 {
 
 extern "C-unwind" fn button_down(view: &NSView, method: Sel, event: &NSEvent) {
     serve(view, (), |inner, platform, view| {
-        if let Some(button) = button(method, event) {
-            inner.input(RawInput::PointerDown {
-                at: location(platform, view, event),
-                button,
-                modifiers: cocoa::modifiers(event.modifierFlags().0),
-                time_ms: time_ms(event),
-            });
+        if platform.passing.get() {
+            return;
         }
+        let Some(button) = button(method, event) else {
+            // A button past the middle one is the host's.
+            platform.pass(Method::OtherMouseDown, event);
+            return;
+        };
+        inner.input(RawInput::PointerDown {
+            at: location(platform, view, event),
+            button,
+            modifiers: cocoa::modifiers(event.modifierFlags().0),
+            time_ms: time_ms(event),
+        });
     });
 }
 
 extern "C-unwind" fn button_up(view: &NSView, method: Sel, event: &NSEvent) {
     serve(view, (), |inner, platform, view| {
-        if let Some(button) = button(method, event) {
-            inner.input(RawInput::PointerUp {
-                at: location(platform, view, event),
-                button,
-                modifiers: cocoa::modifiers(event.modifierFlags().0),
-            });
+        if platform.passing.get() {
+            return;
         }
+        let Some(button) = button(method, event) else {
+            platform.pass(Method::OtherMouseUp, event);
+            return;
+        };
+        inner.input(RawInput::PointerUp {
+            at: location(platform, view, event),
+            button,
+            modifiers: cocoa::modifiers(event.modifierFlags().0),
+        });
     });
 }
 
-extern "C-unwind" fn dragged(view: &NSView, _: Sel, event: &NSEvent) {
+extern "C-unwind" fn dragged(view: &NSView, method: Sel, event: &NSEvent) {
     serve(view, (), |inner, platform, view| {
+        if platform.passing.get() {
+            return;
+        }
+        // A drag of a button past the middle one goes on to the host, which
+        // had its press, and is a move for the window as well.
+        if method == sel!(otherMouseDragged:) && event.buttonNumber() != 2 {
+            platform.pass(Method::OtherMouseDragged, event);
+        }
         inner.input(RawInput::PointerMove {
             at: location(platform, view, event),
             modifiers: cocoa::modifiers(event.modifierFlags().0),
@@ -761,18 +796,25 @@ extern "C-unwind" fn scroll_wheel(view: &NSView, _: Sel, event: &NSEvent) {
             return;
         }
         let mut wheel = platform.wheel.get();
-        let (delta_x, delta_y) = wheel.turn(
+        let scroll = wheel.scroll(
             event.scrollingDeltaX(),
             event.scrollingDeltaY(),
             event.hasPreciseScrollingDeltas(),
         );
         platform.wheel.set(wheel);
-        if delta_x == 0 && delta_y == 0 {
+        let (delta_x, delta_y) = match scroll {
+            Scroll::Turn(x, y) => (x, y),
             // The start or the end of a gesture: the host's, as the handler
             // is told nothing of it.
-            platform.pass(Method::ScrollWheel, event);
-            return;
-        }
+            Scroll::Still => {
+                platform.pass(Method::ScrollWheel, event);
+                return;
+            }
+            // Less than a unit so far: the window keeps the motion, which
+            // reaches the handler with what follows, so the host must not
+            // have it too.
+            Scroll::Kept => return,
+        };
         let at = location(platform, view, event);
         let number = {
             let mut pass_on = platform.pass_on.borrow_mut();

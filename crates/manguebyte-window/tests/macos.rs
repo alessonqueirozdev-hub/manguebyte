@@ -31,7 +31,7 @@ mod macos {
     use std::time::Duration;
 
     use manguebyte_gfx::{Color, IRect, Pixmap};
-    use manguebyte_window::macos::testing::{self, Host, Input, PassedOn};
+    use manguebyte_window::macos::testing::{self, ButtonAction, Host, Input, PassedOn};
     use manguebyte_window::{
         Button, Event, FileDialog, Handled, Modifiers, ParentWindow, PhysicalPoint, PhysicalSize,
         TimerId, Window, WindowApi, WindowCx, WindowError, WindowOptions,
@@ -42,21 +42,53 @@ mod macos {
 
     pub(super) fn main() -> ExitCode {
         let checks: &[(&str, fn())] = &[
-            ("a_view_opens_at_the_top_left_of_the_parent", opens),
+            ("a_view_opens_at_the_top_left_of_the_parent", || {
+                opens(Backing::Machine)
+            }),
+            ("a_view_opens_in_a_window_of_scale_2", || {
+                opens(Backing::Two)
+            }),
+            (
+                "a_parent_with_moved_bounds_gets_the_view_at_its_corner",
+                moved_bounds,
+            ),
             (
                 "presented_pixels_are_what_the_view_and_its_layer_draw",
-                pixels,
+                || pixels(Backing::Machine),
             ),
+            ("presented_pixels_are_drawn_exactly_at_scale_2", || {
+                pixels(Backing::Two)
+            }),
             ("a_present_changes_only_its_rectangles", partial_presents),
             ("damage_comes_back_as_paints", damage),
-            ("buttons_and_moves_arrive_as_pointer_events", pointer),
+            ("buttons_and_moves_arrive_as_pointer_events", || {
+                pointer(Backing::Machine)
+            }),
+            ("pointer_events_are_in_device_pixels_at_scale_2", || {
+                pointer(Backing::Two)
+            }),
+            (
+                "buttons_past_the_middle_one_go_on_to_the_host",
+                extra_buttons,
+            ),
             ("the_keyboard_follows_the_first_responder", focus),
             ("wheel_turns_arrive_in_lines_and_go_on_when_unused", wheel),
+            ("scrolls_smaller_than_a_unit_are_used_once", fine_scrolls),
             ("keys_and_text_arrive_and_go_on_when_unused", keys),
             ("command_combinations_are_offered_once", commands),
-            ("the_text_caret_is_where_input_methods_are_told", caret),
+            ("the_text_caret_is_where_input_methods_are_told", || {
+                caret(Backing::Machine)
+            }),
+            ("the_text_caret_is_in_points_at_scale_2", || {
+                caret(Backing::Two)
+            }),
             ("timers_fire_until_killed", timers),
-            ("resizes_by_either_side_are_reported", resizes),
+            ("resizes_by_either_side_are_reported", || {
+                resizes(Backing::Machine)
+            }),
+            ("resizes_are_in_device_pixels_at_scale_2", || {
+                resizes(Backing::Two)
+            }),
             (
                 "visibility_and_the_hosts_scale_are_followed",
                 visibility_and_scale,
@@ -87,6 +119,26 @@ mod macos {
 
     type Events = Rc<RefCell<Vec<Event>>>;
 
+    /// The backing scale factor a check's window has.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Backing {
+        /// The screen's.
+        Machine,
+        /// 2, which the window says whatever the screen is.
+        Two,
+    }
+
+    impl Backing {
+        /// A host window of the usual size.
+        fn host(self) -> Host {
+            match self {
+                Backing::Machine => Host::new(200.0, 150.0),
+                Backing::Two => Host::with_backing_scale_of_2(200.0, 150.0),
+            }
+            .expect("a host window")
+        }
+    }
+
     /// What a handler answers.
     #[derive(Clone, Copy, PartialEq)]
     enum Uses {
@@ -110,7 +162,18 @@ mod macos {
         }
 
         fn with(options: WindowOptions) -> Probe {
-            let host = Host::new(200.0, 150.0).expect("a host window");
+            Probe::in_host(Backing::Machine.host(), options)
+        }
+
+        fn at_backing(backing: Backing) -> Probe {
+            let probe = Probe::in_host(backing.host(), WindowOptions::new(size(WIDTH, HEIGHT)));
+            if backing == Backing::Two {
+                assert_eq!(probe.host.scale(), 2.0, "the window says 2");
+            }
+            probe
+        }
+
+        fn in_host(host: Host, options: WindowOptions) -> Probe {
             let events = Events::default();
             let uses = Rc::new(Cell::new(Uses::Everything));
             let handler = {
@@ -248,8 +311,8 @@ mod macos {
         );
     }
 
-    fn opens() {
-        let probe = Probe::new();
+    fn opens(backing: Backing) {
+        let probe = Probe::at_backing(backing);
         let window = &probe.window;
         let scale = probe.host.scale();
         println!("  backing scale factor: {scale}");
@@ -280,12 +343,34 @@ mod macos {
         assert_eq!(probe.host.children(), 2);
     }
 
-    fn pixels() {
-        let probe = Probe::new();
+    fn moved_bounds() {
+        let host = Backing::Machine.host();
+        host.set_parent_bounds_origin(10.0, 20.0);
+        let scale = host.scale();
+        let window = Window::open(
+            host.parent(),
+            WindowOptions::new(size(WIDTH, HEIGHT)),
+            |_: &WindowCx<'_>, _| Handled::No,
+        )
+        .expect("a view");
+        let (width, height) = (f64::from(WIDTH) / scale, f64::from(HEIGHT) / scale);
+        assert_close(
+            "the view's frame",
+            &testing::view_frame(&window).expect("open"),
+            &[10.0, 20.0 + 150.0 - height, width, height],
+        );
+    }
+
+    fn pixels(backing: Backing) {
+        let probe = Probe::at_backing(backing);
         probe.show();
         assert!(probe.paints() >= 1, "AppKit asked for no paint");
         let expected = shown(&pattern(WIDTH, HEIGHT));
         let window = &probe.window;
+        assert_eq!(
+            testing::layer_contents_scale(window),
+            Some(probe.host.scale())
+        );
         assert_pixels(
             "the layer's image",
             testing::layer_pixels(window),
@@ -386,8 +471,8 @@ mod macos {
         );
     }
 
-    fn pointer() {
-        let probe = Probe::new();
+    fn pointer(backing: Backing) {
+        let probe = Probe::at_backing(backing);
         let scale = probe.host.scale();
         let shift_command = Modifiers {
             shift: true,
@@ -463,6 +548,29 @@ mod macos {
             .collect();
         assert_eq!(clicks, [1, 2]);
 
+        // Presses two points apart are one place, further ones are not: a
+        // box that follows the scale.
+        let reach = (2.0 * scale).round() as i32;
+        let near = [10, 10 + reach, 10 + 2 * reach + 1];
+        for (x, later) in near.into_iter().zip([30.0, 30.05, 30.1]) {
+            probe.send(Input::Press {
+                at: at(x, 20),
+                button: Button::Primary,
+                modifiers: Modifiers::NONE,
+                time: time + later,
+            });
+            release(Button::Primary, at(x, 20));
+        }
+        let clicks: Vec<u32> = probe
+            .take()
+            .iter()
+            .filter_map(|event| match event {
+                Event::PointerDown { clicks, .. } => Some(*clicks),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clicks, [1, 2, 1]);
+
         for button in [Button::Secondary, Button::Middle] {
             press(button, time + 10.0);
             release(button, at(10, 20));
@@ -490,6 +598,46 @@ mod macos {
             ),
             "{events:?}"
         );
+    }
+
+    fn extra_buttons() {
+        let probe = Probe::new();
+        let send = |action| {
+            probe.send(Input::ExtraButton {
+                at: at(10, 20),
+                action,
+            })
+        };
+        send(ButtonAction::Press);
+        send(ButtonAction::Release);
+        assert_eq!(probe.take(), [], "the window reports no such button");
+        assert_eq!(
+            probe.host.take_passed_on(),
+            PassedOn {
+                other_buttons: 2,
+                ..PassedOn::default()
+            }
+        );
+        // A drag of it is a move for the window and goes on as well.
+        send(ButtonAction::Drag);
+        let events = probe.take();
+        assert!(
+            matches!(events[..], [Event::PointerMove(p)] if p.physical == at(10, 20)),
+            "{events:?}"
+        );
+        assert_eq!(probe.host.take_passed_on().other_buttons, 1);
+        // The middle button stays with the window.
+        probe.send(Input::Press {
+            at: at(10, 20),
+            button: Button::Middle,
+            modifiers: Modifiers::NONE,
+            time: testing::uptime(),
+        });
+        probe.send(Input::Release {
+            at: at(10, 20),
+            button: Button::Middle,
+        });
+        assert_eq!(probe.host.take_passed_on(), PassedOn::default());
     }
 
     fn focus() {
@@ -544,6 +692,40 @@ mod macos {
                 ..PassedOn::default()
             }
         );
+    }
+
+    fn fine_scrolls() {
+        let probe = Probe::new();
+        probe.uses.set(Uses::Nothing);
+        let turns = || -> Vec<f32> {
+            probe
+                .take()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Wheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .collect()
+        };
+        // 0.004 of a line is 0.48 of a wheel unit: two of them make none,
+        // and the window keeps them from the host.
+        for _ in 0..2 {
+            probe.send(Input::FineScroll { dy: 0.004 });
+        }
+        assert_eq!(turns(), [0.0f32; 0]);
+        assert_eq!(probe.host.take_passed_on(), PassedOn::default());
+        // The third makes one unit, which the handler declines.
+        probe.send(Input::FineScroll { dy: 0.004 });
+        assert_eq!(turns(), [1.0 / 120.0]);
+        assert_eq!(probe.host.take_passed_on().scrolls, 1);
+        // An event that moves nothing marks a gesture and is the host's.
+        probe.send(Input::Scroll {
+            dx: 0,
+            dy: 0,
+            precise: true,
+        });
+        assert_eq!(turns(), [0.0f32; 0]);
+        assert_eq!(probe.host.take_passed_on().scrolls, 1);
     }
 
     /// The keys and the text among `events`, in order.
@@ -644,7 +826,7 @@ mod macos {
                 key_downs: 2,
                 key_ups: 1,
                 flag_changes: 2,
-                scrolls: 0,
+                ..PassedOn::default()
             }
         );
     }
@@ -672,8 +854,8 @@ mod macos {
         );
     }
 
-    fn caret() {
-        let probe = Probe::new();
+    fn caret(backing: Backing) {
+        let probe = Probe::at_backing(backing);
         probe.window.take_focus();
         probe.window.set_text_caret(Some(IRect::new(10, 20, 2, 16)));
         let scale = probe.host.scale();
@@ -716,8 +898,8 @@ mod macos {
         assert!(probe.take().contains(&Event::Timer(TimerId(8))));
     }
 
-    fn resizes() {
-        let probe = Probe::new();
+    fn resizes(backing: Backing) {
+        let probe = Probe::at_backing(backing);
         probe.show();
         probe.take();
         let window = &probe.window;

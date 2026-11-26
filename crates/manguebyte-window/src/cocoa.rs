@@ -127,6 +127,17 @@ pub(crate) fn typed_units(text: &str) -> Vec<u16> {
     units
 }
 
+/// What one scrolling event comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scroll {
+    /// It moved nothing: it marks the start or the end of a gesture.
+    Still,
+    /// It moved, by less than makes a unit with what was kept; it is kept.
+    Kept,
+    /// Wheel units, across and up.
+    Turn(i32, i32),
+}
+
 /// Turns scrolling deltas into wheel units, keeping what is smaller than a
 /// unit for the next turn, so that a slow trackpad scroll is not lost.
 #[derive(Debug, Default, Clone, Copy)]
@@ -136,6 +147,19 @@ pub(crate) struct Wheel {
 }
 
 impl Wheel {
+    /// What a scroll event with the deltas `dx` and `dy` comes to; see
+    /// [`turn`](Self::turn). Whether it moved is read from the deltas, not
+    /// from the units they make.
+    pub(crate) fn scroll(&mut self, dx: f64, dy: f64, precise: bool) -> Scroll {
+        if dx == 0.0 && dy == 0.0 {
+            return Scroll::Still;
+        }
+        match self.turn(dx, dy, precise) {
+            (0, 0) => Scroll::Kept,
+            (x, y) => Scroll::Turn(x, y),
+        }
+    }
+
     /// The wheel units, across and up, of a scroll by `dx` and `dy`:
     /// points when `precise`, lines otherwise, with AppKit's signs. Above
     /// 0 is to the right and away from the person, so the horizontal sign
@@ -367,6 +391,19 @@ mod tests {
             sum += wheel.turn(0.0, 0.05, true).1;
         }
         assert!((59..=60).contains(&sum), "{sum}");
+    }
+
+    #[test]
+    fn a_scroll_smaller_than_a_unit_is_kept_not_taken_for_a_still_one() {
+        let mut wheel = Wheel::default();
+        // A line is 120 units: 0.004 of one is 0.48.
+        assert_eq!(wheel.scroll(0.0, 0.004, false), Scroll::Kept);
+        // An event that moves nothing says so, whatever is kept.
+        assert_eq!(wheel.scroll(0.0, 0.0, false), Scroll::Still);
+        assert_eq!(wheel.scroll(-0.0, 0.0, true), Scroll::Still);
+        assert_eq!(wheel.scroll(0.0, 0.004, false), Scroll::Kept);
+        assert_eq!(wheel.scroll(0.0, 0.004, false), Scroll::Turn(0, 1));
+        assert_eq!(wheel.scroll(0.0, -1.0, false), Scroll::Turn(0, -119));
     }
 
     #[test]

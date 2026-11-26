@@ -13,9 +13,14 @@
 //!
 //! The events are real `NSEvent`s. Presses, drags and releases of the
 //! primary and secondary buttons and keys go through the window, as the
-//! system's would; the middle button, moves, exits and wheel turns, which
+//! system's would; the other buttons, moves, exits and wheel turns, which
 //! AppKit routes from the pointer's real position or which no window event
 //! can express, are sent to the view itself.
+//!
+//! [`Host::with_backing_scale_of_2`] makes a window that answers 2 when
+//! asked for its backing scale factor, whatever the screen's is. That tells
+//! apart points and pixels in the backend; the screen, and what the window
+//! server shows, stay at the machine's scale.
 
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_void};
@@ -32,10 +37,11 @@ use objc2_app_kit::{
     NSColorSpace, NSDeviceRGBColorSpace, NSEvent, NSEventModifierFlags, NSEventTrackingRunLoopMode,
     NSEventType, NSScreen, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGDataProvider, CGEvent, CGEventType, CGImage,
-    CGImageAlphaInfo, CGImageByteOrderInfo, CGMouseButton, CGScrollEventUnit, kCGColorSpaceSRGB,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGDataProvider, CGEvent, CGEventField,
+    CGEventType, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGMouseButton, CGScrollEventUnit,
+    kCGColorSpaceSRGB,
 };
 use objc2_foundation::{NSDate, NSProcessInfo, NSRunLoop, NSString};
 
@@ -50,7 +56,13 @@ unsafe extern "C" {
 }
 
 /// The instance variables of the recording view, one count each.
-const COUNTS: [&CStr; 4] = [c"keyDowns", c"keyUps", c"flagChanges", c"scrolls"];
+const COUNTS: [&CStr; 5] = [
+    c"keyDowns",
+    c"keyUps",
+    c"flagChanges",
+    c"scrolls",
+    c"otherButtons",
+];
 
 /// How many events reached the host's view from the views inside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -63,6 +75,9 @@ pub struct PassedOn {
     pub flag_changes: usize,
     /// Wheel turns.
     pub scrolls: usize,
+    /// Presses, drags and releases of buttons other than the primary and the
+    /// secondary.
+    pub other_buttons: usize,
 }
 
 /// Which responder method of the recording view was called.
@@ -95,6 +110,10 @@ extern "C-unwind" fn host_scroll_wheel(view: &NSView, _: Sel, _: &NSEvent) {
     count(view, 3);
 }
 
+extern "C-unwind" fn host_other_button(view: &NSView, _: Sel, _: &NSEvent) {
+    count(view, 4);
+}
+
 /// The class of the host's view, which counts what its subviews pass on.
 fn host_class() -> Result<&'static AnyClass, String> {
     let name = CString::new(cocoa::class_name("TestHost", anchor())).map_err(|e| e.to_string())?;
@@ -122,6 +141,37 @@ fn host_class() -> Result<&'static AnyClass, String> {
             sel!(scrollWheel:),
             host_scroll_wheel as extern "C-unwind" fn(_, _, _),
         );
+        for selector in [
+            sel!(otherMouseDown:),
+            sel!(otherMouseDragged:),
+            sel!(otherMouseUp:),
+        ] {
+            builder.add_method(selector, host_other_button as extern "C-unwind" fn(_, _, _));
+        }
+    }
+    Ok(builder.register())
+}
+
+extern "C-unwind" fn scale_of_2(_: &NSWindow, _: Sel) -> CGFloat {
+    2.0
+}
+
+/// The class of a window that says its backing scale factor is 2.
+fn window_class_of_scale_2() -> Result<&'static AnyClass, String> {
+    let name =
+        CString::new(cocoa::class_name("TestWindow2x", anchor())).map_err(|e| e.to_string())?;
+    if let Some(class) = AnyClass::get(&name) {
+        return Ok(class);
+    }
+    let mut builder =
+        ClassBuilder::new(&name, NSWindow::class()).ok_or("the class cannot be declared")?;
+    // SAFETY: the function takes the receiver and the selector and returns a
+    // `CGFloat`, as `backingScaleFactor` does.
+    unsafe {
+        builder.add_method(
+            sel!(backingScaleFactor),
+            scale_of_2 as extern "C-unwind" fn(_, _) -> _,
+        );
     }
     Ok(builder.register())
 }
@@ -145,21 +195,49 @@ impl Host {
     ///
     /// Off the main thread, or if the host view's class cannot be declared.
     pub fn new(width: f64, height: f64) -> Result<Host, String> {
+        Host::of_class(NSWindow::class, width, height)
+    }
+
+    /// As [`new`](Self::new), in a window that says its backing scale factor
+    /// is 2.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    pub fn with_backing_scale_of_2(width: f64, height: f64) -> Result<Host, String> {
+        let class = window_class_of_scale_2()?;
+        Host::of_class(|| class, width, height)
+    }
+
+    /// A host whose window is of the class `class` gives: `NSWindow` or a
+    /// subclass of it.
+    fn of_class(
+        class: impl FnOnce() -> &'static AnyClass,
+        width: f64,
+        height: f64,
+    ) -> Result<Host, String> {
         let mtm = main_thread()?;
         autoreleasepool(|_| {
             let application = NSApplication::sharedApplication(mtm);
             application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
             let content = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(width, height));
-            // SAFETY: the designated initialiser with a valid style.
-            let window = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    mtm.alloc(),
-                    content,
-                    NSWindowStyleMask::Titled,
-                    NSBackingStoreType::Buffered,
-                    false,
-                )
+            // SAFETY: `alloc` on a window class, on the main thread, gives
+            // a new, uninitialised window.
+            let allocated: Allocated<AnyObject> = unsafe { msg_send![class(), alloc] };
+            // SAFETY: the designated initialiser of NSWindow, which the
+            // class is or descends from, with a valid style.
+            let made: Option<Retained<AnyObject>> = unsafe {
+                msg_send![
+                    allocated,
+                    initWithContentRect: content,
+                    styleMask: NSWindowStyleMask::Titled,
+                    backing: NSBackingStoreType::Buffered,
+                    defer: false
+                ]
             };
+            // SAFETY: an instance of NSWindow or of a subclass.
+            let window: Retained<NSWindow> =
+                unsafe { Retained::cast_unchecked(made.ok_or("no window")?) };
             // SAFETY: the value owns the window; closing must not release it
             // as well.
             unsafe { window.setReleasedWhenClosed(false) };
@@ -228,7 +306,7 @@ impl Host {
             return PassedOn::default();
         };
         let object: &AnyObject = &view;
-        let [key_downs, key_ups, flag_changes, scrolls] = COUNTS.map(|name| {
+        let [key_downs, key_ups, flag_changes, scrolls, other_buttons] = COUNTS.map(|name| {
             object
                 .class()
                 .instance_variable(name)
@@ -246,6 +324,15 @@ impl Host {
             key_ups,
             flag_changes,
             scrolls,
+            other_buttons,
+        }
+    }
+
+    /// Moves the origin of the host view's own coordinates, as a host that
+    /// scrolls its view does.
+    pub fn set_parent_bounds_origin(&self, x: f64, y: f64) {
+        if let Some(view) = self.view() {
+            view.setBoundsOrigin(CGPoint::new(x, y));
         }
     }
 
@@ -510,6 +597,11 @@ pub fn layer_pixels(window: &Window) -> Option<Pixmap> {
     })
 }
 
+/// How many pixels the view's layer says a point of its contents is.
+pub fn layer_contents_scale(window: &Window) -> Option<f64> {
+    autoreleasepool(|_| Some(view_of(window)?.layer()?.contentsScale()))
+}
+
 /// The view's layer drawn by Core Animation into a bitmap of the view's
 /// size in device pixels, in sRGB.
 pub fn layer_rendering(window: &Window) -> Option<Pixmap> {
@@ -545,6 +637,17 @@ pub fn layer_rendering(window: &Window) -> Option<Pixmap> {
         }
         Pixmap::from_premultiplied(size.width, size.height, pixels).ok()
     })
+}
+
+/// What an [`Input::ExtraButton`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonAction {
+    /// It goes down.
+    Press,
+    /// The pointer moves while it is held.
+    Drag,
+    /// It comes up.
+    Release,
 }
 
 /// An event for [`send`]. Positions are device pixels of the view.
@@ -605,6 +708,18 @@ pub enum Input<'a> {
         /// Whether it is a repeat of a held key.
         repeat: bool,
     },
+    /// A scroll by a fraction of a line up, as a fine wheel's.
+    FineScroll {
+        /// Lines up.
+        dy: f64,
+    },
+    /// A button past the middle one goes down, is dragged or comes up.
+    ExtraButton {
+        /// Where.
+        at: PhysicalPoint,
+        /// What it does.
+        action: ButtonAction,
+    },
     /// A modifier key changes.
     Modifier {
         /// The virtual key code.
@@ -656,15 +771,14 @@ fn mouse_event(
     )
 }
 
-/// The middle of the device pixel `at`, in the view's points.
-fn view_point(window: &Window, view: &NSView, at: PhysicalPoint) -> CGPoint {
-    let size = window.size();
+/// The middle of the device pixel `at`, in the view's points, by the
+/// window's backing scale factor and not by what the backend made of it.
+fn view_point(host: &NSWindow, view: &NSView, at: PhysicalPoint) -> CGPoint {
+    let scale = host.backingScaleFactor();
     let bounds = view.bounds();
-    let per_x = bounds.size.width / f64::from(size.width.max(1));
-    let per_y = bounds.size.height / f64::from(size.height.max(1));
     CGPoint::new(
-        bounds.origin.x + (f64::from(at.x) + 0.5) * per_x,
-        bounds.origin.y + bounds.size.height - (f64::from(at.y) + 0.5) * per_y,
+        bounds.origin.x + (f64::from(at.x) + 0.5) / scale,
+        bounds.origin.y + bounds.size.height - (f64::from(at.y) + 0.5) / scale,
     )
 }
 
@@ -678,19 +792,19 @@ pub fn send(window: &Window, input: Input<'_>) -> bool {
         let Some(host) = view.window() else {
             return false;
         };
-        deliver(window, &host, &view, input).is_some()
+        deliver(&host, &view, input).is_some()
     })
 }
 
-fn deliver(window: &Window, host: &NSWindow, view: &NSView, input: Input<'_>) -> Option<()> {
-    let in_window = |at| view.convertPoint_toView(view_point(window, view, at), None);
+fn deliver(host: &NSWindow, view: &NSView, input: Input<'_>) -> Option<()> {
+    let in_window = |at| view.convertPoint_toView(view_point(host, view, at), None);
     match input {
         Input::Press {
             at,
             button: Button::Middle,
             ..
         } => {
-            let event = middle_event(host, in_window(at), CGEventType::OtherMouseDown)?;
+            let event = other_event(host, in_window(at), CGEventType::OtherMouseDown, MIDDLE)?;
             // SAFETY: the view's own method, with an event.
             let _: () = unsafe { msg_send![view, otherMouseDown: &*event] };
         }
@@ -698,7 +812,7 @@ fn deliver(window: &Window, host: &NSWindow, view: &NSView, input: Input<'_>) ->
             at,
             button: Button::Middle,
         } => {
-            let event = middle_event(host, in_window(at), CGEventType::OtherMouseUp)?;
+            let event = other_event(host, in_window(at), CGEventType::OtherMouseUp, MIDDLE)?;
             // SAFETY: the view's own method, with an event.
             let _: () = unsafe { msg_send![view, otherMouseUp: &*event] };
         }
@@ -789,6 +903,35 @@ fn deliver(window: &Window, host: &NSWindow, view: &NSView, input: Input<'_>) ->
             }
             host.sendEvent(&event);
         }
+        Input::FineScroll { dy } => {
+            let event =
+                CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, 0, 0, 0)?;
+            CGEvent::set_double_value_field(
+                Some(&event),
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
+                dy,
+            );
+            let event = NSEvent::eventWithCGEvent(&event)?;
+            // SAFETY: the view's own method, with an event.
+            let _: () = unsafe { msg_send![view, scrollWheel: &*event] };
+        }
+        Input::ExtraButton { at, action } => {
+            let kind = match action {
+                ButtonAction::Press => CGEventType::OtherMouseDown,
+                ButtonAction::Drag => CGEventType::OtherMouseDragged,
+                ButtonAction::Release => CGEventType::OtherMouseUp,
+            };
+            // The fourth button: they are counted from 0.
+            let event = other_event(host, in_window(at), kind, CGMouseButton(3))?;
+            match action {
+                // SAFETY: the view's own method, with an event.
+                ButtonAction::Press => unsafe { msg_send![view, otherMouseDown: &*event] },
+                // SAFETY: as above.
+                ButtonAction::Drag => unsafe { msg_send![view, otherMouseDragged: &*event] },
+                // SAFETY: as above.
+                ButtonAction::Release => unsafe { msg_send![view, otherMouseUp: &*event] },
+            }
+        }
         Input::Modifier { code, modifiers } => {
             let event = key_event(
                 host,
@@ -804,10 +947,19 @@ fn deliver(window: &Window, host: &NSWindow, view: &NSView, input: Input<'_>) ->
     Some(())
 }
 
-/// A middle button event. An event made for a window cannot say which of
-/// the other buttons it is, so this one is Core Graphics', with a place on
-/// the screen, counted from the primary screen's top.
-fn middle_event(window: &NSWindow, at: CGPoint, kind: CGEventType) -> Option<Retained<NSEvent>> {
+/// The middle button.
+const MIDDLE: CGMouseButton = CGMouseButton::Center;
+
+/// An event of a button other than the primary and the secondary. An event
+/// made for a window cannot say which of those it is, so this one is Core
+/// Graphics', with a place on the screen, counted from the primary screen's
+/// top.
+fn other_event(
+    window: &NSWindow,
+    at: CGPoint,
+    kind: CGEventType,
+    button: CGMouseButton,
+) -> Option<Retained<NSEvent>> {
     let point = window.convertRectToScreen(CGRect::new(at, CGSize::new(0.0, 0.0)));
     let screens = NSScreen::screens(MainThreadMarker::new()?);
     let primary = screens.firstObject()?.frame().size.height;
@@ -815,7 +967,7 @@ fn middle_event(window: &NSWindow, at: CGPoint, kind: CGEventType) -> Option<Ret
         None,
         kind,
         CGPoint::new(point.origin.x, primary - point.origin.y),
-        CGMouseButton::Center,
+        button,
     )?;
     NSEvent::eventWithCGEvent(&event)
 }

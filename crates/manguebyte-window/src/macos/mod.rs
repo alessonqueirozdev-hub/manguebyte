@@ -10,13 +10,14 @@
 //!
 //! What the view does:
 //!
-//! - It is placed at the top-left corner of the parent and stays there when
-//!   the parent is resized. Its size in points is the window's size in device
-//!   pixels divided by the screen's backing scale factor, which is also the
-//!   window's scale unless the host gave one. When the backing scale factor
-//!   changes, the view is written to keep its size in points and report the
-//!   new scale and size; no test changes it. A host that resizes the view
-//!   itself is reported as a resize.
+//! - It is placed at the top-left corner of the parent's bounds and stays
+//!   there when the parent is resized. Its size in points is the window's size
+//!   in device pixels divided by the screen's backing scale factor, which is
+//!   also the window's scale unless the host gave one. The tests run at the
+//!   machine's factor and in a window that says its factor is 2; when the
+//!   factor of an open view changes, the view is written to keep its size in
+//!   points and report the new scale and size, which no test does. A host that
+//!   resizes the view itself is reported as a resize.
 //! - Presenting converts the damaged rectangles into the blue-green-red back
 //!   buffer and asks AppKit to redisplay; the view then gives its layer an
 //!   sRGB image copied from the whole buffer, once per display however many
@@ -28,10 +29,11 @@
 //!   methods; the view asks for hovering through a tracking area that is
 //!   active whether or not the host's window is the key window, and accepts
 //!   the click that activates a window (neither is tried by a test). A wheel
-//!   turn of a trackpad counts 10 points as a
-//!   line. A Control-click is reported as the primary button with Control
-//!   held. Command is [`Modifiers::meta`](crate::Modifiers::meta), Option is
-//!   `alt`.
+//!   turn of a trackpad counts 10 points as a line; motion of less than one
+//!   wheel unit is kept until it makes one. Buttons past the middle one go on
+//!   up the responder chain. A Control-click is reported as the primary button
+//!   with Control held. Command is
+//!   [`Modifiers::meta`](crate::Modifiers::meta), Option is `alt`.
 //! - Typed text goes through the system's text input
 //!   (`NSTextInputClient`), so the system, not the window, makes the
 //!   characters; no test runs an input method. Text being composed is not
@@ -83,7 +85,9 @@ use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, kCGColorSpaceSRGB,
 };
-use objc2_foundation::{NSNumber, NSRunLoop, NSRunLoopCommonModes, NSTimer};
+use objc2_foundation::{
+    NSNumber, NSObject, NSObjectNSDelayedPerforming, NSRunLoop, NSRunLoopCommonModes, NSTimer,
+};
 
 use crate::cocoa::{self, PassOn, Wheel};
 use crate::dialog::{DialogKind, FileDialog};
@@ -113,6 +117,9 @@ enum Method {
     KeyUp,
     FlagsChanged,
     ScrollWheel,
+    OtherMouseDown,
+    OtherMouseDragged,
+    OtherMouseUp,
 }
 
 /// The macOS side of a window.
@@ -382,6 +389,10 @@ impl MacPlatform {
             return;
         }
         let state = view::take_state(view);
+        // A redisplay still waiting in the run loop, which holds the view.
+        // SAFETY: the view is the target of the requests the crate made, and
+        // cancelling asks nothing else of it.
+        unsafe { NSObject::cancelPreviousPerformRequestsWithTarget(view) };
         let timers = std::mem::take(&mut *self.timers.borrow_mut());
         for (_, timer) in timers {
             timer.invalidate();
