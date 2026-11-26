@@ -211,7 +211,7 @@ impl Headless {
     fn platform<T>(&self, f: impl FnOnce(&HeadlessPlatform) -> T) -> Option<T> {
         self.with(|inner| match &inner.platform {
             crate::window::Platform::Headless(platform) => Some(f(platform)),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             _ => None,
         })
         .flatten()

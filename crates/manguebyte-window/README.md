@@ -31,7 +31,10 @@ Documentation: <https://docs.rs/manguebyte-window>
   "Animation effects" setting), which the interface follows (ADR 0011).
 
 Backends: Win32 (ADR 0007 and ADR 0010 say what it does and does not do
-to a process) and headless. macOS and Linux are not built yet.
+to a process), headless, and macOS for child windows only (ADR 0028): an
+`NSView` inside a host's view, with no application windows, clipboard, file
+dialogs or drops yet; the `macos` module's documentation says what it does.
+Linux is not built yet.
 
 ## Licence
 
