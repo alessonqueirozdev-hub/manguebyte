@@ -141,8 +141,9 @@ opens two plugin binaries' editors in one process exist and are tested
 ([ADR 0007](docs/adr/0007-user-interface-layer.md)). By hand, only Mangue
 Pluck's CLAP editor has been opened in a host, REAPER on Windows, where it
 showed its title and knobs; working its knobs there, the VST 3 editors and
-Mangue Duck's are still to be tried, and windows on macOS and Linux come
-after. `cargo mangue` writes `.lv2` bundles and CI loads the examples'
+Mangue Duck's are still to be tried. On macOS the window layer opens a view
+inside a host's view ([ADR 0028](docs/adr/0028-macos-and-x11-windows.md)),
+which no editor uses yet; editors on macOS and Linux come after. `cargo mangue` writes `.lv2` bundles and CI loads the examples'
 with lilv, but no LV2 host but the framework's own has run one and
 `lv2lint`, which the Ubuntu archive does not carry, has not checked one;
 LV2 plugins have no editor, and the MIDI 1.0 they send on the notify

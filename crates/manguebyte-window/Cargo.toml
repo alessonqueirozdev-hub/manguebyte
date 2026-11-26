@@ -44,16 +44,98 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# AppKit and Core Animation for the macOS backend (ADR 0028, decision 1),
+# of the family of the `objc2` 0.6 already in Cargo.lock, generated from
+# Apple's headers. Only the features named here are compiled; Core Graphics
+# and Core Foundation make the images the view's layer shows.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSResponder",
+    "NSScreen",
+    "NSTextInputClient",
+    "NSTextInputContext",
+    "NSTrackingArea",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-quartz-core",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2",
+    "CFCGTypes",
+    "CFData",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2",
+    "CGColorSpace",
+    "CGContext",
+    "CGDataProvider",
+    "CGImage",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSAttributedString",
+    "NSDate",
+    "NSGeometry",
+    "NSObjCRuntime",
+    "NSObject",
+    "NSRange",
+    "NSRunLoop",
+    "NSString",
+    "NSTimer",
+    "NSValue",
+    "objc2-core-foundation",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CALayer",
+    "objc2-core-foundation",
+] }
+
 [features]
 # Real top-level windows, pixel read-back, input injection and message
-# loops for tests and probes (`win32::testing`). Never for a plugin.
-testing = []
+# loops for tests and probes (`win32::testing`, `macos::testing`). Never for
+# a plugin.
+testing = [
+    "objc2-app-kit/NSApplication",
+    "objc2-app-kit/NSBitmapImageRep",
+    "objc2-app-kit/NSColorSpace",
+    "objc2-app-kit/NSImageRep",
+    "objc2-app-kit/NSRunningApplication",
+    "objc2-core-graphics/CGBitmapContext",
+    "objc2-core-graphics/CGEvent",
+    "objc2-core-graphics/CGEventSource",
+    "objc2-core-graphics/CGEventTypes",
+    "objc2-foundation/NSProcessInfo",
+    "objc2-quartz-core/objc2-core-graphics",
+]
 
 [dev-dependencies]
 # The crate's own tests and the probe use the testing helpers.
 # A path, not the workspace entry: cargo drops path-only dev-dependencies
 # when it publishes, and a crate cannot depend on itself from crates.io.
 manguebyte-window = { path = ".", features = ["testing"] }
+
+# The macOS checks open real views, which AppKit allows on the process's
+# first thread only, so the test has a `main` of its own.
+[[test]]
+name = "macos"
+harness = false
+
+# The view as a plugin binary of its own: the macOS test loads two copies of
+# it into one process.
+[[example]]
+name = "macos_view"
+crate-type = ["cdylib"]
 
 [lints]
 workspace = true

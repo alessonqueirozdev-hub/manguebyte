@@ -530,6 +530,26 @@ jobs:
       - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
       - run: cargo test -p mangue-duck --test two_binaries -- --ignored
 
+  window-probe-macos:
+    name: Window probe (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The macOS backend is compiled on macOS only. First as a plugin builds
+      # it, without the testing helpers and their features; then everything.
+      - run: cargo clippy -p manguebyte-window --lib
+      - run: cargo clippy -p manguebyte-window --all-targets --all-features
+      # Opens a view inside a window's view, has it and its layer draw into
+      # bitmaps (no screen-recording permission), compares the pixels, sends
+      # it NSEvents, and loads two copies of a library with a view of its own
+      # into one process (ADR 0028, decision 5). A runner that shows no
+      # window fails the job.
+      - run: cargo test -p manguebyte-window
+
   layering:
     name: Layering
     runs-on: ubuntu-latest

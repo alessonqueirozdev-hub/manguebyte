@@ -717,12 +717,18 @@ fn hostile_options_are_refused() {
             Some(WindowError::InvalidScale(_))
         ));
     }
-    let cocoa = ParentWindow::cocoa(0x1000).expect("not null");
-    let x11 = ParentWindow::x11(7).expect("not zero");
+    // macOS has a backend for Cocoa parents, which `tests/macos.rs` covers.
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
-        Window::open(cocoa, WindowOptions::new(size(1, 1)), nothing).err(),
+        Window::open(
+            ParentWindow::cocoa(0x1000).expect("not null"),
+            WindowOptions::new(size(1, 1)),
+            nothing
+        )
+        .err(),
         Some(WindowError::Unsupported(WindowApi::Cocoa))
     );
+    let x11 = ParentWindow::x11(7).expect("not zero");
     assert_eq!(
         Window::open(x11, WindowOptions::new(size(1, 1)), nothing).err(),
         Some(WindowError::Unsupported(WindowApi::X11))

@@ -7,6 +7,27 @@ break the API.
 
 ## Unreleased
 
+### Interface
+
+- Child windows on macOS (ADR 0028, part 2): `Window::open` in
+  `manguebyte-window` takes a `Cocoa` parent and puts an `NSView` of its own
+  at its top-left corner, with the same handler, events and presenting as on
+  Win32: damage, the back buffer given to the view's layer, resizes by either
+  side, pointer buttons, moves and click counts, wheel turns in lines, keys,
+  typed text through `NSTextInputClient`, focus, the text caret's place for
+  input methods, timers and the backing scale factor. A key or wheel turn the
+  handler does not use, and a mouse button past the middle one, goes on up
+  the responder chain. The view's class is named after the binary, so two
+  plugins in one process do not share it.
+  Not on macOS yet: editors in hosts (`manguebyte-gui` still refuses a Cocoa
+  parent), application windows, the clipboard, file dialogs and drops. The
+  `Window probe (macOS)` CI job tests it on real views, by drawing them into
+  bitmaps and sending them events (`crates/manguebyte-window/tests/macos.rs`),
+  at the runner's backing scale factor of 1 and in a test window that says its
+  factor is 2; no Retina display has run it. New dependencies, on macOS only:
+  `objc2-app-kit`, `objc2-quartz-core`, `objc2-core-graphics` and, through it,
+  `objc2-io-surface`.
+
 ### Devices
 
 - WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`

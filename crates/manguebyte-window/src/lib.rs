@@ -18,7 +18,7 @@
 //! system's dialogs for opening files, picking a folder and saving
 //! ([`WindowCx::open_files`], [`FileDialog`]). ADR 0010 says why and how.
 //!
-//! Two backends implement it:
+//! Three backends implement it:
 //!
 //! - **Win32** (on Windows): a `WS_CHILD` window inside a `Win32` parent,
 //!   or an overlapped top-level window, presenting with
@@ -26,6 +26,10 @@
 //!   `IFileOpenDialog` and `IFileSaveDialog`. See the `win32` module
 //!   (built on Windows only) for what it does and does not do to the
 //!   process.
+//! - **macOS** (on macOS, child windows only): an `NSView` inside a `Cocoa`
+//!   parent, presenting as layer contents. See the `macos` module (built on
+//!   macOS only) for what it does and does not do, including what is not
+//!   there yet.
 //! - **Headless** ([`Window::headless`], [`App::headless`], on every
 //!   system): no system window at all. A test drives it through
 //!   [`Headless`], which injects [`RawInput`], exposes, resizes, fires
@@ -33,12 +37,12 @@
 //!   the dialogs' answers, and reads back what the window shows, and
 //!   through [`HeadlessApp`], which posts the steps the loop runs.
 //!
-//! Both run the same code for everything but the system calls: damage
+//! All run the same code for everything but the system calls: damage
 //! merging ([`Damage`]), the back buffer and its pixel conversion, the
 //! conversion from device to logical pixels, pointer capture and click
 //! counting, timers, the text caret, and the queue that keeps the handler
 //! from being re-entered. Each has a [`Clipboard`]: the system's on Win32,
-//! one of the window's own when headless.
+//! one of the window's own when headless, and none on macOS yet.
 //!
 //! # Units
 //!
@@ -104,6 +108,7 @@
 
 mod app;
 mod clipboard;
+mod cocoa;
 mod convert;
 mod damage;
 mod dialog;
@@ -118,6 +123,10 @@ mod window;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub mod win32;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub mod macos;
 
 pub use app::{App, AppWindowOptions, HeadlessApp, RunEnd};
 pub use clipboard::{Clipboard, MAX_CLIPBOARD_UNITS};
