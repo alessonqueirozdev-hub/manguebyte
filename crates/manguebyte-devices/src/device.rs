@@ -145,26 +145,44 @@ pub(crate) fn list(
     let default_id = default_device_id(host, direction);
     Ok(devices_of(host, direction)?
         .iter()
-        .map(|device| {
-            let id = device_id(device);
-            let default = default_config(device, direction);
-            let mut configs: Vec<ConfigRange> = supported_ranges(device, direction)
-                .unwrap_or_default()
-                .iter()
-                .map(ConfigRange::from_backend)
-                .collect();
-            configs.sort_by_key(|c| (c.channels, c.min_sample_rate, c.max_sample_rate));
-            configs.dedup();
-            DeviceInfo {
-                is_default: id.is_some() && id == default_id,
-                id: id.unwrap_or_default(),
-                name: device_name(device),
-                default_sample_rate: default.map(|config| config.sample_rate()),
-                default_channels: default.map(|config| config.channels()),
-                configs,
-            }
-        })
+        .map(|device| info_of(device, direction, default_id.as_deref()))
         .collect())
+}
+
+/// The device `id` as [`list`] has it, without asking any other device what
+/// it supports.
+pub(crate) fn info(
+    host: &cpal::Host,
+    direction: Direction,
+    id: &str,
+) -> Result<DeviceInfo, DeviceError> {
+    let default_id = default_device_id(host, direction);
+    devices_of(host, direction)?
+        .iter()
+        .find(|device| device_id(device).as_deref() == Some(id))
+        .map(|device| info_of(device, direction, default_id.as_deref()))
+        .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))
+}
+
+/// Asks `device` what it supports.
+fn info_of(device: &cpal::Device, direction: Direction, default_id: Option<&str>) -> DeviceInfo {
+    let id = device_id(device);
+    let default = default_config(device, direction);
+    let mut configs: Vec<ConfigRange> = supported_ranges(device, direction)
+        .unwrap_or_default()
+        .iter()
+        .map(ConfigRange::from_backend)
+        .collect();
+    configs.sort_by_key(|c| (c.channels, c.min_sample_rate, c.max_sample_rate));
+    configs.dedup();
+    DeviceInfo {
+        is_default: id.is_some() && id.as_deref() == default_id,
+        id: id.unwrap_or_default(),
+        name: device_name(device),
+        default_sample_rate: default.map(|config| config.sample_rate()),
+        default_channels: default.map(|config| config.channels()),
+        configs,
+    }
 }
 
 fn device_id(device: &cpal::Device) -> Option<String> {

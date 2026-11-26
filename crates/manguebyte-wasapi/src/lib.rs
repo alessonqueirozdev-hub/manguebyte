@@ -1,12 +1,12 @@
-//! WASAPI exclusive-mode output, for `manguebyte-devices`.
+//! WASAPI exclusive-mode output and input, for `manguebyte-devices`.
 //!
 //! In shared mode, which is all `cpal` opens, every program's sound goes
 //! through the Windows audio engine: it mixes them, converts them to the
 //! device's format, and runs on its own period, about 10 ms, on top of the
 //! program's buffer. In exclusive mode one program has the device to
-//! itself: it writes the device's own format straight into the driver's
-//! buffer, on a period it chooses, down to the device's minimum (often
-//! 3 ms or less). Nothing else can play on that device meanwhile.
+//! itself: it moves the device's own format straight to or from the
+//! driver's buffer, on a period it chooses, down to the device's minimum
+//! (often 3 ms or less). Nothing else can use that device meanwhile.
 //!
 //! `manguebyte-devices` forbids `unsafe` code, and WASAPI is COM, so the
 //! calls live here, each with the reason it is sound written beside it.
@@ -14,22 +14,33 @@
 //! `"WASAPI exclusive"` host; this crate is its plumbing.
 //!
 //! - [`capabilities`] asks a device what it can do in exclusive mode: its
-//!   rates and its periods.
-//! - [`start`] opens it, starts a thread of its own with the "Pro Audio"
-//!   priority, and calls `render` once a period to fill the device's
+//!   rates and its periods, or why it refuses to say.
+//! - [`start`] opens an output, starts a thread of its own with the "Pro
+//!   Audio" priority, and calls `render` once a period to fill the device's
 //!   buffer, in the device's [`Samples`] format.
+//! - [`start_capture`] opens an input the same way and calls `capture` with
+//!   each packet the device recorded, normally one a period, as a
+//!   [`Packet`].
+//!
+//! A period for which the driver has no buffer is passed over: an output
+//! does not call `render`, and an input hands `capture` a period of silence
+//! marked as a discontinuity. A stream stops after about a second of them in
+//! a row, or when its callback panics.
 //!
 //! Every COM object a stream uses is made, used and released on that one
-//! thread. On other systems every function says
+//! thread. A program that records and plays at once starts one of each and
+//! carries the audio between their two threads itself, as
+//! `manguebyte-devices` does. On other systems every function says
 //! [`Error::Unsupported`].
-//!
-//! It only plays. Exclusive capture is not here.
 
 use std::fmt;
 use std::time::Duration;
 
 #[cfg(windows)]
 mod exclusive;
+mod negotiate;
+mod packet;
+mod period;
 
 /// What went wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,17 +48,23 @@ mod exclusive;
 pub enum Error {
     /// Not on this system, or not for this device.
     Unsupported(String),
-    /// No active output device has this identifier.
+    /// No active device has this identifier.
     DeviceNotFound(String),
-    /// Another program holds the device, or Windows does not let programs
-    /// take it ("Allow applications to take exclusive control" is off in
-    /// the device's properties).
+    /// Another program holds the device.
     DeviceBusy(String),
+    /// Windows does not let programs take the device: "Allow applications
+    /// to take exclusive control" is off in its properties.
+    ExclusiveNotAllowed,
+    /// Windows denies this program access to the device, as its microphone
+    /// privacy setting does for inputs.
+    AccessDenied,
     /// The device takes none of the formats tried at this rate and channel
     /// count.
     FormatNotSupported(String),
-    /// The device went away while it played.
+    /// The device went away.
     DeviceLost,
+    /// A stream's `render` or `capture` panicked, and the stream stopped.
+    CallbackPanicked,
     /// Anything else the system said.
     Os(String),
 }
@@ -56,10 +73,17 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(why) => write!(f, "WASAPI exclusive mode is not available: {why}"),
-            Self::DeviceNotFound(id) => write!(f, "no active output device {id}"),
+            Self::DeviceNotFound(id) => write!(f, "no active audio device {id}"),
             Self::DeviceBusy(why) => write!(f, "the device cannot be taken exclusively: {why}"),
+            Self::ExclusiveNotAllowed => f.write_str(
+                "the device does not allow exclusive control (a setting in its Windows properties)",
+            ),
+            Self::AccessDenied => f.write_str(
+                "Windows denies access to the device (for an input, see the microphone privacy settings)",
+            ),
             Self::FormatNotSupported(why) => write!(f, "no format the device takes: {why}"),
             Self::DeviceLost => f.write_str("the device went away"),
+            Self::CallbackPanicked => f.write_str("the stream's callback panicked"),
             Self::Os(why) => write!(f, "WASAPI: {why}"),
         }
     }
@@ -82,7 +106,7 @@ pub struct Capabilities {
 impl Capabilities {
     /// The shortest period in frames at `sample_rate`, to the nearest.
     pub fn min_period_frames(&self, sample_rate: u32) -> u32 {
-        frames_in(self.min_period, sample_rate)
+        negotiate::frames_in(self.min_period, sample_rate)
     }
 }
 
@@ -122,10 +146,12 @@ pub struct Format {
     pub channels: u16,
     /// How each sample is stored.
     pub kind: SampleKind,
-    /// Frames in each buffer `render` fills: one period.
+    /// Frames in each buffer `render` fills or `capture` is handed: one
+    /// period.
     pub period_frames: u32,
-    /// How long after a buffer is handed over its first frame is heard,
-    /// as the driver reports it.
+    /// The stream's latency as the driver reports it, or one period when it
+    /// reports none: for an output, how long after a buffer is handed over
+    /// its first frame is heard.
     pub latency: Duration,
 }
 
@@ -140,6 +166,48 @@ pub enum Samples<'a> {
     I32(&'a mut [i32]),
     /// [`SampleKind::I16`].
     I16(&'a mut [i16]),
+}
+
+/// What a capture device recorded, interleaved, in the device's own
+/// format.
+#[derive(Debug, Clone, Copy)]
+pub enum Captured<'a> {
+    /// [`SampleKind::F32`].
+    F32(&'a [f32]),
+    /// [`SampleKind::I32`]: full-scale 32-bit values; the bits below the
+    /// device's valid ones carry nothing.
+    I32(&'a [i32]),
+    /// [`SampleKind::I16`].
+    I16(&'a [i16]),
+}
+
+impl Captured<'_> {
+    /// How many samples there are: frames times channels.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::F32(samples) => samples.len(),
+            Self::I32(samples) => samples.len(),
+            Self::I16(samples) => samples.len(),
+        }
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// One delivery of a capture stream, normally one period: a packet the
+/// device recorded, or silence standing for audio it did not hand over.
+#[derive(Debug, Clone, Copy)]
+pub struct Packet<'a> {
+    /// The recorded samples. All zeros when the driver marks the packet
+    /// silent.
+    pub samples: Captured<'a>,
+    /// Audio was lost before this packet, as the driver says (the first
+    /// packet of a stream may say so), or zeros stand for audio that could
+    /// not be read or that the driver had no buffer for.
+    pub discontinuity: bool,
 }
 
 /// A running exclusive stream. Dropping it stops the device and joins its
@@ -163,26 +231,14 @@ fn endpoint_id(id: &str) -> &str {
     id.strip_prefix("wasapi:").unwrap_or(id)
 }
 
-/// Frames in `period` (100 ns units) at `sample_rate`, to the nearest,
-/// as WASAPI turns a period into whole frames.
-fn frames_in(period: i64, sample_rate: u32) -> u32 {
-    let frames = (i128::from(period.max(0)) * i128::from(sample_rate) + 5_000_000) / 10_000_000;
-    u32::try_from(frames).unwrap_or(u32::MAX)
-}
-
-/// `frames` at `sample_rate` as a period in 100 ns units, rounded to the
-/// nearest, which is what WASAPI expects to turn back into whole frames.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn period_of(frames: u32, sample_rate: u32) -> i64 {
-    if sample_rate == 0 {
-        return 0;
-    }
-    let rate = i64::from(sample_rate);
-    (i64::from(frames) * 10_000_000 + rate / 2) / rate
-}
-
-/// Asks the output device `id` what it can do in exclusive mode with
-/// `channels` channels. It opens no stream.
+/// Asks the device `id`, an output or an input, what it can do in exclusive
+/// mode with `channels` channels. It opens no stream, so it cannot tell
+/// whether another program holds the device.
+///
+/// A device that takes no format with that many channels has no
+/// [`sample_rates`](Capabilities::sample_rates). One that refuses as a
+/// whole gives the reason as the error, as far as the driver says it
+/// without being opened.
 pub fn capabilities(id: &str, channels: u16) -> Result<Capabilities, Error> {
     #[cfg(windows)]
     {
@@ -200,10 +256,14 @@ pub fn capabilities(id: &str, channels: u16) -> Result<Capabilities, Error> {
 /// `render` runs on the stream's own thread once a period, with the
 /// buffer to fill and how long the stream has run. It must not allocate,
 /// lock or block. It is handed a buffer of silence to overwrite; leaving it
-/// untouched plays silence. `on_error` runs on the same thread, at most
-/// once, when the device fails or goes away; the stream then stops.
+/// untouched plays silence. A period the driver has no buffer for calls
+/// nothing. `on_error` runs on the same thread, at most once, when the
+/// device fails or goes away, when it has had no buffer for about a second,
+/// or when `render` panics ([`Error::CallbackPanicked`]); the stream then
+/// stops.
 ///
 /// Returns once the device runs, with the format it runs in.
+/// [`Error::Unsupported`] when `id` is an input.
 pub fn start<R, E>(
     id: &str,
     request: Request,
@@ -227,6 +287,43 @@ where
     }
 }
 
+/// Opens the input device `id` exclusively and starts it.
+///
+/// `capture` runs on the stream's own thread with each packet the device
+/// recorded, normally one a period, and how long the stream has run. It must
+/// not allocate, lock or block. The samples are the driver's own buffer, or
+/// zeros standing for it, lent for that call only. A period the driver has
+/// no buffer for is handed over as zeros marked as a discontinuity.
+/// `on_error` runs on the same thread, at most once, when the device fails
+/// or goes away, when it has had no buffer for about a second, or when
+/// `capture` panics ([`Error::CallbackPanicked`]); the stream then stops.
+///
+/// Returns once the device runs, with the format it runs in.
+/// [`Error::Unsupported`] when `id` is an output: exclusive mode has no
+/// loopback capture of an output.
+pub fn start_capture<C, E>(
+    id: &str,
+    request: Request,
+    capture: C,
+    on_error: E,
+) -> Result<(Stream, Format), Error>
+where
+    C: FnMut(Packet<'_>, Duration) + Send + 'static,
+    E: FnMut(Error) + Send + 'static,
+{
+    #[cfg(windows)]
+    {
+        let (inner, format) =
+            exclusive::start_capture(endpoint_id(id).to_owned(), request, capture, on_error)?;
+        Ok((Stream { _running: inner }, format))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, request, capture, on_error);
+        Err(Error::Unsupported(String::from("WASAPI is Windows'")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,17 +337,35 @@ mod tests {
         assert_eq!(endpoint_id("{0.0.0.00000000}.{x}"), "{0.0.0.00000000}.{x}");
     }
 
+    /// No device has this identifier: on Windows the system is asked and
+    /// says so, through the stream's thread too; elsewhere there is no
+    /// WASAPI.
     #[test]
-    fn periods_and_frames_turn_into_each_other() {
-        // 3 ms at 48 kHz is 144 frames; 10 ms is 480.
-        assert_eq!(frames_in(30_000, 48_000), 144);
-        assert_eq!(frames_in(100_000, 48_000), 480);
-        // 128 frames at 44.1 kHz are 2.9025 ms, and back.
-        assert_eq!(frames_in(29_025, 44_100), 128);
-        assert_eq!(period_of(144, 48_000), 30_000);
-        assert_eq!(period_of(128, 44_100), 29_025);
-        assert_eq!(frames_in(period_of(256, 44_100), 44_100), 256);
-        assert_eq!(period_of(10, 0), 0);
-        assert_eq!(frames_in(-5, 48_000), 0);
+    fn a_device_that_does_not_exist_opens_nothing() {
+        let id = "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}";
+        let request = Request {
+            sample_rate: 48_000,
+            channels: 2,
+            period_frames: None,
+        };
+        let errors = [
+            capabilities(id, 2).map(|_| ()),
+            start(id, request, |_, _| {}, |_| {}).map(|_| ()),
+            start_capture(id, request, |_, _| {}, |_| {}).map(|_| ()),
+        ];
+        for error in errors.map(Result::unwrap_err) {
+            if cfg!(windows) {
+                assert_eq!(error, Error::DeviceNotFound(id.to_owned()));
+            } else {
+                assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn captured_samples_are_counted_in_any_format() {
+        assert_eq!(Captured::F32(&[0.0; 3]).len(), 3);
+        assert_eq!(Captured::I32(&[0; 2]).len(), 2);
+        assert!(Captured::I16(&[]).is_empty());
     }
 }

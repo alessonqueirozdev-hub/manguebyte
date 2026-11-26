@@ -2,8 +2,13 @@
 //!
 //! A stream's thread makes every COM object it uses, runs the device, and
 //! releases them, in that order, inside one multithreaded apartment of its
-//! own. Each period the driver signals an event; the thread takes the
-//! whole buffer, has it filled, and hands it back.
+//! own. Each period the driver signals an event; an output's thread takes
+//! the whole buffer, has it filled, and hands it back, and an input's takes
+//! each packet recorded, has it read, and hands it back.
+//!
+//! What can be decided without a device is decided where every system tests
+//! it: formats, periods and what a failure means in `negotiate`, what a
+//! packet becomes in `packet`, and when a stream stops in `period`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -12,12 +17,10 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_IN_USE,
-    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
-    AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    DEVICE_STATE_ACTIVE, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-    WAVEFORMATEXTENSIBLE_0,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    DEVICE_STATE_ACTIVE, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient,
+    IMMDevice, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eCapture, eRender,
 };
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -28,23 +31,15 @@ use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW,
     WaitForSingleObject,
 };
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, Interface, w};
 
-use crate::{Capabilities, Error, Format, Request, SampleKind, Samples, period_of};
-
-/// The rates [`capabilities`] asks about.
-const RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
-
-/// The formats tried, best first: no conversion, then the widest integers.
-const KINDS: [SampleKind; 4] = [
-    SampleKind::F32,
-    SampleKind::I32 { valid_bits: 32 },
-    SampleKind::I32 { valid_bits: 24 },
-    SampleKind::I16,
-];
-
-/// What fills a period: the buffer, and how long the stream has run.
-type Render<'r> = dyn FnMut(Samples<'_>, Duration) + 'r;
+use crate::negotiate::{
+    Candidate, Failure, Header, RATES, candidates, code, error_for, layout, negotiate, no_buffer,
+    period_of, refuses_the_device, wanted_period,
+};
+use crate::packet::{Flags, Reader};
+use crate::period::{Period, Taken, Watch, drain};
+use crate::{Capabilities, Error, Format, Packet, Request, SampleKind, Samples};
 
 /// Where a stream's thread says whether the device started.
 type Ready = mpsc::SyncSender<Result<Format, Error>>;
@@ -128,19 +123,18 @@ fn os(error: windows::core::Error) -> Error {
 
 /// What a failed call means for the caller.
 fn classify(error: windows::core::Error) -> Error {
-    let code = error.code();
-    if code == AUDCLNT_E_DEVICE_INVALIDATED {
-        Error::DeviceLost
-    } else if code == AUDCLNT_E_DEVICE_IN_USE || code == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED {
-        Error::DeviceBusy(error.message().to_string())
-    } else if code == AUDCLNT_E_UNSUPPORTED_FORMAT {
-        Error::FormatNotSupported(error.message().to_string())
-    } else {
-        os(error)
+    error_for(error.code().0, &error.message().to_string())
+}
+
+fn failure(error: windows::core::Error) -> Failure {
+    Failure {
+        hresult: error.code().0,
+        message: error.message().to_string(),
     }
 }
 
-fn open_device(id: &str) -> Result<IMMDevice, Error> {
+/// The active device `id`; with `flow`, only if it carries audio that way.
+fn open_device(id: &str, flow: Option<EDataFlow>) -> Result<IMMDevice, Error> {
     // SAFETY: a plain COM object creation in this thread's apartment.
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(os)?;
@@ -153,6 +147,14 @@ fn open_device(id: &str) -> Result<IMMDevice, Error> {
     if state != DEVICE_STATE_ACTIVE {
         return Err(Error::DeviceNotFound(id.to_owned()));
     }
+    if let Some(flow) = flow {
+        let endpoint: IMMEndpoint = device.cast().map_err(os)?;
+        // SAFETY: the endpoint is the live device above.
+        if unsafe { endpoint.GetDataFlow() }.map_err(os)? != flow {
+            let wanted = if flow == eCapture { "input" } else { "output" };
+            return Err(Error::Unsupported(format!("{id} is not an {wanted}")));
+        }
+    }
     Ok(device)
 }
 
@@ -161,37 +163,34 @@ fn activate(device: &IMMDevice) -> Result<IAudioClient, Error> {
     unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }.map_err(classify)
 }
 
-/// The format `kind` stands for, at `sample_rate` with `channels`.
-fn wave_format(kind: SampleKind, sample_rate: u32, channels: u16) -> WAVEFORMATEXTENSIBLE {
-    let (container, valid, sub_format) = match kind {
-        SampleKind::F32 => (32, 32, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT),
-        SampleKind::I32 { valid_bits } => (32, valid_bits, KSDATAFORMAT_SUBTYPE_PCM),
-        SampleKind::I16 => (16, 16, KSDATAFORMAT_SUBTYPE_PCM),
-    };
-    let block_align = channels * (container / 8);
+/// The structure that stands for `candidate`, at `sample_rate` with
+/// `channels`.
+fn wave_format(candidate: Candidate, sample_rate: u32, channels: u16) -> WAVEFORMATEXTENSIBLE {
+    let layout = layout(candidate.kind, sample_rate, channels);
     let header = std::mem::size_of::<WAVEFORMATEX>();
     let extension = std::mem::size_of::<WAVEFORMATEXTENSIBLE>() - header;
+    let (tag, size) = match candidate.header {
+        Header::Extensible => (WAVE_FORMAT_EXTENSIBLE, extension as u16),
+        Header::Plain => (WAVE_FORMAT_PCM, 0),
+    };
     WAVEFORMATEXTENSIBLE {
         Format: WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+            wFormatTag: tag as u16,
             nChannels: channels,
             nSamplesPerSec: sample_rate,
-            nAvgBytesPerSec: sample_rate * u32::from(block_align),
-            nBlockAlign: block_align,
-            wBitsPerSample: container,
-            cbSize: extension as u16,
+            nAvgBytesPerSec: layout.bytes_per_second,
+            nBlockAlign: layout.block_align,
+            wBitsPerSample: layout.container_bits,
+            cbSize: size,
         },
         Samples: WAVEFORMATEXTENSIBLE_0 {
-            wValidBitsPerSample: valid,
+            wValidBitsPerSample: layout.valid_bits,
         },
-        // Front centre for one channel, front left and right for two, and
-        // straight through otherwise, as `cpal` does.
-        dwChannelMask: match channels {
-            1 => 0x4,
-            2 => 0x3,
-            _ => 0,
+        dwChannelMask: layout.channel_mask,
+        SubFormat: match candidate.kind {
+            SampleKind::F32 => KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+            SampleKind::I32 { .. } | SampleKind::I16 => KSDATAFORMAT_SUBTYPE_PCM,
         },
-        SubFormat: sub_format,
     }
 }
 
@@ -199,21 +198,33 @@ fn as_header(format: &WAVEFORMATEXTENSIBLE) -> *const WAVEFORMATEX {
     std::ptr::from_ref(format).cast()
 }
 
-/// The best format the device takes exclusively at this rate and channel
-/// count.
-fn pick_kind(client: &IAudioClient, sample_rate: u32, channels: u16) -> Option<SampleKind> {
-    KINDS.into_iter().find(|&kind| {
-        let format = wave_format(kind, sample_rate, channels);
+/// The first format the device says it takes exclusively at this rate and
+/// channel count, or the reason it refuses to be asked.
+fn first_supported(
+    client: &IAudioClient,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Option<SampleKind>, Error> {
+    for candidate in candidates(None) {
+        let format = wave_format(candidate, sample_rate, channels);
         // SAFETY: the format lives across the call, and exclusive mode takes
         // no closest-match pointer.
         let answer = unsafe {
             client.IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, as_header(&format), None)
         };
-        answer.is_ok() && answer.0 == 0
-    })
+        // Only `S_OK` is a yes: `S_FALSE` offers something else.
+        if answer.0 == 0 {
+            return Ok(Some(candidate.kind));
+        }
+        if refuses_the_device(answer.0) {
+            return Err(error_for(answer.0, &answer.message().to_string()));
+        }
+    }
+    Ok(None)
 }
 
-fn min_period(client: &IAudioClient) -> Result<(i64, i64), Error> {
+/// The device's default and shortest periods, in 100 ns units.
+fn periods(client: &IAudioClient) -> Result<(i64, i64), Error> {
     let (mut default, mut min) = (0i64, 0i64);
     // SAFETY: both pointers are to live locals.
     unsafe { client.GetDevicePeriod(Some(&mut default), Some(&mut min)) }.map_err(classify)?;
@@ -222,13 +233,15 @@ fn min_period(client: &IAudioClient) -> Result<(i64, i64), Error> {
 
 pub(crate) fn capabilities(id: &str, channels: u16) -> Result<Capabilities, Error> {
     let _apartment = Apartment::enter();
-    let device = open_device(id)?;
+    let device = open_device(id, None)?;
     let client = activate(&device)?;
-    let (default_period, min_period) = min_period(&client)?;
-    let sample_rates = RATES
-        .into_iter()
-        .filter(|&rate| pick_kind(&client, rate, channels).is_some())
-        .collect();
+    let (default_period, min_period) = periods(&client)?;
+    let mut sample_rates = Vec::new();
+    for rate in RATES {
+        if first_supported(&client, rate, channels)?.is_some() {
+            sample_rates.push(rate);
+        }
+    }
     Ok(Capabilities {
         sample_rates,
         min_period,
@@ -236,21 +249,13 @@ pub(crate) fn capabilities(id: &str, channels: u16) -> Result<Capabilities, Erro
     })
 }
 
-/// An initialised exclusive client and what it runs.
+/// An initialised exclusive client, the event it signals, and its format.
+/// The client is declared first, so it is released before the event is
+/// closed.
 struct Opened {
     client: IAudioClient,
-    render: IAudioRenderClient,
     event: Event,
     format: Format,
-}
-
-/// A device's PCM in a plain `WAVEFORMATEX`, with no extension: some
-/// drivers (Bluetooth ones among them) take 16-bit audio only so.
-fn plain(format: &WAVEFORMATEXTENSIBLE) -> WAVEFORMATEXTENSIBLE {
-    let mut plain = *format;
-    plain.Format.wFormatTag = WAVE_FORMAT_PCM as u16;
-    plain.Format.cbSize = 0;
-    plain
 }
 
 /// Initialises `client` exclusively with `format` on `period`; when the
@@ -280,7 +285,7 @@ fn initialise(
     };
     match attempt(&client, period) {
         Ok(()) => Ok((client, period)),
-        Err(error) if error.code() == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
+        Err(error) if error.code().0 == code::BUFFER_SIZE_NOT_ALIGNED => {
             // The driver says, in frames, the size it can align to, and the
             // client must be made again to be asked twice.
             // SAFETY: the client reports its aligned size after this failure.
@@ -295,47 +300,31 @@ fn initialise(
     }
 }
 
-fn open(id: &str, request: Request) -> Result<Opened, Error> {
+fn open(id: &str, request: Request, flow: EDataFlow) -> Result<Opened, Error> {
     let Request {
         sample_rate,
         channels,
         period_frames,
     } = request;
-    let device = open_device(id)?;
+    let device = open_device(id, Some(flow))?;
     let probe = activate(&device)?;
-    let (_, min) = min_period(&probe)?;
-    let wanted = period_frames.map_or(min, |frames| period_of(frames, sample_rate).max(min));
-    // The format the device says it takes goes first; drivers do not always
-    // keep their word, so every other one is tried too, and 16-bit audio in
-    // a plain header last.
-    let preferred = pick_kind(&probe, sample_rate, channels);
+    let (_, min) = periods(&probe)?;
+    let wanted = wanted_period(period_frames, sample_rate, min);
+    // What the device says it takes only orders the tries: whether it is
+    // taken, and why not, is what `Initialize` answers.
+    let preferred = first_supported(&probe, sample_rate, channels)
+        .ok()
+        .flatten();
     drop(probe);
-    let mut tries: Vec<(SampleKind, WAVEFORMATEXTENSIBLE)> = preferred
-        .into_iter()
-        .chain(KINDS.into_iter().filter(|&kind| Some(kind) != preferred))
-        .map(|kind| (kind, wave_format(kind, sample_rate, channels)))
-        .collect();
-    tries.push((
-        SampleKind::I16,
-        plain(&wave_format(SampleKind::I16, sample_rate, channels)),
-    ));
 
-    let mut taken = None;
-    for (kind, format) in &tries {
-        match initialise(&device, activate(&device)?, format, sample_rate, wanted) {
-            Ok((client, period)) => {
-                taken = Some((client, *kind, period));
-                break;
-            }
-            Err(error) if error.code() == AUDCLNT_E_UNSUPPORTED_FORMAT => {}
-            Err(error) => return Err(classify(error)),
-        }
-    }
-    let Some((client, kind, period)) = taken else {
-        return Err(Error::FormatNotSupported(format!(
-            "{sample_rate} Hz, {channels} channels"
-        )));
-    };
+    let what = format!("{sample_rate} Hz, {channels} channels");
+    let (candidate, (client, period)) = negotiate(&candidates(preferred), &what, |candidate| {
+        let format = wave_format(candidate, sample_rate, channels);
+        // SAFETY: `device` is live; no activation parameters.
+        let client =
+            unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }.map_err(failure)?;
+        initialise(&device, client, &format, sample_rate, wanted).map_err(failure)
+    })?;
 
     // SAFETY: the client is initialised.
     let frames = unsafe { client.GetBufferSize() }.map_err(classify)?;
@@ -343,19 +332,16 @@ fn open(id: &str, request: Request) -> Result<Opened, Error> {
     // SAFETY: the client is initialised for event callbacks and the handle
     // lives as long as the client does (`Opened` drops the client first).
     unsafe { client.SetEventHandle(event.0) }.map_err(classify)?;
-    // SAFETY: the client is initialised for rendering.
-    let render: IAudioRenderClient = unsafe { client.GetService() }.map_err(classify)?;
     // SAFETY: the client is initialised.
     let reported = unsafe { client.GetStreamLatency() }.unwrap_or(0);
     let latency = if reported > 0 { reported } else { period };
     Ok(Opened {
         client,
-        render,
         event,
         format: Format {
             sample_rate,
             channels,
-            kind,
+            kind: candidate.kind,
             period_frames: frames,
             latency: Duration::from_nanos(u64::try_from(latency).unwrap_or(0) * 100),
         },
@@ -380,37 +366,139 @@ unsafe fn silenced<'a, T: Copy + Default>(data: *mut u8, len: usize) -> Option<&
     Some(slice)
 }
 
-impl Opened {
+/// What a stream's thread does with its device: the direction's own part.
+trait Pump {
+    /// Before the device starts.
+    fn prime(&mut self, format: &Format) -> Result<(), Error> {
+        let _ = format;
+        Ok(())
+    }
+
+    /// Once for each of the driver's events, `time` after the start.
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error>;
+}
+
+/// An output's part: `render` fills the device's buffer.
+struct Player<R> {
+    service: IAudioRenderClient,
+    render: R,
+}
+
+impl<R: FnMut(Samples<'_>, Duration)> Player<R> {
     /// Takes the device's buffer, has `render` fill it, and hands it back.
-    /// With no `render`, plays a period of silence.
-    fn period(&self, render: Option<&mut Render<'_>>, time: Duration) -> Result<(), Error> {
-        let frames = self.format.period_frames;
+    /// With no `time`, plays a period of silence without calling `render`.
+    /// A period the driver has no buffer for is missed: there is nothing to
+    /// fill or hand back.
+    fn hand_over(&mut self, format: &Format, time: Option<Duration>) -> Result<Period, Error> {
+        let frames = format.period_frames;
         // SAFETY: in exclusive, event-driven mode the whole buffer is free
         // when the event fires, and before the stream starts.
-        let data = unsafe { self.render.GetBuffer(frames) }.map_err(classify)?;
-        let len = frames as usize * usize::from(self.format.channels);
+        let data = match unsafe { self.service.GetBuffer(frames) } {
+            Ok(data) => data,
+            Err(error) if no_buffer(error.code().0) => return Ok(Period::Missed),
+            Err(error) => return Err(classify(error)),
+        };
+        let len = frames as usize * usize::from(format.channels);
         let mut flags = 0;
-        match render {
+        match time {
             None => flags = AUDCLNT_BUFFERFLAGS_SILENT.0 as u32,
-            Some(render) => {
+            Some(time) => {
                 // SAFETY: `GetBuffer` returned `frames` frames of the format
                 // the client was initialised with, writable and ours until
                 // `ReleaseBuffer`.
                 let samples = unsafe {
-                    match self.format.kind {
+                    match format.kind {
                         SampleKind::F32 => silenced(data, len).map(Samples::F32),
                         SampleKind::I32 { .. } => silenced(data, len).map(Samples::I32),
                         SampleKind::I16 => silenced(data, len).map(Samples::I16),
                     }
                 };
                 match samples {
-                    Some(samples) => render(samples, time),
+                    Some(samples) => (self.render)(samples, time),
                     None => flags = AUDCLNT_BUFFERFLAGS_SILENT.0 as u32,
                 }
             }
         }
         // SAFETY: hands back exactly the frames taken.
-        unsafe { self.render.ReleaseBuffer(frames, flags) }.map_err(classify)
+        unsafe { self.service.ReleaseBuffer(frames, flags) }.map_err(classify)?;
+        Ok(Period::Served)
+    }
+}
+
+impl<R: FnMut(Samples<'_>, Duration)> Pump for Player<R> {
+    /// A period of silence is in the buffer before the device starts, as
+    /// exclusive mode asks.
+    fn prime(&mut self, format: &Format) -> Result<(), Error> {
+        match self.hand_over(format, None)? {
+            Period::Served | Period::Idle => Ok(()),
+            // Before the start there is no next pass to wait for.
+            Period::Missed => Err(error_for(code::BUFFER_ERROR, "no buffer to start with")),
+        }
+    }
+
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error> {
+        self.hand_over(format, Some(time))
+    }
+}
+
+/// An input's part: `capture` reads what the device recorded.
+struct Recorder<C> {
+    service: IAudioCaptureClient,
+    reader: Reader,
+    capture: C,
+}
+
+impl<C: FnMut(Packet<'_>, Duration)> Recorder<C> {
+    /// Takes the next packet recorded, has `capture` read it, and hands it
+    /// back.
+    fn take(&mut self, format: &Format, time: Duration) -> Result<Taken, Error> {
+        let mut data = std::ptr::null_mut();
+        let (mut frames, mut flags) = (0u32, 0u32);
+        // SAFETY: the three pointers are to live locals; the packet's
+        // positions are not asked for.
+        let got = unsafe {
+            self.service
+                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+        };
+        match got {
+            Ok(()) => {}
+            Err(error) if no_buffer(error.code().0) => return Ok(Taken::NoBuffer),
+            Err(error) => return Err(classify(error)),
+        }
+        // `AUDCLNT_S_BUFFER_EMPTY`, a success: no packet is held, so there
+        // is none to hand back.
+        if frames == 0 {
+            return Ok(Taken::Empty);
+        }
+        let len = frames as usize * usize::from(format.channels);
+        let capture = &mut self.capture;
+        // SAFETY: `GetBuffer` returned `frames` frames of the format the
+        // client was initialised with, which is the reader's, readable and
+        // unchanged until `ReleaseBuffer`.
+        unsafe {
+            self.reader
+                .read(data, len, Flags::of(flags), &mut |packet| {
+                    capture(packet, time);
+                });
+        }
+        // SAFETY: hands back exactly the frames taken.
+        unsafe { self.service.ReleaseBuffer(frames) }.map_err(classify)?;
+        Ok(Taken::Packet)
+    }
+}
+
+impl<C: FnMut(Packet<'_>, Duration)> Pump for Recorder<C> {
+    /// Reads every packet there is: usually one, but an event can stand for
+    /// more. A period the driver has no buffer for is handed to `capture` as
+    /// silence after a loss, so that what follows it keeps its pace.
+    /// (`GetNextPacketSize` is shared mode's.)
+    fn period(&mut self, format: &Format, time: Duration) -> Result<Period, Error> {
+        let period = drain(|| self.take(format, time))?;
+        if period == Period::Missed {
+            let capture = &mut self.capture;
+            self.reader.missed(&mut |packet| capture(packet, time));
+        }
+        Ok(period)
     }
 }
 
@@ -439,12 +527,54 @@ where
     R: FnMut(Samples<'_>, Duration) + Send + 'static,
     E: FnMut(Error) + Send + 'static,
 {
+    spawn("manguebyte-wasapi", on_error, move || {
+        let opened = open(&id, request, eRender)?;
+        // SAFETY: the client is initialised for rendering.
+        let service: IAudioRenderClient =
+            unsafe { opened.client.GetService() }.map_err(classify)?;
+        Ok((opened, Player { service, render }))
+    })
+}
+
+pub(crate) fn start_capture<C, E>(
+    id: String,
+    request: Request,
+    capture: C,
+    on_error: E,
+) -> Result<(Running, Format), Error>
+where
+    C: FnMut(Packet<'_>, Duration) + Send + 'static,
+    E: FnMut(Error) + Send + 'static,
+{
+    spawn("manguebyte-wasapi-capture", on_error, move || {
+        let opened = open(&id, request, eCapture)?;
+        // SAFETY: the client is initialised for capturing.
+        let service: IAudioCaptureClient =
+            unsafe { opened.client.GetService() }.map_err(classify)?;
+        let period = opened.format.period_frames as usize * usize::from(opened.format.channels);
+        let recorder = Recorder {
+            service,
+            reader: Reader::new(opened.format.kind, period),
+            capture,
+        };
+        Ok((opened, recorder))
+    })
+}
+
+/// Starts a stream's thread, which makes its device with `prepare` and runs
+/// it, and waits until it runs or fails.
+fn spawn<P, S, E>(name: &str, on_error: E, prepare: S) -> Result<(Running, Format), Error>
+where
+    P: Pump,
+    S: FnOnce() -> Result<(Opened, P), Error> + Send + 'static,
+    E: FnMut(Error) + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let (ready, started) = mpsc::sync_channel(1);
     let stopping = Arc::clone(&stop);
     let thread = std::thread::Builder::new()
-        .name(String::from("manguebyte-wasapi"))
-        .spawn(move || run(&id, request, render, on_error, &stopping, &ready))
+        .name(String::from(name))
+        .spawn(move || run(prepare, on_error, &stopping, &ready))
         .map_err(|error| Error::Os(error.to_string()))?;
     match started.recv() {
         Ok(Ok(format)) => Ok((
@@ -467,31 +597,24 @@ where
     }
 }
 
-fn run<R, E>(
-    id: &str,
-    request: Request,
-    mut render: R,
-    mut on_error: E,
-    stop: &AtomicBool,
-    ready: &Ready,
-) where
-    R: FnMut(Samples<'_>, Duration),
+fn run<P, S, E>(prepare: S, mut on_error: E, stop: &AtomicBool, ready: &Ready)
+where
+    P: Pump,
+    S: FnOnce() -> Result<(Opened, P), Error>,
     E: FnMut(Error),
 {
     let _apartment = Apartment::enter();
-    let opened = match open(id, request) {
-        Ok(opened) => opened,
+    let (opened, mut pump) = match prepare() {
+        Ok(prepared) => prepared,
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
         }
     };
     let _priority = ProAudio::join();
-    // A period of silence is in the buffer before the device starts, as
-    // exclusive mode asks.
     // SAFETY: the client is initialised and not yet started.
-    let begun = opened
-        .period(None, Duration::ZERO)
+    let begun = pump
+        .prime(&opened.format)
         .and_then(|()| unsafe { opened.client.Start() }.map_err(classify));
     if let Err(error) = begun {
         let _ = ready.send(Err(error));
@@ -499,6 +622,7 @@ fn run<R, E>(
     }
     let _ = ready.send(Ok(opened.format));
 
+    let mut watch = Watch::new(opened.format.sample_rate, opened.format.period_frames);
     let origin = Instant::now();
     loop {
         // SAFETY: the event handle is live for as long as `opened`.
@@ -510,11 +634,77 @@ fn run<R, E>(
             on_error(Error::DeviceLost);
             break;
         }
-        if let Err(error) = opened.period(Some(&mut render), origin.elapsed()) {
+        if let Err(error) = watch.run(|| pump.period(&opened.format, origin.elapsed())) {
             on_error(error);
             break;
         }
     }
     // SAFETY: the client is initialised; stopping a stopped one is harmless.
     let _ = unsafe { opened.client.Stop() };
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::E_ACCESSDENIED;
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_E_BUFFER_ERROR,
+        AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_DEVICE_INVALIDATED,
+        AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_SERVICE_NOT_RUNNING,
+        AUDCLNT_E_UNSUPPORTED_FORMAT,
+    };
+
+    use super::*;
+    use crate::packet::flag;
+
+    #[test]
+    fn the_codes_told_apart_are_the_systems() {
+        for (ours, theirs) in [
+            (code::DEVICE_INVALIDATED, AUDCLNT_E_DEVICE_INVALIDATED),
+            (code::UNSUPPORTED_FORMAT, AUDCLNT_E_UNSUPPORTED_FORMAT),
+            (code::DEVICE_IN_USE, AUDCLNT_E_DEVICE_IN_USE),
+            (
+                code::EXCLUSIVE_MODE_NOT_ALLOWED,
+                AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
+            ),
+            (code::SERVICE_NOT_RUNNING, AUDCLNT_E_SERVICE_NOT_RUNNING),
+            (
+                code::BUFFER_SIZE_NOT_ALIGNED,
+                AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED,
+            ),
+            (code::ACCESS_DENIED, E_ACCESSDENIED),
+            (code::BUFFER_ERROR, AUDCLNT_E_BUFFER_ERROR),
+        ] {
+            assert_eq!(ours, theirs.0);
+        }
+    }
+
+    #[test]
+    fn the_capture_flags_are_the_systems() {
+        for (ours, theirs) in [
+            (
+                flag::DATA_DISCONTINUITY,
+                AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
+            ),
+            (flag::SILENT, AUDCLNT_BUFFERFLAGS_SILENT),
+        ] {
+            assert_eq!(ours, theirs.0 as u32);
+        }
+    }
+
+    #[test]
+    fn a_plain_header_has_no_extension() {
+        let [.., plain] = candidates(None)[..] else {
+            panic!("there are formats to try");
+        };
+        let format = wave_format(plain, 48_000, 2);
+        let (tag, size, align) = (
+            format.Format.wFormatTag,
+            format.Format.cbSize,
+            format.Format.nBlockAlign,
+        );
+        assert_eq!((u32::from(tag), size, align), (WAVE_FORMAT_PCM, 0, 4));
+        let format = wave_format(candidates(None)[0], 48_000, 2);
+        let (tag, size) = (format.Format.wFormatTag, format.Format.cbSize);
+        assert_eq!((u32::from(tag), size), (WAVE_FORMAT_EXTENSIBLE, 22));
+    }
 }

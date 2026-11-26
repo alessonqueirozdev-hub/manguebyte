@@ -90,7 +90,8 @@ mod device;
 mod drift;
 mod duplex;
 mod error;
-#[cfg(windows)]
+// Windows runs it; every system tests it, with stand-ins for the devices.
+#[cfg(any(windows, test))]
 mod exclusive;
 mod external;
 mod host;
@@ -114,7 +115,10 @@ pub use external::{
     AudioBackend, BackendCallback, BackendEndpoint, BackendFormat, BackendRequest, BackendStream,
     StreamStatus,
 };
-pub use host::{AudioHost, HostInfo, WASAPI_EXCLUSIVE, audio_hosts};
+pub use host::{
+    AudioHost, ExclusiveChannels, ExclusiveModes, ExclusiveRefusal, ExclusiveSupport, HostInfo,
+    WASAPI_EXCLUSIVE, audio_hosts,
+};
 pub use hotplug::{
     DEFAULT_POLL_INTERVAL, DeviceEvent, DeviceSnapshot, DeviceSummary, DeviceWatcher, LossCause,
     MIN_POLL_INTERVAL, STALL_TIMEOUT,
