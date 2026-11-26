@@ -7,6 +7,45 @@ break the API.
 
 ## Unreleased
 
+### Core
+
+- `simd`: a SIMD register type for processors to vectorise their own loops
+  with (ADR 0029). A loop is a `Kernel`, generic over the instruction set
+  `Isa`; `simd::dispatch` and `Backend::dispatch` run it compiled for
+  `Backend`'s SSE2, AVX, AVX2, NEON, WebAssembly SIMD or scalar code,
+  without `unsafe` in the caller. A `Register` is 256 bits on every backend
+  (8 `f32` or 4 `f64`): the four operations, `add_product` (a product then
+  a sum, never fused), `sqrt`, `abs`, negation, `min`, `max` and `clamp`
+  (defined as `a < b ? a : b`, so a NaN clamps to the low bound),
+  comparisons giving a `Mask` that combines and selects, unaligned,
+  `Aligned` and partial loads and stores, `splat`, and reductions across the
+  lanes in a fixed order. Nothing allocates. The tests compare every
+  operation, on every backend of the machine, with plain Rust bit for bit
+  (any NaN standing for any other where arithmetic made it), over every pair
+  of a set of special values and thousands of random registers, and a
+  recursive loop likewise; CI runs them on x86-64 and AArch64, and in
+  WebAssembly with `simd128` through the `simd_register_wasm` example.
+  While subnormals are flushed (`NoDenormals`), `min`, `max` and what is
+  built on them may give a subnormal operand back as zero on some backends,
+  which the tests allow for there and nowhere else. `run`
+  must be marked `#[inline(always)]`, or on AVX it may run many times
+  slower.
+- `lookup`: lookup tables, built off the audio thread and read without
+  allocating. `LookupTable` reads at a fractional index, `LookupTransform`
+  a function over a range of inputs, linearly or with a four-point Lagrange
+  cubic, sample by sample or a block in place; `SineTable` reads a period at
+  any phase. `LookupTransform::tanh` and `exp` are ready made, from the
+  crate's own functions. Every input reads a finite value (outside the
+  range, an end; NaN, the start), and the same bits on every system, which
+  a fingerprint checks. Largest errors measured by the tests: the sine with
+  2 048 points within `1.3e-6` linearly, and within `2.1e-7` (`f32`) or
+  `2.1e-12` (`f64`) with the cubic; `tanh` with 4 096 points within
+  `3.4e-6` linearly, and within `2.5e-7` (`f32`) or `1.2e-10` (`f64`) with
+  the cubic. The documented bounds
+  (`h^2 / 8`, `3 h^4 / 128` and, at a table's ends, `h^4 / 24` times the
+  derivative) are checked on a sine at four spacings.
+- `manguebyte` re-exports both.
+
 ### Devices
 
 - WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`

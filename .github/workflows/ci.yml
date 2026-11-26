@@ -366,6 +366,16 @@ jobs:
           cargo build -p manguebyte-core -p manguebyte-dsp -p manguebyte-midi \
             -p manguebyte-formats --target wasm32-unknown-unknown
           cargo build -p manguebyte --no-default-features --target wasm32-unknown-unknown
+      # The SIMD registers, operation by operation, and the lookup tables, in
+      # a module built with SIMD, against the same definitions and the same
+      # fingerprint as on the other processors.
+      - run: |
+          cargo build -p manguebyte-core --release --example simd_register_wasm \
+            --target wasm32-unknown-unknown
+          node crates/manguebyte-core/examples/simd_register_wasm.mjs \
+            target/wasm32-unknown-unknown/release/examples/simd_register_wasm.wasm
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+simd128
       # The sampler's module plays notes in Node.js and checks their pitch;
       # it fails if the module imports anything. A debug build, because its
       # hostile-file check relies on overflow traps.

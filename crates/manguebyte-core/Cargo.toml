@@ -11,5 +11,11 @@ categories.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[example]]
+# Checks the SIMD registers and the lookup tables in WebAssembly: built as a
+# library, it exports functions a JavaScript engine can call.
+name = "simd_register_wasm"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

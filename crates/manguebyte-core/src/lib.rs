@@ -10,6 +10,9 @@
 //! - [`spsc`]: a wait-free single-producer single-consumer queue.
 //! - [`log`]: a log that any thread, the audio thread included, can write to.
 //! - [`decibels`]: gain conversions.
+//! - [`lookup`]: functions worked out once and read back with
+//!   interpolation, with ready-made sine, hyperbolic tangent and
+//!   exponential tables.
 //! - [`governor`]: measures each block against its deadline and gives an
 //!   instrument a budget to spend, so that it renders less rather than
 //!   glitch.
@@ -22,6 +25,8 @@
 //!   plugin's own library.
 //! - [`source`]: sources of audio that are pulled a block at a time, and
 //!   audio in memory as one.
+//! - [`simd`]: a SIMD register type for processors to vectorise their own
+//!   loops with, the same results on every backend.
 //! - [`vector`]: operations on slices of samples (gain, mixing, ramps,
 //!   peaks, sums, dot products, interleaving, integer conversions) that use
 //!   the processor's vector instructions, chosen at run time.
@@ -32,10 +37,12 @@ pub mod decibels;
 mod denormal;
 pub mod governor;
 pub mod log;
+pub mod lookup;
 pub mod module;
 mod param_id;
 pub mod pool;
 mod sample;
+pub mod simd;
 mod smoothing;
 pub mod source;
 pub mod spsc;
