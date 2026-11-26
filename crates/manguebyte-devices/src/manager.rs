@@ -462,7 +462,7 @@ impl DeviceManager {
         Self::with_backend(Arc::new(crate::external::External::new(Arc::new(backend))))
     }
 
-    fn with_backend(backend: Arc<dyn Backend>) -> Self {
+    pub(crate) fn with_backend(backend: Arc<dyn Backend>) -> Self {
         let watched: WatchSlot = Arc::new(Mutex::new(None));
         #[cfg(feature = "midi")]
         let (midi_shared, midi_receiver) = merged_receiver();

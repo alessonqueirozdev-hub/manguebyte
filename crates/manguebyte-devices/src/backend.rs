@@ -233,7 +233,7 @@ impl Backend for SystemBackend {
             .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))?;
         #[cfg(windows)]
         if host.is_exclusive() {
-            return Ok(crate::exclusive::describe(info));
+            return Ok(crate::exclusive::describe(&crate::exclusive::System, info));
         }
         Ok(info)
     }
@@ -254,7 +254,7 @@ impl Backend for SystemBackend {
     ) -> Result<Started, DeviceError> {
         #[cfg(windows)]
         if self.host().is_exclusive() {
-            return crate::exclusive::start(request, make, on_error);
+            return crate::exclusive::start(&crate::exclusive::System, request, make, on_error);
         }
         let report = move |error| on_error(error);
         let block = request.duplex.max_block_size.max(1);

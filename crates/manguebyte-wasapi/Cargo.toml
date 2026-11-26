@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-wasapi"
-description = "WASAPI exclusive-mode output for manguebyte-devices: the device to one program, without the Windows mixer and its period."
+description = "WASAPI exclusive-mode output and input for manguebyte-devices: the device to one program, without the Windows mixer and its period."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

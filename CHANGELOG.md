@@ -11,15 +11,27 @@ break the API.
 
 - WASAPI's exclusive mode, as a host of its own: `"WASAPI exclusive"`
   (`manguebyte_devices::WASAPI_EXCLUSIVE`) follows WASAPI in
-  `audio_hosts` on Windows, with the same output devices by the same
+  `audio_hosts` on Windows, with the same devices by the same
   identifiers, so a saved setup moves between the two by its `host` line.
-  A device plays for this program alone, without the Windows mixer, on a
+  A device serves this program alone, without the Windows mixer, on a
   period down to its shortest (3 ms on the development machine's Realtek
   output, where shared mode adds about 10 ms of its own); the buffer sizes
-  offered start there. Output only. Drivers that refuse it, Windows'
-  Bluetooth audio among them, are reported, not worked around.
+  offered start there. Drivers that refuse it, Windows' Bluetooth audio
+  among them, are reported, not worked around.
+- Input and duplex in that host: an input alone, or an input and an output
+  on one callback, each device on its own stream and thread, joined by the
+  bridge that `DuplexStream` uses, which follows the drift between the two
+  clocks. An input that will not open leaves the output running
+  (`Fallback::InputDropped`). The host describes a device by the channel
+  counts and rates it takes exclusively, and a channel count the settings
+  do not name is one it takes. `AudioHost::exclusive_support` lists each
+  device with what it takes, or why it cannot be held (`ExclusiveRefusal`).
+  The callback is told no latencies. Tested in CI with stand-ins for the
+  devices; capture and duplex have not yet run on a real device
+  (TECH_DEBT item 123).
 - `manguebyte-wasapi`, a new crate: the COM calls behind that host, which
-  `manguebyte-devices` cannot make since it forbids `unsafe`.
+  `manguebyte-devices` cannot make since it forbids `unsafe`. `start` plays
+  an output and `start_capture` records an input, once a period.
 
 ## [0.2.0] - 2026-11-12
 

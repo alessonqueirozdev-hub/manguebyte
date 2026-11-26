@@ -37,6 +37,11 @@ midir = { version = "0.11", optional = true }
 # system libraries at run time, so it adds nothing to link.
 manguebyte-ump-io = { workspace = true, optional = true }
 
+# The exclusive host's own code is tested on every system, with stand-ins
+# for the devices, in this crate's types.
+[dev-dependencies]
+manguebyte-wasapi.workspace = true
+
 # The UMP loopback test receives through a virtual destination of its own
 # in the MIDI 2.0 protocol. `coremidi` (MIT) is already in the tree, through
 # `midir`.
